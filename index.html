@@ -4,176 +4,113 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Cresamor Film Room</title>
-
-    <link rel="stylesheet" href="index.css" />
-
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Caesar+Dressing&family=Inter:wght@400;500;600;700;800&display=swap"
-      rel="stylesheet"
-    />
+    <link rel="stylesheet" href="./index.css" />
   </head>
-
   <body>
-    <div id="app">
-      <header class="topbar">
-        <div class="topbar-inner">
-          <div class="brand-wrap">
-            <h1 class="brand">Cresamor</h1>
-            <p class="subtitle">Film Room • Your Film, Your Way</p>
+    <header>
+      <div id="topbar">
+        <h1>Cresamor Film Room</h1>
+        <div id="user-badge">
+          Logged in as: <span id="current-role-label">Not Logged In</span>
+        </div>
+      </div>
+    </header>
+
+    <main>
+      <section id="login-screen">
+        <div class="auth-card">
+          <h2>Login to Cresamor</h2>
+
+          <input type="email" id="email-input" placeholder="Email" />
+          <input type="password" id="password-input" placeholder="Password" />
+
+          <div id="login-buttons">
+            <button id="login-coach-btn">Login as Coach</button>
+            <button id="login-athlete-btn">Login as Athlete / Parent</button>
           </div>
         </div>
-      </header>
+      </section>
 
-      <main class="film-room">
-        <section class="main-column">
-          <section class="video-section">
-            <div class="video-toolbar">
-              <div class="video-toolbar-copy">
-                <h2>Film Breakdown</h2>
-                <p>Upload film, tag highlights, and review the work.</p>
-              </div>
-
-              <div class="upload-controls">
-                <label for="video-upload" class="upload-label">Upload Film</label>
-                <input id="video-upload" type="file" accept="video/*" />
-                <p id="video-file-name" class="video-file-name">Sample film loaded</p>
-              </div>
+      <section id="app-shell" class="hidden">
+        <section id="film-room">
+          <div id="video-section">
+            <div id="video-wrapper">
+              <video id="film-player" controls>
+                <source src="" type="video/mp4" />
+                Your browser does not support the video tag.
+              </video>
+              <canvas id="draw-canvas"></canvas>
             </div>
 
-            <div class="video-wrapper" id="video-wrapper">
-              <video
-                id="film-player"
-                class="film-player"
-                controls
-                src=""
-              ></video>
-              
-
-              <div id="highlight-star" class="highlight-star hidden">★</div>
-
-              <div id="fullscreen-overlay" class="fullscreen-overlay hidden-overlay">
-                <div class="fullscreen-controls-top">
-                  <div class="overlay-group overlay-highlight-buttons">
-                    <button id="fs-highlight-start-btn">Highlight Start</button>
-                    <button id="fs-highlight-end-btn">Highlight End</button>
-                    <button id="fs-save-highlight-btn">Save Highlight</button>
-                  </div>
-                </div>
-
-                <div class="fullscreen-controls-bottom">
-                  <div class="overlay-group overlay-playback-buttons">
-                    <button id="fs-play-btn">Play</button>
-                    <button id="fs-pause-btn">Pause</button>
-                    <button id="fs-backward-btn">-5 sec</button>
-                    <button id="fs-forward-btn">+5 sec</button>
-                    <button id="fs-slower-btn">Slower</button>
-                    <button id="fs-faster-btn">Faster</button>
-                    <button id="fs-frame-back-btn">◀ Frame</button>
-                    <button id="fs-frame-forward-btn">Frame ▶</button>
-                    <button id="fs-fullscreen-btn">Exit Fullscreen</button>
-                  </div>
-                </div>
-              </div>
+            <div id="upload-section" class="coach-only">
+              <label for="video-upload">Upload Film:</label>
+              <input type="file" id="video-upload" accept="video/*" />
             </div>
 
-            <div class="timeline-wrapper">
-              <div id="timeline-bar" class="timeline-bar">
-                <div id="timeline-progress" class="timeline-progress"></div>
-                <div id="timeline-saved-highlights" class="timeline-saved-highlights"></div>
-                <div id="timeline-highlight" class="timeline-highlight"></div>
-              </div>
-              <div class="timeline-labels">
-                <span>Start</span>
-                <span>Click timeline to scrub</span>
-                <span>End</span>
-              </div>
+            <div id="playback-controls">
+              <button id="play-btn">Play</button>
+              <button id="pause-btn">Pause</button>
+              <button id="backward-btn">-5s</button>
+              <button id="forward-btn">+5s</button>
+              <button id="slower-btn">Slower</button>
+              <button id="faster-btn">Faster</button>
+              <button id="reset-speed-btn">1x</button>
+              <button id="frame-back-btn">Frame -</button>
+              <button id="frame-forward-btn">Frame +</button>
+              <button id="fullscreen-btn">Fullscreen</button>
+              <span id="speed-display">1x</span>
             </div>
-          </section>
 
-          <section class="panel highlight-panel">
-            <h2>Create Highlight</h2>
-
-            <div class="control-group">
-              <label for="highlight-title-input">Highlight Title</label>
+            <div id="highlight-tools">
               <input
                 type="text"
                 id="highlight-title-input"
-                placeholder="Example: Great block, TD run, Defensive stop"
-                 />
-            </div>
-
-            <div class="control-group highlight-buttons">
-              <button id="highlight-start-btn">Mark Highlight Start</button>
-              <button id="highlight-end-btn">Mark Highlight End</button>
-              <button id="save-highlight-btn">Save Highlight</button>
-            </div>
-
-            <div class="list-box">
-              <h3>Saved Highlights</h3>
-              <ul id="highlight-list"></ul>
-            </div>
-          </section>
-
-          <section class="panel notes-panel">
-            <h2>Coach Notes</h2>
-
-            <div class="control-group">
-              <label for="note-input">Add Note</label>
-              <input
-                type="text"
-                id="note-input"
-                placeholder="Type a note about this moment"
+                placeholder="Highlight title"
               />
-              <button id="save-note-btn">Save Note</button>
+              <button id="highlight-start-btn">Start Clip</button>
+              <button id="highlight-end-btn">End Clip</button>
+              <button id="save-highlight-btn">Save Highlight</button>
+              <button id="snapshot-btn">📸 Snapshot</button>
             </div>
 
-            <div class="list-box">
-              <h3>Saved Notes</h3>
-              <ul id="notes-list"></ul>
+            <div id="coach-tools" class="coach-only">
+              <h2>Coach Tools</h2>
+
+              <div id="draw-tools">
+                <button id="draw-toggle-btn">Enable Draw</button>
+                <button id="draw-line-btn">Line</button>
+                <button id="draw-circle-btn">Circle</button>
+                <button id="clear-drawings-btn">Clear Drawings</button>
+              </div>
+
+              <div id="notes-panel">
+                <input type="text" id="note-input" placeholder="Coach note" />
+                <button id="save-note-btn">Save Note</button>
+                <ul id="notes-list"></ul>
+              </div>
             </div>
-          </section>
+          </div>
+
+          <aside id="side-panel">
+            <section>
+              <h2>Current Video Highlights</h2>
+              <ul id="highlights-list"></ul>
+            </section>
+
+            <section>
+              <h2>My Highlights</h2>
+              <ul id="my-highlights-list"></ul>
+            </section>
+
+            <section>
+              <h2>My Snapshots</h2>
+              <ul id="snapshots-list"></ul>
+            </section>
+          </aside>
         </section>
+      </section>
+    </main>
 
-        <aside class="side-column">
-          <section class="panel playback-panel">
-            <h2>Playback Controls</h2>
-
-            <div class="control-group playback-buttons">
-              <button id="play-btn">Play</button>
-              <button id="pause-btn">Pause</button>
-            </div>
-
-            <div class="control-group playback-buttons">
-              <button id="backward-btn">-5 sec</button>
-              <button id="forward-btn">+5 sec</button>
-            </div>
-
-            <div class="control-group playback-buttons">
-              <button id="slower-btn">Slower</button>
-              <button id="faster-btn">Faster</button>
-              <button id="reset-speed-btn">1x Speed</button>
-            </div>
-
-            <div class="control-group playback-buttons">
-              <button id="frame-back-btn">◀ Frame</button>
-              <button id="frame-forward-btn">Frame ▶</button>
-            </div>
-
-            <div class="control-group playback-buttons">
-              <button id="fullscreen-btn">Fullscreen</button>
-            </div>
-
-            <div class="list-box">
-              <h3>Current Speed</h3>
-              <p id="speed-display" class="speed-display">1x</p>
-            </div>
-          </section>
-        </aside>
-      </main>
-    </div>
-
-    <script src="app.js"></script>
+    <script src="./app.js"></script>
   </body>
 </html>
