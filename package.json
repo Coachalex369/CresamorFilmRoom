@@ -2,10 +2,10 @@
   "name": "cresamorfilmroom",
   "version": "1.0.0",
   "description": "Cresamor Film Room MVP",
-  "main": "server.js",
+  "main": "server/server.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "nodemon server.js"
+    "start": "node server/server.js",
+    "dev": "nodemon server/server.js"
   },
   "repository": {
     "type": "git",
@@ -26,6 +26,7 @@
     "express": "^5.2.1",
     "jsonwebtoken": "^9.0.3",
     "morgan": "^1.10.1",
+    "multer": "^2.1.1",
     "pg": "^8.13.1"
   },
   "devDependencies": {

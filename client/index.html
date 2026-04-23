@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Cresamor Film Room</title>
+    <link rel="stylesheet" href="./index.css" />
+  </head>
+
+  <body>
+    <header>
+      <div id="topbar">
+        <h1>Cresamor Film Room</h1>
+
+        <div id="user-badge">
+          Logged in as:
+          <span id="current-role-label">Not Logged In</span>
+        </div>
+
+        <button id="logout-btn" class="hidden">Logout</button>
+      </div>
+    </header>
+
+    <main>
+      <section id="login-screen">
+        <div class="auth-card">
+          <h2>Login to Cresamor</h2>
+
+          <input type="email" id="email-input" placeholder="Email" />
+          <input type="password" id="password-input" placeholder="Password" />
+
+          <div id="login-buttons">
+            <button id="login-coach-btn">Login as Coach</button>
+            <button id="login-athlete-btn">Login as Athlete</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="app-shell" class="hidden">
+        <section id="film-room">
+          <div id="video-section">
+            <div id="video-wrapper">
+              <video id="film-player" controls>
+                <source src="" type="video/mp4" />
+                Your browser does not support the video tag.
+              </video>
+
+              <canvas id="draw-canvas"></canvas>
+            </div>
+
+            <div id="upload-section" class="coach-only">
+              <label for="video-upload">Upload Film:</label>
+              <input type="file" id="video-upload" accept="video/*" />
+            </div>
+
+            <div id="playback-controls">
+              <button id="play-btn">Play</button>
+              <button id="pause-btn">Pause</button>
+              <button id="backward-btn">-5s</button>
+              <button id="forward-btn">+5s</button>
+              <button id="slower-btn">Slower</button>
+              <button id="faster-btn">Faster</button>
+              <button id="reset-speed-btn">1x</button>
+              <button id="frame-back-btn">Frame -</button>
+              <button id="frame-forward-btn">Frame +</button>
+              <button id="fullscreen-btn">Fullscreen</button>
+              <span id="speed-display">1x</span>
+            </div>
+
+            <div id="highlight-tools">
+              <input
+                type="text"
+                id="highlight-title-input"
+                placeholder="Highlight title"
+              />
+              <button id="highlight-start-btn">Start Clip</button>
+              <button id="highlight-end-btn">End Clip</button>
+              <button id="save-highlight-btn">Save Highlight</button>
+              <button id="snapshot-btn">📸 Snapshot</button>
+            </div>
+
+            <div id="coach-tools" class="coach-only">
+              <h2>Coach Tools</h2>
+
+              <div id="draw-tools">
+                <button id="draw-toggle-btn">Enable Draw</button>
+                <button id="draw-line-btn">Line</button>
+                <button id="draw-circle-btn">Circle</button>
+                <button id="clear-drawings-btn">Clear Drawings</button>
+              </div>
+
+              <div id="notes-panel">
+                <input
+                  type="text"
+                  id="note-input"
+                  placeholder="Coach note"
+                />
+                <button id="save-note-btn">Save Note</button>
+                <ul id="notes-list"></ul>
+              </div>
+            </div>
+          </div>
+
+          <aside id="side-panel">
+            <section>
+              <h2>Videos</h2>
+              <ul id="video-list"></ul>
+            </section>
+
+            <section>
+              <h2>Current Video Highlights</h2>
+              <ul id="highlights-list"></ul>
+            </section>
+
+            <section>
+              <h2>My Highlights</h2>
+              <ul id="my-highlights-list"></ul>
+            </section>
+
+            <section>
+              <h2>My Snapshots</h2>
+              <ul id="snapshots-list"></ul>
+            </section>
+          </aside>
+        </section>
+      </section>
+    </main>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
