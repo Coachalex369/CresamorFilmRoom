@@ -471,3 +471,8 @@ li {
 #video-section:-webkit-full-screen #notes-panel {
   display: none;
 }
+
+#draw-tools button.active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}

@@ -18,6 +18,7 @@ const drawCanvas = document.querySelector("#draw-canvas");
 const drawContext = drawCanvas.getContext("2d");
 
 const drawToggleBtn = document.querySelector("#draw-toggle-btn");
+const drawFreehandBtn = document.querySelector("#draw-freehand-btn");
 const drawLineBtn = document.querySelector("#draw-line-btn");
 const drawCircleBtn = document.querySelector("#draw-circle-btn");
 const clearDrawingsBtn = document.querySelector("#clear-drawings-btn");
@@ -571,14 +572,19 @@ function drawCircle(fromPoint, toPoint) {
 function setDrawingMode(mode) {
   drawingMode = mode;
 
-  drawLineBtn.classList.remove("active");
-  drawCircleBtn.classList.remove("active");
+  if (drawFreehandBtn) drawFreehandBtn.classList.remove("active");
+  if (drawLineBtn) drawLineBtn.classList.remove("active");
+  if (drawCircleBtn) drawCircleBtn.classList.remove("active");
 
-  if (mode === "line") {
+  if (mode === "freehand" && drawFreehandBtn) {
+    drawFreehandBtn.classList.add("active");
+  }
+
+  if (mode === "line" && drawLineBtn) {
     drawLineBtn.classList.add("active");
   }
 
-  if (mode === "circle") {
+  if (mode === "circle" && drawCircleBtn) {
     drawCircleBtn.classList.add("active");
   }
 }
@@ -593,6 +599,7 @@ function setDrawingEnabled(enabled) {
     drawCanvas.style.touchAction = "none";
     drawToggleBtn.textContent = "Disable Draw";
     drawToggleBtn.classList.add("active");
+    setDrawingMode(drawingMode);
   } else {
     isDrawing = false;
     drawCanvas.style.pointerEvents = "none";
@@ -776,6 +783,12 @@ if (drawToggleBtn) {
   });
 }
 
+if (drawFreehandBtn) {
+  drawFreehandBtn.addEventListener("click", () => {
+    setDrawingMode("freehand");
+  });
+}
+
 if (drawLineBtn) {
   drawLineBtn.addEventListener("click", () => {
     setDrawingMode("line");
@@ -905,3 +918,4 @@ document.addEventListener("fullscreenchange", () => {
 updateSpeedDisplay();
 restoreSession();
 resizeDrawCanvas();
+setDrawingMode("freehand");
