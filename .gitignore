@@ -1,0 +1,12 @@
+# dependencies
+node_modules/
+
+# uploads (videos)
+uploads/
+
+# env
+.env
+
+# OS junk
+.DS_Store
+Thumbs.db

@@ -12,7 +12,16 @@ const currentRoleLabel = document.querySelector("#current-role-label");
 const coachOnlyElements = document.querySelectorAll(".coach-only");
 
 const videoSection = document.querySelector("#video-section");
+const videoWrapper = document.querySelector("#video-wrapper");
 const filmPlayer = document.querySelector("#film-player");
+const drawCanvas = document.querySelector("#draw-canvas");
+const drawContext = drawCanvas.getContext("2d");
+
+const drawToggleBtn = document.querySelector("#draw-toggle-btn");
+const drawLineBtn = document.querySelector("#draw-line-btn");
+const drawCircleBtn = document.querySelector("#draw-circle-btn");
+const clearDrawingsBtn = document.querySelector("#clear-drawings-btn");
+
 const videoUploadInput = document.querySelector("#video-upload");
 const videoList = document.querySelector("#video-list");
 
@@ -44,6 +53,15 @@ let currentVideoId = null;
 let allVideos = [];
 let myClips = [];
 
+/* ---------- DRAWING STATE ---------- */
+
+let drawingEnabled = false;
+let drawingMode = "freehand";
+let isDrawing = false;
+let startPoint = null;
+let lastPoint = null;
+let savedCanvasImage = null;
+
 function showMessage(message) {
   alert(message);
 }
@@ -70,6 +88,8 @@ function selectVideo(video) {
   currentVideoId = video.id;
   filmPlayer.src = video.file_url;
   filmPlayer.load();
+  resizeDrawCanvas();
+  clearDrawings();
   renderVideoList();
   renderCurrentVideoHighlights();
 }
@@ -82,11 +102,13 @@ function renderVideoList() {
     const button = document.createElement("button");
 
     button.className = "video-item-btn";
+
     if (video.id === currentVideoId) {
       button.classList.add("active");
     }
 
     button.textContent = video.title;
+
     button.addEventListener("click", () => {
       selectVideo(video);
     });
@@ -101,6 +123,7 @@ function jumpToClip(clip) {
 
   if (clip.video_id !== currentVideoId) {
     const matchingVideo = allVideos.find((video) => video.id === clip.video_id);
+
     if (matchingVideo) {
       selectVideo(matchingVideo);
     }
@@ -123,11 +146,14 @@ function renderClipList(targetList, clips, includeVideoTitle = false) {
     const button = document.createElement("button");
 
     button.className = "highlight-item-btn";
+
     button.innerHTML = `
       <strong>${clip.title}</strong>
-      <small>${Number(clip.start_time).toFixed(1)}s - ${Number(clip.end_time).toFixed(1)}s${
-        includeVideoTitle && clip.video_title ? ` • ${clip.video_title}` : ""
-      }</small>
+      <small>${Number(clip.start_time).toFixed(1)}s - ${Number(
+      clip.end_time
+    ).toFixed(1)}s${
+      includeVideoTitle && clip.video_title ? ` • ${clip.video_title}` : ""
+    }</small>
     `;
 
     button.addEventListener("click", () => {
@@ -143,6 +169,7 @@ function renderCurrentVideoHighlights() {
   const currentVideoClips = myClips.filter(
     (clip) => Number(clip.video_id) === Number(currentVideoId)
   );
+
   renderClipList(highlightsList, currentVideoClips, false);
 }
 
@@ -217,6 +244,10 @@ function activateApp(user) {
   setCoachVisibility(user.role);
   loadVideos();
   loadMyClips();
+
+  setTimeout(() => {
+    resizeDrawCanvas();
+  }, 50);
 }
 
 function logoutLocalState() {
@@ -246,6 +277,8 @@ function logoutLocalState() {
   currentVideoId = null;
   allVideos = [];
   myClips = [];
+
+  clearDrawings();
 
   filmPlayer.removeAttribute("src");
   filmPlayer.load();
@@ -413,6 +446,7 @@ async function uploadVideo(file) {
 
   try {
     const formData = new FormData();
+
     formData.append("video", file);
     formData.append("title", file.name);
     formData.append("uploaded_by", currentUser.id);
@@ -425,6 +459,7 @@ async function uploadVideo(file) {
     const text = await response.text();
 
     let data;
+
     try {
       data = JSON.parse(text);
     } catch {
@@ -439,6 +474,7 @@ async function uploadVideo(file) {
     showMessage("Video uploaded.");
     await loadVideos();
     selectVideo(data);
+
     if (videoUploadInput) {
       videoUploadInput.value = "";
     }
@@ -446,6 +482,185 @@ async function uploadVideo(file) {
     console.error("Upload failed:", error);
     showMessage(error.message || "Could not upload video.");
   }
+}
+
+/* ---------- DRAWING FUNCTIONS ---------- */
+
+function resizeDrawCanvas() {
+  if (!drawCanvas || !videoWrapper) return;
+
+  const rect = videoWrapper.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+
+  if (!rect.width || !rect.height) return;
+
+  const previousImage = document.createElement("canvas");
+  previousImage.width = drawCanvas.width;
+  previousImage.height = drawCanvas.height;
+
+  const previousContext = previousImage.getContext("2d");
+  previousContext.drawImage(drawCanvas, 0, 0);
+
+  drawCanvas.width = Math.round(rect.width * dpr);
+  drawCanvas.height = Math.round(rect.height * dpr);
+
+  drawCanvas.style.width = `${rect.width}px`;
+  drawCanvas.style.height = `${rect.height}px`;
+
+  drawContext.setTransform(dpr, 0, 0, dpr, 0, 0);
+  drawContext.lineCap = "round";
+  drawContext.lineJoin = "round";
+  drawContext.strokeStyle = "#2dd4bf";
+  drawContext.lineWidth = 4;
+
+  if (previousImage.width && previousImage.height) {
+    drawContext.drawImage(previousImage, 0, 0, rect.width, rect.height);
+  }
+}
+
+function getCanvasPoint(event) {
+  const rect = drawCanvas.getBoundingClientRect();
+
+  return {
+    x: event.clientX - rect.left,
+    y: event.clientY - rect.top,
+  };
+}
+
+function saveCanvasPreview() {
+  savedCanvasImage = drawContext.getImageData(
+    0,
+    0,
+    drawCanvas.width,
+    drawCanvas.height
+  );
+}
+
+function restoreCanvasPreview() {
+  if (!savedCanvasImage) return;
+
+  drawContext.putImageData(savedCanvasImage, 0, 0);
+}
+
+function drawFreehandLine(fromPoint, toPoint) {
+  drawContext.beginPath();
+  drawContext.moveTo(fromPoint.x, fromPoint.y);
+  drawContext.lineTo(toPoint.x, toPoint.y);
+  drawContext.stroke();
+}
+
+function drawStraightLine(fromPoint, toPoint) {
+  restoreCanvasPreview();
+
+  drawContext.beginPath();
+  drawContext.moveTo(fromPoint.x, fromPoint.y);
+  drawContext.lineTo(toPoint.x, toPoint.y);
+  drawContext.stroke();
+}
+
+function drawCircle(fromPoint, toPoint) {
+  restoreCanvasPreview();
+
+  const radius = Math.hypot(toPoint.x - fromPoint.x, toPoint.y - fromPoint.y);
+
+  drawContext.beginPath();
+  drawContext.arc(fromPoint.x, fromPoint.y, radius, 0, Math.PI * 2);
+  drawContext.stroke();
+}
+
+function setDrawingMode(mode) {
+  drawingMode = mode;
+
+  drawLineBtn.classList.remove("active");
+  drawCircleBtn.classList.remove("active");
+
+  if (mode === "line") {
+    drawLineBtn.classList.add("active");
+  }
+
+  if (mode === "circle") {
+    drawCircleBtn.classList.add("active");
+  }
+}
+
+function setDrawingEnabled(enabled) {
+  drawingEnabled = enabled;
+
+  if (drawingEnabled) {
+    resizeDrawCanvas();
+    filmPlayer.pause();
+    drawCanvas.style.pointerEvents = "auto";
+    drawCanvas.style.touchAction = "none";
+    drawToggleBtn.textContent = "Disable Draw";
+    drawToggleBtn.classList.add("active");
+  } else {
+    isDrawing = false;
+    drawCanvas.style.pointerEvents = "none";
+    drawCanvas.style.touchAction = "auto";
+    drawToggleBtn.textContent = "Enable Draw";
+    drawToggleBtn.classList.remove("active");
+  }
+}
+
+function clearDrawings() {
+  if (!drawCanvas) return;
+
+  drawContext.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+  savedCanvasImage = null;
+}
+
+function handlePointerDown(event) {
+  if (!drawingEnabled) return;
+
+  event.preventDefault();
+
+  resizeDrawCanvas();
+
+  isDrawing = true;
+  startPoint = getCanvasPoint(event);
+  lastPoint = startPoint;
+
+  drawCanvas.setPointerCapture(event.pointerId);
+
+  if (drawingMode === "line" || drawingMode === "circle") {
+    saveCanvasPreview();
+  }
+}
+
+function handlePointerMove(event) {
+  if (!drawingEnabled || !isDrawing) return;
+
+  event.preventDefault();
+
+  const currentPoint = getCanvasPoint(event);
+
+  if (drawingMode === "freehand") {
+    drawFreehandLine(lastPoint, currentPoint);
+    lastPoint = currentPoint;
+  }
+
+  if (drawingMode === "line") {
+    drawStraightLine(startPoint, currentPoint);
+  }
+
+  if (drawingMode === "circle") {
+    drawCircle(startPoint, currentPoint);
+  }
+}
+
+function handlePointerUp(event) {
+  if (!drawingEnabled || !isDrawing) return;
+
+  event.preventDefault();
+
+  isDrawing = false;
+  startPoint = null;
+  lastPoint = null;
+  savedCanvasImage = null;
+
+  try {
+    drawCanvas.releasePointerCapture(event.pointerId);
+  } catch (error) {}
 }
 
 /* ---------- AUTH BUTTONS ---------- */
@@ -499,6 +714,7 @@ backwardBtn.addEventListener("click", () => {
 
 forwardBtn.addEventListener("click", () => {
   const nextTime = filmPlayer.currentTime + 5;
+
   filmPlayer.currentTime = filmPlayer.duration
     ? Math.min(filmPlayer.duration, nextTime)
     : nextTime;
@@ -526,7 +742,9 @@ frameBackBtn.addEventListener("click", () => {
 
 frameForwardBtn.addEventListener("click", () => {
   filmPlayer.pause();
+
   const nextTime = filmPlayer.currentTime + 1 / 30;
+
   filmPlayer.currentTime = filmPlayer.duration
     ? Math.min(filmPlayer.duration, nextTime)
     : nextTime;
@@ -541,10 +759,47 @@ fullscreenBtn.addEventListener("click", async () => {
     } else {
       await document.exitFullscreen();
     }
+
+    setTimeout(() => {
+      resizeDrawCanvas();
+    }, 100);
   } catch (error) {
     console.error("Fullscreen failed:", error);
   }
 });
+
+/* ---------- DRAWING BUTTONS ---------- */
+
+if (drawToggleBtn) {
+  drawToggleBtn.addEventListener("click", () => {
+    setDrawingEnabled(!drawingEnabled);
+  });
+}
+
+if (drawLineBtn) {
+  drawLineBtn.addEventListener("click", () => {
+    setDrawingMode("line");
+  });
+}
+
+if (drawCircleBtn) {
+  drawCircleBtn.addEventListener("click", () => {
+    setDrawingMode("circle");
+  });
+}
+
+if (clearDrawingsBtn) {
+  clearDrawingsBtn.addEventListener("click", () => {
+    clearDrawings();
+  });
+}
+
+if (drawCanvas) {
+  drawCanvas.addEventListener("pointerdown", handlePointerDown);
+  drawCanvas.addEventListener("pointermove", handlePointerMove);
+  drawCanvas.addEventListener("pointerup", handlePointerUp);
+  drawCanvas.addEventListener("pointercancel", handlePointerUp);
+}
 
 /* ---------- UPLOAD ---------- */
 
@@ -555,5 +810,98 @@ if (videoUploadInput) {
   });
 }
 
+/* ---------- TAB NAVIGATION ---------- */
+
+const tabButtons = document.querySelectorAll(".tab-btn");
+const appScreens = document.querySelectorAll(".app-screen");
+
+tabButtons.forEach((button) => {
+  button.addEventListener("click", () => {
+    const screenId = button.dataset.screen;
+
+    tabButtons.forEach((btn) => {
+      btn.classList.remove("active");
+    });
+
+    appScreens.forEach((screen) => {
+      screen.classList.remove("active");
+    });
+
+    button.classList.add("active");
+
+    const selectedScreen = document.getElementById(screenId);
+
+    if (selectedScreen) {
+      selectedScreen.classList.add("active");
+    }
+
+    setTimeout(() => {
+      resizeDrawCanvas();
+    }, 50);
+  });
+});
+
+/* ---------- SIMPLE MESSAGE SYSTEM ---------- */
+
+const messageForm = document.getElementById("message-form");
+const messageInput = document.getElementById("message-input");
+const messageUsernameInput = document.getElementById("message-username-input");
+const messageRoleInput = document.getElementById("message-role-input");
+const messageThread = document.getElementById("message-thread");
+
+if (messageForm) {
+  messageForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+
+    const text = messageInput.value.trim();
+    const username = messageUsernameInput.value.trim() || "User";
+    const role = messageRoleInput.value;
+
+    if (!text) return;
+
+    const messageRow = document.createElement("div");
+
+    messageRow.classList.add("message-row");
+
+    if (role === "coach") {
+      messageRow.classList.add("coach-message");
+    } else {
+      messageRow.classList.add("player-message");
+    }
+
+    const usernameElement = document.createElement("p");
+
+    usernameElement.className = "message-username";
+    usernameElement.textContent = username;
+
+    const bubbleElement = document.createElement("p");
+
+    bubbleElement.className = "message-bubble";
+    bubbleElement.textContent = text;
+
+    messageRow.appendChild(usernameElement);
+    messageRow.appendChild(bubbleElement);
+    messageThread.appendChild(messageRow);
+
+    messageInput.value = "";
+    messageThread.scrollTop = messageThread.scrollHeight;
+  });
+}
+
+/* ---------- RESIZE SAFETY ---------- */
+
+window.addEventListener("resize", () => {
+  resizeDrawCanvas();
+});
+
+document.addEventListener("fullscreenchange", () => {
+  setTimeout(() => {
+    resizeDrawCanvas();
+  }, 100);
+});
+
+/* ---------- STARTUP ---------- */
+
 updateSpeedDisplay();
 restoreSession();
+resizeDrawCanvas();
