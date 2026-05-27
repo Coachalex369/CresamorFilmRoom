@@ -137,17 +137,7 @@ app.get("/api/videos", async (req, res) => {
   }
 });
 
-app.delete("/api/debug/clear-videos", async (req, res) => {
-  try {
-    await db.query("DELETE FROM clips");
-    await db.query("DELETE FROM videos");
 
-    res.json({ success: true });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Failed to clear videos" });
-  }
-});
 
 app.post("/api/videos", async (req, res) => {
   try {
@@ -253,6 +243,18 @@ app.get("/api/users/:id/clips", async (req, res) => {
   } catch (err) {
     console.error("GET /api/users/:id/clips error:", err);
     res.status(500).json({ error: "Failed to fetch user clips" });
+  }
+});
+
+app.delete("/api/debug/clear-videos", async (req, res) => {
+  try {
+    await client.query("DELETE FROM clips");
+    await client.query("DELETE FROM videos");
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error("DELETE /api/debug/clear-videos error:", err);
+    res.status(500).json({ error: "Failed to clear videos" });
   }
 });
 
