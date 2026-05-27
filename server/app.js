@@ -137,6 +137,18 @@ app.get("/api/videos", async (req, res) => {
   }
 });
 
+app.delete("/api/debug/clear-videos", async (req, res) => {
+  try {
+    await db.query("DELETE FROM clips");
+    await db.query("DELETE FROM videos");
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to clear videos" });
+  }
+});
+
 app.post("/api/videos", async (req, res) => {
   try {
     const { title, file_url, uploaded_by } = req.body;
