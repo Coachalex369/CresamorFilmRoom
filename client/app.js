@@ -1,3 +1,27 @@
+const API_URL = "https://cresamorfilmroom-2.onrender.com";
+
+async function apiFetch(path, options = {}) {
+  const response = await fetch(`${API_URL}${path}`, options);
+  const text = await response.text();
+
+  let data = null;
+
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      console.error("Non-JSON response:", text);
+      throw new Error("Server returned invalid JSON.");
+    }
+  }
+
+  if (!response.ok) {
+    throw new Error(data?.error || "Request failed.");
+  }
+
+  return data;
+}
+
 const emailInput = document.querySelector("#email-input");
 const passwordInput = document.querySelector("#password-input");
 
@@ -176,12 +200,7 @@ function renderCurrentVideoHighlights() {
 
 async function loadVideos() {
   try {
-    const response = await fetch("/api/videos");
-    const videos = await response.json();
-
-    if (!response.ok) {
-      throw new Error(videos.error || "Failed to load videos");
-    }
+    const videos = await apiFetch("/api/videos");
 
     if (!Array.isArray(videos) || videos.length === 0) {
       videoList.innerHTML = "<li>No videos found.</li>";
@@ -211,12 +230,7 @@ async function loadMyClips() {
   if (!currentUser) return;
 
   try {
-    const response = await fetch(`/api/users/${currentUser.id}/clips`);
-    const clips = await response.json();
-
-    if (!response.ok) {
-      throw new Error(clips.error || "Failed to load clips");
-    }
+    const clips = await apiFetch(`/api/users/${currentUser.id}/clips`);
 
     if (!Array.isArray(clips)) {
       throw new Error("Clips response was not an array");
@@ -290,7 +304,7 @@ function logoutLocalState() {
 }
 
 async function loginUser(email, password) {
-  const response = await fetch("/api/auth/login", {
+  const data = await apiFetch("/api/auth/login", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -298,29 +312,17 @@ async function loginUser(email, password) {
     body: JSON.stringify({ email, password }),
   });
 
-  const data = await response.json();
-
-  if (!response.ok) {
-    throw new Error(data.error || "Login failed");
-  }
-
   return data;
 }
 
 async function registerUser(email, password, role) {
-  const response = await fetch("/api/auth/register", {
+  const data = await apiFetch("/api/auth/register", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ email, password, role }),
   });
-
-  const data = await response.json();
-
-  if (!response.ok) {
-    throw new Error(data.error || "Registration failed");
-  }
 
   return data;
 }
@@ -402,7 +404,7 @@ async function saveHighlight() {
   }
 
   try {
-    const response = await fetch("/api/clips", {
+    await apiFetch("/api/clips", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -415,12 +417,6 @@ async function saveHighlight() {
         user_id: currentUser.id,
       }),
     });
-
-    const data = await response.json();
-
-    if (!response.ok) {
-      throw new Error(data.error || "Failed to save highlight");
-    }
 
     highlightTitleInput.value = "";
     clipStartTime = null;
@@ -452,25 +448,10 @@ async function uploadVideo(file) {
     formData.append("title", file.name);
     formData.append("uploaded_by", currentUser.id);
 
-    const response = await fetch("/api/upload-video", {
+    const data = await apiFetch("/api/upload-video", {
       method: "POST",
       body: formData,
     });
-
-    const text = await response.text();
-
-    let data;
-
-    try {
-      data = JSON.parse(text);
-    } catch {
-      console.error("Non-JSON response:", text);
-      throw new Error("Server returned HTML instead of JSON");
-    }
-
-    if (!response.ok) {
-      throw new Error(data.error || "Failed to upload video");
-    }
 
     showMessage("Video uploaded.");
     await loadVideos();
