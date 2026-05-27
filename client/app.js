@@ -111,7 +111,9 @@ function selectVideo(video) {
   if (!video) return;
 
   currentVideoId = video.id;
-  filmPlayer.src = video.file_url;
+ filmPlayer.src = video.file_url.startsWith("http")
+  ? video.file_url
+  : `${API_URL}${video.file_url}`;
   filmPlayer.load();
   resizeDrawCanvas();
   clearDrawings();
