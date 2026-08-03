@@ -46,7 +46,11 @@
       <section id="app-shell" class="hidden">
         <!-- TOP NAVIGATION -->
         <nav class="app-tabs">
-          <button class="tab-btn active" data-screen="film-screen">
+          <button class="tab-btn active" data-screen="home-screen">
+            Home
+          </button>
+
+          <button class="tab-btn" data-screen="film-screen">
             Film
           </button>
 
@@ -57,10 +61,143 @@
           <button class="tab-btn" data-screen="messages-screen">
             Messages
           </button>
+
+          <button class="tab-btn" data-screen="calendar-screen">
+            Calendar
+          </button>
+
+          <button class="tab-btn" data-screen="teams-screen">
+            Teams
+          </button>
+
+          <button class="tab-btn" data-screen="profile-screen">
+            Profile
+          </button>
+
+          <button class="tab-btn" data-screen="settings-screen">
+            Settings
+          </button>
         </nav>
 
+        <!-- HOME SCREEN -->
+        <section id="home-screen" class="app-screen active">
+          <div id="home-layout">
+            <!-- PROFILE HEADER -->
+            <section id="profile-block">
+              <div id="profile-picture-placeholder"></div>
+
+              <div id="profile-info">
+                <h2 id="profile-name">—</h2>
+                <p id="profile-meta">
+                  <span id="profile-school">School not set</span>
+                  <span id="profile-team">Team not set</span>
+                  <span id="profile-grad-year">Class of —</span>
+                </p>
+              </div>
+
+              <button id="edit-profile-btn">Edit Profile</button>
+            </section>
+
+            <!-- EDIT PROFILE FORM -->
+            <section id="edit-profile-form" class="hidden">
+              <h3>Edit Profile</h3>
+
+              <input type="text" id="edit-profile-name" placeholder="Display name" />
+              <input type="text" id="edit-profile-school" placeholder="School" />
+              <input type="text" id="edit-profile-team" placeholder="Team" />
+              <input type="number" id="edit-profile-grad-year" placeholder="Graduation year" />
+              <input type="url" id="edit-profile-picture-url" placeholder="Profile picture URL" />
+
+              <div class="edit-profile-actions">
+                <button id="save-profile-btn">Save</button>
+                <button id="cancel-profile-btn">Cancel</button>
+              </div>
+
+              <p class="mock-note">Saved on this device only — profile fields aren't stored on the server yet.</p>
+            </section>
+
+            <!-- HERO CARD -->
+            <section id="hero-card">
+              <p id="hero-tagline">Your Film, Your Way.</p>
+
+              <div id="hero-details">
+                <div class="hero-stat">
+                  <span class="hero-label">Next Up</span>
+                  <span id="hero-next-event-text">—</span>
+                </div>
+
+                <div class="hero-stat">
+                  <span class="hero-label">Coach</span>
+                  <span id="hero-notifications-text">—</span>
+                </div>
+
+                <div class="hero-stat">
+                  <span class="hero-label">New Highlights</span>
+                  <span id="hero-new-highlights-count">0</span>
+                </div>
+              </div>
+
+              <button id="watch-now-btn">Watch Now</button>
+            </section>
+
+            <!-- FEATURED HIGHLIGHT REEL -->
+            <section id="featured-reel">
+              <h2>Featured Highlights</h2>
+
+              <div id="reel-stage">
+                <video id="reel-video" muted playsinline controls></video>
+                <p id="reel-empty" class="hidden">No highlights yet — save one from the Film tab.</p>
+                <p id="reel-title"></p>
+              </div>
+
+              <div id="reel-thumbnails"></div>
+            </section>
+
+            <!-- CONTINUE WATCHING -->
+            <section id="continue-watching" class="hidden">
+              <h2>Continue Watching</h2>
+
+              <div id="continue-watching-card">
+                <div id="continue-watching-thumb"></div>
+
+                <div id="continue-watching-info">
+                  <p id="continue-watching-title">—</p>
+
+                  <div id="continue-watching-progress-track">
+                    <div id="continue-watching-progress-fill"></div>
+                  </div>
+                </div>
+
+                <button id="continue-watching-resume-btn">Resume</button>
+              </div>
+            </section>
+
+            <!-- MESSAGES PREVIEW -->
+            <section id="messages-preview">
+              <div id="messages-preview-header">
+                <h2>Messages</h2>
+                <button id="view-all-messages-btn">View All Messages</button>
+              </div>
+
+              <ul id="messages-preview-list"></ul>
+            </section>
+
+            <!-- UPCOMING EVENTS -->
+            <section id="upcoming-events">
+              <h2>Upcoming Events</h2>
+              <ul id="upcoming-events-list"></ul>
+            </section>
+
+            <!-- RECENT ACTIVITY -->
+            <section id="recent-activity">
+              <h2>Recent Activity</h2>
+              <ul id="recent-activity-list"></ul>
+            </section>
+          </div>
+        </section>
+
         <!-- FILM SCREEN -->
-        <section id="film-screen" class="app-screen active">
+        <section id="film-screen" class="app-screen">
           <section id="film-room">
             <!-- VIDEO AREA -->
             <div id="video-section">
@@ -90,6 +227,11 @@
                   id="video-upload"
                   accept="video/*"
                 />
+              </div>
+
+              <!-- RECORD (available to all roles — athletes record their own film) -->
+              <div id="record-section">
+                <button id="record-film-btn" type="button">🎥 Record Film</button>
               </div>
 
               <!-- PLAYBACK CONTROLS -->
@@ -237,9 +379,123 @@
             </form>
           </div>
         </section>
+
+        <!-- CALENDAR SCREEN -->
+        <section id="calendar-screen" class="app-screen">
+          <div class="placeholder-screen">
+            <h2>Calendar</h2>
+            <p class="mock-note">Showing sample events — a real team calendar is coming in a later phase.</p>
+            <ul id="calendar-events-list"></ul>
+          </div>
+        </section>
+
+        <!-- TEAMS SCREEN -->
+        <section id="teams-screen" class="app-screen">
+          <div class="placeholder-screen">
+            <h2>Teams</h2>
+            <p>Team management is coming soon.</p>
+          </div>
+        </section>
+
+        <!-- PROFILE SCREEN -->
+        <section id="profile-screen" class="app-screen">
+          <div class="placeholder-screen">
+            <h2>Profile</h2>
+            <p>Manage your profile from the Home tab for now — a dedicated Profile page is coming soon.</p>
+          </div>
+        </section>
+
+        <!-- SETTINGS SCREEN -->
+        <section id="settings-screen" class="app-screen">
+          <div class="placeholder-screen">
+            <h2>Settings</h2>
+            <p>Settings are coming soon.</p>
+          </div>
+        </section>
+
+        <!-- FILM CAPTURE MODAL -->
+        <div id="capture-modal" class="hidden">
+          <div id="capture-modal-inner">
+            <button id="capture-close-btn" type="button" aria-label="Close">✕</button>
+
+            <!-- Context confirm (Wrestling/Football auto-assume) -->
+            <div id="capture-step-context" class="capture-step hidden">
+              <h3 id="capture-context-question">Record for Wrestling?</h3>
+              <div class="capture-step-actions">
+                <button id="capture-context-yes-btn" type="button">Yes</button>
+                <button id="capture-context-no-btn" type="button">No</button>
+              </div>
+            </div>
+
+            <!-- Team Film / Individual Film + Choose Team -->
+            <div id="capture-step-picker" class="capture-step hidden">
+              <h3>What are you recording?</h3>
+              <div class="capture-step-actions">
+                <button id="capture-type-team-btn" type="button" data-type="team">Team Film</button>
+                <button id="capture-type-individual-btn" type="button" data-type="individual">Individual Film</button>
+              </div>
+              <div id="capture-team-choice" class="hidden">
+                <p>Choose Team</p>
+                <ul id="capture-team-list"></ul>
+              </div>
+            </div>
+
+            <!-- Device selection -->
+            <div id="capture-step-device" class="capture-step hidden">
+              <h3>Choose Camera</h3>
+              <select id="capture-device-select"></select>
+              <video id="capture-device-preview" autoplay muted playsinline></video>
+              <div class="capture-step-actions">
+                <button id="capture-continue-to-record-btn" type="button">Continue</button>
+              </div>
+            </div>
+
+            <!-- Recording -->
+            <div id="capture-step-record" class="capture-step hidden">
+              <video id="capture-preview-video" autoplay muted playsinline></video>
+              <div id="capture-record-status">
+                <span id="capture-record-dot" class="hidden"></span>
+                <span id="capture-record-timer">00:00</span>
+              </div>
+              <div class="capture-step-actions">
+                <button id="capture-record-btn" type="button">● Record</button>
+                <button id="capture-pause-btn" type="button" class="hidden">Pause</button>
+                <button id="capture-resume-btn" type="button" class="hidden">Resume</button>
+                <button id="capture-stop-btn" type="button" class="hidden">Stop</button>
+              </div>
+            </div>
+
+            <!-- Review -->
+            <div id="capture-step-review" class="capture-step hidden">
+              <h3>Review</h3>
+              <video id="capture-review-video" controls playsinline></video>
+              <div class="capture-step-actions">
+                <button id="capture-discard-btn" type="button">Discard &amp; Redo</button>
+                <button id="capture-upload-btn" type="button">Upload</button>
+              </div>
+            </div>
+
+            <!-- Upload progress -->
+            <div id="capture-step-upload" class="capture-step hidden">
+              <p id="capture-upload-status-text">Compressing…</p>
+              <div id="capture-upload-progress-track">
+                <div id="capture-upload-progress-fill"></div>
+              </div>
+            </div>
+
+            <!-- Done -->
+            <div id="capture-step-done" class="capture-step hidden">
+              <h3>Available in Film Room</h3>
+              <button id="capture-done-btn" type="button">Done</button>
+            </div>
+          </div>
+        </div>
       </section>
     </main>
 
     <script src="./app.js"></script>
+    <script src="./mockData.js"></script>
+    <script src="./home.js"></script>
+    <script src="./capture.js"></script>
   </body>
 </html>
