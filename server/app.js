@@ -246,19 +246,5 @@ app.get("/api/users/:id/clips", async (req, res) => {
   }
 });
 
-app.delete("/api/debug/clear-videos", async (req, res) => {
-  try {
-    await client.query("TRUNCATE TABLE clips, videos RESTART IDENTITY CASCADE");
-
-    res.json({ success: true });
-  } catch (err) {
-    console.error("DELETE /api/debug/clear-videos error:", err);
-    res.status(500).json({
-      error: "Failed to clear videos",
-      details: err.message,
-    });
-  }
-});
-
 module.exports = app;
 
