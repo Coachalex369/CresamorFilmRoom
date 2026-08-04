@@ -38,6 +38,7 @@
           <div id="login-buttons">
             <button id="login-coach-btn">Login as Coach</button>
             <button id="login-athlete-btn">Login as Athlete</button>
+            <button id="login-parent-btn">Login as Parent</button>
           </div>
         </div>
       </section>
@@ -106,14 +107,25 @@
               <input type="text" id="edit-profile-school" placeholder="School" />
               <input type="text" id="edit-profile-team" placeholder="Team" />
               <input type="number" id="edit-profile-grad-year" placeholder="Graduation year" />
-              <input type="url" id="edit-profile-picture-url" placeholder="Profile picture URL" />
+
+              <div id="edit-profile-photo-section">
+                <div id="edit-profile-photo-preview"></div>
+
+                <div id="edit-profile-photo-buttons">
+                  <label class="file-upload-btn" for="edit-profile-photo-upload">Upload Profile Picture</label>
+                  <input type="file" id="edit-profile-photo-upload" accept="image/*" class="hidden" />
+
+                  <label class="file-upload-btn" for="edit-profile-photo-camera">Take Photo</label>
+                  <input type="file" id="edit-profile-photo-camera" accept="image/*" capture="environment" class="hidden" />
+                </div>
+
+                <p id="edit-profile-photo-status" class="mock-note"></p>
+              </div>
 
               <div class="edit-profile-actions">
                 <button id="save-profile-btn">Save</button>
                 <button id="cancel-profile-btn">Cancel</button>
               </div>
-
-              <p class="mock-note">Saved on this device only — profile fields aren't stored on the server yet.</p>
             </section>
 
             <!-- HERO CARD -->
@@ -144,13 +156,29 @@
             <section id="featured-reel">
               <h2>Featured Highlights</h2>
 
-              <div id="reel-stage">
-                <video id="reel-video" muted playsinline controls></video>
-                <p id="reel-empty" class="hidden">No highlights yet — save one from the Film tab.</p>
-                <p id="reel-title"></p>
-              </div>
+              <div id="reel-body">
+                <div id="reel-stage">
+                  <video id="reel-video" muted playsinline controls></video>
+                  <p id="reel-empty" class="hidden">No highlights yet — save one from the Film tab.</p>
+                  <p id="reel-title"></p>
 
-              <div id="reel-thumbnails"></div>
+                  <!-- REEL LOADING OVERLAY -->
+                  <div id="reel-loading-overlay" class="hidden">
+                    <div class="loading-content">
+                      <div class="loading-spinner"></div>
+                      <p>Loading Match...</p>
+                      <div class="video-progress-track">
+                        <div id="reel-loading-progress-fill" class="video-progress-fill"></div>
+                      </div>
+                      <p id="reel-loading-percent" class="video-progress-percent">0%</p>
+                      <p class="video-progress-sub">Preparing video...</p>
+                      <p id="reel-loading-eta" class="video-progress-eta"></p>
+                    </div>
+                  </div>
+                </div>
+
+                <div id="reel-thumbnails"></div>
+              </div>
             </section>
 
             <!-- CONTINUE WATCHING -->
@@ -213,7 +241,13 @@
                 <div id="video-loading-overlay" class="hidden">
                   <div class="loading-content">
                     <div class="loading-spinner"></div>
-                    <p>Loading tape...</p>
+                    <p>Loading Match...</p>
+                    <div class="video-progress-track">
+                      <div id="video-loading-progress-fill" class="video-progress-fill"></div>
+                    </div>
+                    <p id="video-loading-percent" class="video-progress-percent">0%</p>
+                    <p class="video-progress-sub">Preparing video...</p>
+                    <p id="video-loading-eta" class="video-progress-eta"></p>
                   </div>
                 </div>
               </div>
@@ -227,6 +261,16 @@
                   id="video-upload"
                   accept="video/*"
                 />
+
+                <div id="manual-upload-progress" class="hidden">
+                  <p>Uploading...</p>
+                  <div class="video-progress-track">
+                    <div id="manual-upload-progress-fill" class="video-progress-fill"></div>
+                  </div>
+                  <p id="manual-upload-percent" class="video-progress-percent">0%</p>
+                  <p id="manual-upload-size" class="video-progress-sub"></p>
+                  <p id="manual-upload-eta" class="video-progress-eta"></p>
+                </div>
               </div>
 
               <!-- RECORD (available to all roles — athletes record their own film) -->
@@ -326,35 +370,7 @@
           <div id="messages-layout">
             <h2>Team Messages</h2>
 
-            <div id="message-thread">
-              <div class="message-row coach-message">
-                <p class="message-username">Coach Ramirez</p>
-                <p class="message-bubble">
-                  Great pressure in the second period.
-                </p>
-              </div>
-
-              <div class="message-row player-message">
-                <p class="message-username">Alex</p>
-                <p class="message-bubble">
-                  Thank you coach.
-                </p>
-              </div>
-
-              <div class="message-row player-message">
-                <p class="message-username">Parent</p>
-                <p class="message-bubble">
-                  What time should the boys be there?
-                </p>
-              </div>
-
-              <div class="message-row coach-message">
-                <p class="message-username">Coach Ramirez</p>
-                <p class="message-bubble">
-                  Please arrive by 4:45 so everyone has time to warm up.
-                </p>
-              </div>
-            </div>
+            <div id="message-thread"></div>
 
             <form id="message-form">
               <input
@@ -418,29 +434,25 @@
           <div id="capture-modal-inner">
             <button id="capture-close-btn" type="button" aria-label="Close">✕</button>
 
-            <!-- Context confirm (Wrestling/Football auto-assume) -->
-            <div id="capture-step-context" class="capture-step hidden">
-              <h3 id="capture-context-question">Record for Wrestling?</h3>
-              <div class="capture-step-actions">
-                <button id="capture-context-yes-btn" type="button">Yes</button>
-                <button id="capture-context-no-btn" type="button">No</button>
+            <!-- Camera entry — opens straight to the camera, no upfront
+                 questions. Mobile uses the native OS camera (via file input
+                 capture); desktop falls back to the in-browser recorder
+                 below since there's no native camera app to hand off to. -->
+            <div id="capture-step-camera" class="capture-step hidden">
+              <h3>Record Film</h3>
+
+              <div id="capture-native-buttons" class="capture-step-actions hidden">
+                <button id="capture-native-back-btn" type="button">🎥 Back Camera</button>
+                <button id="capture-native-front-btn" type="button">🤳 Front Camera</button>
+              </div>
+              <input type="file" id="capture-native-input" accept="video/*" capture="environment" class="hidden" />
+
+              <div id="capture-desktop-start" class="capture-step-actions hidden">
+                <button id="capture-start-desktop-btn" type="button">Start Camera</button>
               </div>
             </div>
 
-            <!-- Team Film / Individual Film + Choose Team -->
-            <div id="capture-step-picker" class="capture-step hidden">
-              <h3>What are you recording?</h3>
-              <div class="capture-step-actions">
-                <button id="capture-type-team-btn" type="button" data-type="team">Team Film</button>
-                <button id="capture-type-individual-btn" type="button" data-type="individual">Individual Film</button>
-              </div>
-              <div id="capture-team-choice" class="hidden">
-                <p>Choose Team</p>
-                <ul id="capture-team-list"></ul>
-              </div>
-            </div>
-
-            <!-- Device selection -->
+            <!-- Device selection (desktop MediaRecorder path only) -->
             <div id="capture-step-device" class="capture-step hidden">
               <h3>Choose Camera</h3>
               <select id="capture-device-select"></select>
@@ -467,11 +479,27 @@
 
             <!-- Review -->
             <div id="capture-step-review" class="capture-step hidden">
-              <h3>Review</h3>
+              <h3>Preview</h3>
               <video id="capture-review-video" controls playsinline></video>
               <div class="capture-step-actions">
                 <button id="capture-discard-btn" type="button">Discard &amp; Redo</button>
-                <button id="capture-upload-btn" type="button">Upload</button>
+                <button id="capture-use-video-btn" type="button">Use Video</button>
+              </div>
+            </div>
+
+            <!-- Assign Team (after preview, per the desired flow — not an
+                 upfront question). Suggests the last-used team as a smart
+                 default when one exists (from the old Wrestling/Football
+                 auto-assume logic, repurposed here rather than as a gate). -->
+            <div id="capture-step-confirm-team" class="capture-step hidden">
+              <h3>Assign Team</h3>
+              <div id="capture-suggested-team" class="hidden">
+                <button id="capture-confirm-suggested-team-btn" type="button"></button>
+              </div>
+              <p>Choose a team</p>
+              <ul id="capture-confirm-team-list"></ul>
+              <div class="capture-step-actions">
+                <button id="capture-skip-team-btn" type="button">Skip for now</button>
               </div>
             </div>
 
@@ -495,6 +523,7 @@
 
     <script src="./app.js"></script>
     <script src="./mockData.js"></script>
+    <script src="./messages.js"></script>
     <script src="./home.js"></script>
     <script src="./capture.js"></script>
   </body>

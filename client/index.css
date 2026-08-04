@@ -488,7 +488,8 @@ li {
   box-shadow: 0 0 0 1px var(--accent);
 }
 
-#video-loading-overlay {
+#video-loading-overlay,
+#reel-loading-overlay {
   position: absolute;
   inset: 0;
   background: rgba(0, 0, 0, 0.75);
@@ -498,7 +499,8 @@ li {
   z-index: 20;
 }
 
-#video-loading-overlay.hidden {
+#video-loading-overlay.hidden,
+#reel-loading-overlay.hidden {
   display: none;
 }
 
@@ -507,13 +509,14 @@ li {
   color: white;
   font-size: 1rem;
   letter-spacing: 1px;
+  width: 220px;
 }
 
 .loading-spinner {
   width: 42px;
   height: 42px;
   border: 3px solid rgba(255,255,255,0.2);
-  border-top: 3px solid #2dd4bf;
+  border-top: 3px solid var(--gold);
   border-radius: 50%;
   animation: spin 1s linear infinite;
   margin: 0 auto 12px;
@@ -523,6 +526,58 @@ li {
   to {
     transform: rotate(360deg);
   }
+}
+
+/* Shared by the Film-player overlay, the reel overlay, and the manual
+   upload progress block — Sprint 3 real loading/upload feedback. */
+.video-progress-track {
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.15);
+  overflow: hidden;
+  margin: 0.6rem 0 0.4rem;
+}
+
+.video-progress-fill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, var(--gold), var(--gold-soft));
+  transition: width 0.2s ease;
+}
+
+.video-progress-percent {
+  font-weight: 700;
+  margin: 0 0 0.2rem;
+}
+
+.video-progress-sub {
+  color: var(--muted);
+  font-size: 0.8rem;
+  margin: 0 0 0.2rem;
+  letter-spacing: normal;
+}
+
+.video-progress-eta {
+  color: var(--muted);
+  font-size: 0.78rem;
+  margin: 0;
+  letter-spacing: normal;
+  min-height: 1em;
+}
+
+#manual-upload-progress {
+  margin-top: 0.75rem;
+  padding: 0.75rem;
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 10px;
+}
+
+#manual-upload-progress p {
+  margin: 0;
+}
+
+#manual-upload-progress .video-progress-track {
+  margin: 0.5rem 0;
 }
 
 /* ==========================================================================
@@ -655,6 +710,54 @@ li {
   margin: 0.3rem 0 0;
 }
 
+/* ---------- Profile photo upload (Sprint 3) ---------- */
+
+#edit-profile-photo-section {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  flex-wrap: wrap;
+}
+
+#edit-profile-photo-preview {
+  width: 64px;
+  height: 64px;
+  min-width: 64px;
+  border-radius: 50%;
+  background-color: #0f1720;
+  background-size: cover;
+  background-position: center;
+  border: 2px solid var(--gold-dim);
+}
+
+#edit-profile-photo-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.file-upload-btn {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.6rem 0.85rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: linear-gradient(180deg, #16212c, #101820);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+
+.file-upload-btn:hover {
+  background: linear-gradient(180deg, #1b2a37, #12202b);
+  border-color: var(--gold);
+}
+
+#edit-profile-photo-status {
+  width: 100%;
+  margin: 0;
+}
+
 /* ---------- Hero card ---------- */
 
 #hero-card {
@@ -766,6 +869,42 @@ li {
   gap: 0.5rem;
   overflow-x: auto;
   padding-bottom: 0.25rem;
+}
+
+/* Mobile (default): video on top, horizontal-scrolling thumbnail strip
+   below — this is exactly Sprint 1's original mobile behavior, unchanged. */
+#reel-body {
+  display: block;
+}
+
+/* Desktop: video ~70% width with a thumbnail column on the right, per
+   Sprint 3's layout spec. Native <video> `controls` already includes a
+   fullscreen button, so "Full Screen still available" needs no extra work. */
+@media (min-width: 900px) {
+  #reel-body {
+    display: grid;
+    grid-template-columns: 70% 1fr;
+    gap: 0.75rem;
+    align-items: start;
+  }
+
+  #reel-stage {
+    margin-bottom: 0;
+    aspect-ratio: 16 / 9;
+  }
+
+  #reel-thumbnails {
+    flex-direction: column;
+    overflow-x: visible;
+    overflow-y: auto;
+    height: 100%;
+  }
+
+  .reel-thumb-btn {
+    width: 100%;
+    height: 72px;
+    flex: 0 0 auto;
+  }
 }
 
 .reel-thumb-btn {
@@ -1129,7 +1268,7 @@ li {
   border: none;
 }
 
-#capture-team-list {
+#capture-confirm-team-list {
   margin-top: 0.5rem;
 }
 
@@ -1137,6 +1276,37 @@ li {
   width: 100%;
   text-align: left;
   margin-bottom: 0.4rem;
+}
+
+/* ---------- Phase 4: camera-first entry + assign-team step ---------- */
+
+#capture-native-buttons button,
+#capture-desktop-start button {
+  width: 100%;
+}
+
+#capture-native-back-btn {
+  background: linear-gradient(180deg, var(--gold), #a9862a);
+  color: #1a1405;
+  font-weight: 700;
+  border: none;
+}
+
+#capture-suggested-team {
+  margin-bottom: 0.75rem;
+}
+
+#capture-confirm-suggested-team-btn {
+  width: 100%;
+  background: linear-gradient(180deg, var(--gold), #a9862a);
+  color: #1a1405;
+  font-weight: 700;
+  border: none;
+}
+
+#capture-skip-team-btn {
+  width: 100%;
+  margin-top: 0.75rem;
 }
 
 #capture-device-select {

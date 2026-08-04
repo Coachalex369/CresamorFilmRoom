@@ -80,10 +80,5 @@ const EVENT_TYPE_LABELS = {
   weight_cert: "Weight Certification",
 };
 
-// Recording flow's "Choose Team" list — no teams table exists yet, so this
-// is a fixed local list until a real Teams backend phase lands.
-const MOCK_TEAMS = [
-  { id: "team-wrestling", name: "Cresamor Wrestling", sport: "wrestling" },
-  { id: "team-football", name: "Cresamor Football", sport: "football" },
-  { id: "team-jv-wrestling", name: "JV Wrestling", sport: "wrestling" },
-];
+// MOCK_TEAMS removed — Foundation Sprint Phase 1 added a real teams table
+// and GET /api/teams. capture.js now fetches real teams instead.

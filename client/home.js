@@ -6,14 +6,16 @@
   system in this project) — reuses globals declared there: API_URL, apiFetch,
   currentUser, filmPlayer, selectVideo, logoutLocalState, activateApp.
 
-  Data sources, by section (see README/plan for the full breakdown):
-    - Profile: real currentUser (name/role) + localStorage overrides for
-      fields with no DB column yet (picture/school/team/grad year).
+  Data sources, by section (see CLAUDE.md for the full breakdown):
+    - Profile: REAL data as of Sprint 3 — GET/PUT /api/users/:id/profile,
+      photo via POST /api/users/:id/photo. No more localStorage overrides.
     - Hero Card new-highlights count: REAL data (clips created in last 7d).
       Next-event / coach-notification text: MOCK (mockData.js).
     - Featured Reel: REAL clips + videos, thumbnails generated client-side.
-    - Continue Watching: localStorage only.
-    - Messages Preview: the existing fake local #message-thread DOM.
+    - Continue Watching: localStorage only (still — see CLAUDE.md, this one
+      is a deliberate exception since it's inherently session/UX state).
+    - Messages Preview: reads #message-thread, which messages.js now
+      populates from REAL data (GET /api/messages) instead of a fake thread.
     - Upcoming Events: MOCK (mockData.js).
     - Recent Activity: REAL videos/clips, padded with MOCK fallback entries
       only when real activity is sparse.
@@ -32,9 +34,22 @@ const editProfileNameInput = document.querySelector("#edit-profile-name");
 const editProfileSchoolInput = document.querySelector("#edit-profile-school");
 const editProfileTeamInput = document.querySelector("#edit-profile-team");
 const editProfileGradYearInput = document.querySelector("#edit-profile-grad-year");
-const editProfilePictureInput = document.querySelector("#edit-profile-picture-url");
 const saveProfileBtn = document.querySelector("#save-profile-btn");
 const cancelProfileBtn = document.querySelector("#cancel-profile-btn");
+const editProfilePhotoUpload = document.querySelector("#edit-profile-photo-upload");
+const editProfilePhotoCamera = document.querySelector("#edit-profile-photo-camera");
+const editProfilePhotoPreview = document.querySelector("#edit-profile-photo-preview");
+const editProfilePhotoStatus = document.querySelector("#edit-profile-photo-status");
+
+const videoLoadingOverlay = document.querySelector("#video-loading-overlay");
+const videoLoadingProgressFill = document.querySelector("#video-loading-progress-fill");
+const videoLoadingPercent = document.querySelector("#video-loading-percent");
+const videoLoadingEta = document.querySelector("#video-loading-eta");
+
+const reelLoadingOverlay = document.querySelector("#reel-loading-overlay");
+const reelLoadingProgressFill = document.querySelector("#reel-loading-progress-fill");
+const reelLoadingPercent = document.querySelector("#reel-loading-percent");
+const reelLoadingEta = document.querySelector("#reel-loading-eta");
 
 const heroNextEventText = document.querySelector("#hero-next-event-text");
 const heroNotificationsText = document.querySelector("#hero-notifications-text");
@@ -67,49 +82,61 @@ function switchToScreen(screenId) {
   }
 }
 
-/* ---------- PROFILE (localStorage overrides only — no DB columns yet) ---------- */
+/* ---------- PROFILE (real DB persistence — Sprint 3) ---------- */
 
-const PROFILE_OVERRIDES_KEY = "cresamor_profile_overrides";
+let currentProfile = null;
 
-function getProfileOverrides() {
-  try {
-    return JSON.parse(localStorage.getItem(PROFILE_OVERRIDES_KEY)) || {};
-  } catch {
-    return {};
-  }
+function resolveUploadUrl(url) {
+  if (!url) return null;
+  return url.startsWith("http") ? url : `${API_URL}${url}`;
 }
 
-function saveProfileOverrides(overrides) {
-  localStorage.setItem(PROFILE_OVERRIDES_KEY, JSON.stringify(overrides));
+async function fetchProfile() {
+  if (!currentUser) return null;
+
+  try {
+    currentProfile = await apiFetch(`/api/users/${currentUser.id}/profile`);
+  } catch (error) {
+    console.error("Failed to load profile:", error);
+    currentProfile = null;
+  }
+
+  return currentProfile;
 }
 
 function renderProfileBlock() {
-  if (!currentUser) return;
+  if (!currentUser || !currentProfile) return;
 
-  const overrides = getProfileOverrides();
-  const displayName = overrides.name || currentUser.email.split("@")[0];
+  const displayName = currentProfile.display_name || currentUser.email.split("@")[0];
 
   profileName.textContent = displayName;
-  profileSchool.textContent = overrides.school || "School not set";
-  profileTeam.textContent = overrides.team || "Team not set";
-  profileGradYear.textContent = overrides.gradYear
-    ? `Class of ${overrides.gradYear}`
+  profileSchool.textContent = currentProfile.school || "School not set";
+  profileTeam.textContent = currentProfile.team || "Team not set";
+  profileGradYear.textContent = currentProfile.graduation_year
+    ? `Class of ${currentProfile.graduation_year}`
     : "Class of —";
 
   profilePicturePlaceholder.textContent = displayName.charAt(0).toUpperCase();
-  profilePicturePlaceholder.style.backgroundImage = overrides.pictureUrl
-    ? `url(${overrides.pictureUrl})`
-    : "none";
+  const photoUrl = resolveUploadUrl(currentProfile.profile_picture_url);
+  profilePicturePlaceholder.style.backgroundImage = photoUrl ? `url(${photoUrl})` : "none";
+}
+
+function renderProfilePhotoPreview(url) {
+  if (!editProfilePhotoPreview) return;
+  const resolved = url && url.startsWith("blob:") ? url : resolveUploadUrl(url);
+  editProfilePhotoPreview.style.backgroundImage = resolved ? `url(${resolved})` : "none";
 }
 
 function openEditProfileForm() {
-  const overrides = getProfileOverrides();
+  if (!currentProfile) return;
 
-  editProfileNameInput.value = overrides.name || "";
-  editProfileSchoolInput.value = overrides.school || "";
-  editProfileTeamInput.value = overrides.team || "";
-  editProfileGradYearInput.value = overrides.gradYear || "";
-  editProfilePictureInput.value = overrides.pictureUrl || "";
+  editProfileNameInput.value = currentProfile.display_name || "";
+  editProfileSchoolInput.value = currentProfile.school || "";
+  editProfileTeamInput.value = currentProfile.team || "";
+  editProfileGradYearInput.value = currentProfile.graduation_year || "";
+
+  if (editProfilePhotoStatus) editProfilePhotoStatus.textContent = "";
+  renderProfilePhotoPreview(currentProfile.profile_picture_url);
 
   editProfileForm.classList.remove("hidden");
 }
@@ -127,17 +154,98 @@ if (cancelProfileBtn) {
 }
 
 if (saveProfileBtn) {
-  saveProfileBtn.addEventListener("click", () => {
-    saveProfileOverrides({
-      name: editProfileNameInput.value.trim(),
-      school: editProfileSchoolInput.value.trim(),
-      team: editProfileTeamInput.value.trim(),
-      gradYear: editProfileGradYearInput.value.trim(),
-      pictureUrl: editProfilePictureInput.value.trim(),
+  saveProfileBtn.addEventListener("click", async () => {
+    try {
+      currentProfile = await apiFetch(`/api/users/${currentUser.id}/profile`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          display_name: editProfileNameInput.value.trim(),
+          school: editProfileSchoolInput.value.trim(),
+          team: editProfileTeamInput.value.trim(),
+          graduation_year: editProfileGradYearInput.value.trim() || null,
+        }),
+      });
+
+      renderProfileBlock();
+      closeEditProfileForm();
+    } catch (error) {
+      console.error("Failed to save profile:", error);
+      showMessage("Could not save profile. Please try again.");
+    }
+  });
+}
+
+/* ---------- PROFILE PHOTO (client-side compress, then real upload) ---------- */
+
+function compressImageFile(file, maxDimension = 800, quality = 0.8) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+
+    reader.onerror = reject;
+    reader.onload = () => {
+      const image = new Image();
+
+      image.onerror = reject;
+      image.onload = () => {
+        const scale = Math.min(1, maxDimension / Math.max(image.width, image.height));
+        const canvas = document.createElement("canvas");
+
+        canvas.width = Math.round(image.width * scale);
+        canvas.height = Math.round(image.height * scale);
+
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+
+        canvas.toBlob((blob) => resolve(blob), "image/jpeg", quality);
+      };
+
+      image.src = reader.result;
+    };
+
+    reader.readAsDataURL(file);
+  });
+}
+
+async function handleProfilePhotoSelected(file) {
+  if (!file || !currentUser) return;
+
+  if (editProfilePhotoStatus) editProfilePhotoStatus.textContent = "Compressing…";
+
+  try {
+    const compressedBlob = await compressImageFile(file);
+    renderProfilePhotoPreview(URL.createObjectURL(compressedBlob));
+
+    if (editProfilePhotoStatus) editProfilePhotoStatus.textContent = "Uploading…";
+
+    const formData = new FormData();
+    formData.append("photo", compressedBlob, "profile.jpg");
+
+    const updated = await apiFetch(`/api/users/${currentUser.id}/photo`, {
+      method: "POST",
+      body: formData,
     });
 
+    currentProfile = updated;
     renderProfileBlock();
-    closeEditProfileForm();
+    renderProfilePhotoPreview(updated.profile_picture_url);
+
+    if (editProfilePhotoStatus) editProfilePhotoStatus.textContent = "Photo updated.";
+  } catch (error) {
+    console.error("Photo upload failed:", error);
+    if (editProfilePhotoStatus) editProfilePhotoStatus.textContent = "Could not upload photo.";
+  }
+}
+
+if (editProfilePhotoUpload) {
+  editProfilePhotoUpload.addEventListener("change", (event) => {
+    handleProfilePhotoSelected(event.target.files[0]);
+  });
+}
+
+if (editProfilePhotoCamera) {
+  editProfilePhotoCamera.addEventListener("change", (event) => {
+    handleProfilePhotoSelected(event.target.files[0]);
   });
 }
 
@@ -511,6 +619,13 @@ if (viewAllMessagesBtn) {
   viewAllMessagesBtn.addEventListener("click", () => {
     messagesPreviewUnread = 0; // local-only "read" state, resets on reload
     switchToScreen("messages-screen");
+
+    // Foundation Sprint Phase 2: also mark it read server-side now that
+    // conversation_participants.last_read_at is real — messages.js exposes
+    // this the same way home.js exposes window.renderMessagesPreview.
+    if (typeof window.markCurrentConversationRead === "function") {
+      window.markCurrentConversationRead();
+    }
   });
 }
 
@@ -630,6 +745,7 @@ function renderRecentActivity(videos, clips) {
 async function renderHome() {
   if (!currentUser) return;
 
+  await fetchProfile();
   renderProfileBlock();
   renderUpcomingEvents();
   renderMessagesPreview();
@@ -650,6 +766,97 @@ async function renderHome() {
   } catch (error) {
     console.error("Failed to load Home data:", error);
   }
+}
+
+/* ---------- VIDEO LOADING OVERLAYS (real buffering feedback, Sprint 3) ---------- */
+/* #video-loading-overlay markup already existed in index.html but nothing
+   wired it to real events (dead markup, confirmed during Sprint 3 audit).
+   #reel-loading-overlay is new — closes the gap where a slow/cross-origin
+   reel video showed a bare spinner with no fallback (found during Sprint 1
+   testing). Both driven by the same small helper below, attached as plain
+   listeners on the existing video elements — doesn't touch selectVideo()
+   or renderFeaturedClip(). */
+
+function estimateEta(video, startedAt) {
+  if (!video.duration || !video.buffered.length) return "";
+
+  const bufferedEnd = video.buffered.end(video.buffered.length - 1);
+  const elapsedSeconds = (Date.now() - startedAt) / 1000;
+
+  if (elapsedSeconds < 1 || bufferedEnd <= 0) return "";
+
+  const downloadRate = bufferedEnd / elapsedSeconds; // seconds of video per real second
+  if (downloadRate <= 0) return "";
+
+  const remainingSeconds = Math.max(0, video.duration - bufferedEnd);
+  const etaSeconds = Math.round(remainingSeconds / downloadRate);
+
+  if (etaSeconds <= 0) return "";
+  if (etaSeconds < 60) return `Estimated time remaining: ${etaSeconds}s`;
+  return `Estimated time remaining: ${Math.round(etaSeconds / 60)}m`;
+}
+
+function wireVideoLoadingOverlay(video, overlay, progressFill, percentEl, etaEl) {
+  if (!video || !overlay) return;
+
+  let startedAt = Date.now();
+
+  const show = () => {
+    startedAt = Date.now();
+    overlay.classList.remove("hidden");
+    progressFill.style.width = "0%";
+    percentEl.textContent = "0%";
+    etaEl.textContent = "";
+  };
+
+  const hide = () => overlay.classList.add("hidden");
+
+  const updateProgress = () => {
+    if (!video.duration || !video.buffered.length) return;
+
+    const bufferedEnd = video.buffered.end(video.buffered.length - 1);
+    const percent = Math.min(100, Math.round((bufferedEnd / video.duration) * 100));
+
+    progressFill.style.width = `${percent}%`;
+    percentEl.textContent = `${percent}%`;
+    etaEl.textContent = estimateEta(video, startedAt);
+  };
+
+  video.addEventListener("loadstart", show);
+  video.addEventListener("progress", updateProgress);
+  video.addEventListener("waiting", show);
+  video.addEventListener("canplay", hide);
+  video.addEventListener("canplaythrough", hide);
+  video.addEventListener("playing", hide);
+  video.addEventListener("error", hide);
+}
+
+wireVideoLoadingOverlay(
+  filmPlayer,
+  videoLoadingOverlay,
+  videoLoadingProgressFill,
+  videoLoadingPercent,
+  videoLoadingEta
+);
+
+wireVideoLoadingOverlay(
+  reelVideo,
+  reelLoadingOverlay,
+  reelLoadingProgressFill,
+  reelLoadingPercent,
+  reelLoadingEta
+);
+
+/* ---------- PARENT ACCOUNT (Sprint 3) ---------- */
+/* New button in index.html; reuses the existing global handleAuth() from
+   app.js exactly like the Coach/Athlete buttons do — no app.js edit needed. */
+
+const loginParentBtn = document.querySelector("#login-parent-btn");
+
+if (loginParentBtn) {
+  loginParentBtn.addEventListener("click", () => {
+    handleAuth("parent");
+  });
 }
 
 /* ---------- hook into existing app.js lifecycle without editing it ---------- */

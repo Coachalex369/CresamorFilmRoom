@@ -205,8 +205,11 @@ async function loadVideos() {
     const videos = await apiFetch("/api/videos");
 
     if (!Array.isArray(videos) || videos.length === 0) {
+      // Foundation Sprint Phase 5: removed a blocking alert() here — it fired
+      // for every first-time athlete (only coaches could upload) and froze
+      // the tab, including for browser automation. The inline empty-state
+      // message below already communicates the same thing without blocking.
       videoList.innerHTML = "<li>No videos found.</li>";
-      showMessage("No videos found in database.");
       return;
     }
 
@@ -432,7 +435,10 @@ async function saveHighlight() {
   }
 }
 
-async function uploadVideo(file) {
+// Sprint 3: converted from fetch to XMLHttpRequest so this manual upload
+// path gets the same real progress/percentage/size/ETA feedback as the
+// capture.js recording flow — fetch() doesn't expose upload progress events.
+function uploadVideo(file) {
   if (!currentUser || currentUser.role !== "coach") {
     showMessage("Only coaches can upload videos.");
     return;
@@ -443,29 +449,76 @@ async function uploadVideo(file) {
     return;
   }
 
-  try {
-    const formData = new FormData();
+  const progressSection = document.querySelector("#manual-upload-progress");
+  const progressFill = document.querySelector("#manual-upload-progress-fill");
+  const progressPercent = document.querySelector("#manual-upload-percent");
+  const progressSize = document.querySelector("#manual-upload-size");
+  const progressEta = document.querySelector("#manual-upload-eta");
 
-    formData.append("video", file);
-    formData.append("title", file.name);
-    formData.append("uploaded_by", currentUser.id);
+  const formData = new FormData();
 
-    const data = await apiFetch("/api/upload-video", {
-      method: "POST",
-      body: formData,
-    });
+  formData.append("video", file);
+  formData.append("title", file.name);
+  formData.append("uploaded_by", currentUser.id);
 
-    showMessage("Video uploaded.");
-    await loadVideos();
-    selectVideo(data);
+  const startedAt = Date.now();
 
-    if (videoUploadInput) {
-      videoUploadInput.value = "";
-    }
-  } catch (error) {
-    console.error("Upload failed:", error);
-    showMessage(error.message || "Could not upload video.");
+  if (progressSection) {
+    progressSection.classList.remove("hidden");
+    progressFill.style.width = "0%";
+    progressPercent.textContent = "0%";
+    progressSize.textContent = "";
+    progressEta.textContent = "";
   }
+
+  const xhr = new XMLHttpRequest();
+
+  xhr.open("POST", `${API_URL}/api/upload-video`);
+
+  xhr.upload.addEventListener("progress", (event) => {
+    if (!event.lengthComputable || !progressSection) return;
+
+    const percent = Math.round((event.loaded / event.total) * 100);
+    const elapsedSeconds = (Date.now() - startedAt) / 1000;
+    const rate = elapsedSeconds > 0 ? event.loaded / elapsedSeconds : 0;
+    const remainingBytes = event.total - event.loaded;
+    const etaSeconds = rate > 0 ? Math.round(remainingBytes / rate) : null;
+
+    progressFill.style.width = `${percent}%`;
+    progressPercent.textContent = `${percent}%`;
+    progressSize.textContent = `${(event.loaded / 1024 / 1024).toFixed(1)}MB of ${(event.total / 1024 / 1024).toFixed(1)}MB`;
+    progressEta.textContent =
+      etaSeconds && etaSeconds > 0
+        ? `Estimated time remaining: ${etaSeconds < 60 ? `${etaSeconds}s` : `${Math.round(etaSeconds / 60)}m`}`
+        : "";
+  });
+
+  xhr.addEventListener("load", async () => {
+    if (progressSection) progressSection.classList.add("hidden");
+
+    if (xhr.status >= 200 && xhr.status < 300) {
+      const data = JSON.parse(xhr.responseText);
+
+      showMessage("Video uploaded.");
+      await loadVideos();
+      selectVideo(data);
+
+      if (videoUploadInput) {
+        videoUploadInput.value = "";
+      }
+    } else {
+      console.error("Upload failed:", xhr.status, xhr.responseText);
+      showMessage("Could not upload video.");
+    }
+  });
+
+  xhr.addEventListener("error", () => {
+    if (progressSection) progressSection.classList.add("hidden");
+    console.error("Upload failed: network error");
+    showMessage("Could not upload video.");
+  });
+
+  xhr.send(formData);
 }
 
 /* ---------- DRAWING FUNCTIONS ---------- */
