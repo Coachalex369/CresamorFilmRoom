@@ -1,6 +1,7 @@
 const express = require("express");
 const path = require("path");
 const fs = require("fs");
+const crypto = require("crypto");
 const multer = require("multer");
 
 const client = require("../db/client");
@@ -78,12 +79,28 @@ const tempStorage = multer.diskStorage({
     cb(null, tempUploadsDir);
   },
   filename: (req, file, cb) => {
+    // This is only the TEMP filename (uploads/.tmp/) — never the storage
+    // key videos actually get stored/served under. Doesn't need to be
+    // opaque; it's deleted the moment storage.upload() finishes.
     const safeName = `${Date.now()}-${file.originalname.replace(/\s+/g, "-")}`;
     cb(null, safeName);
   },
 });
 
-const upload = multer({ storage: tempStorage });
+const upload = multer({
+  storage: tempStorage,
+  // First layer of MIME validation — fails fast, before multer even
+  // finishes writing the temp file. storage.upload() enforces the same
+  // allowlist again as the second layer (see storage.js) — this file
+  // reuses that single source of truth via storage.isAllowed() rather
+  // than keeping its own separate list.
+  fileFilter: (req, file, cb) => {
+    if (!storage.isAllowed("video", file.mimetype)) {
+      return cb(new Error(`Unsupported video type: ${file.mimetype}`));
+    }
+    cb(null, true);
+  },
+});
 
 router.get("/api/videos", async (req, res) => {
   try {
@@ -162,8 +179,17 @@ router.post("/api/upload-video", upload.single("video"), async (req, res) => {
     // R2, whichever STORAGE_PROVIDER is active. Legacy rows (storage_key
     // NULL) are untouched and keep using file_url forever; this is not a
     // migration of old rows, only where new ones land.
-    const storageKey = `videos/${req.file.filename}`;
-    await storage.upload(storageKey, req.file.path, req.file.mimetype);
+    //
+    // Opaque key refinement: no original filename in the key — just an
+    // organizational prefix (team/year) and a random UUID. team_id is
+    // optional (the manual coach-upload path still doesn't collect one),
+    // hence "unassigned" as a stable fallback segment rather than
+    // conditionally omitting a path level.
+    const extension = storage.extensionFor("video", req.file.mimetype);
+    const year = new Date().getFullYear();
+    const teamSegment = team_id || "unassigned";
+    const storageKey = `videos/${teamSegment}/${year}/${crypto.randomUUID()}${extension}`;
+    await storage.upload(storageKey, req.file.path, req.file.mimetype, { category: "video" });
 
     // Foundation Sprint Phase 1: team_id/film_type are now real columns —
     // capture.js sends them directly instead of Sprint 1's workaround of

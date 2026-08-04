@@ -1,6 +1,7 @@
 const express = require("express");
 const path = require("path");
 const fs = require("fs");
+const crypto = require("crypto");
 const multer = require("multer");
 
 const client = require("../db/client");
@@ -21,6 +22,9 @@ const profilePictureStorage = multer.diskStorage({
     cb(null, tempProfilePicturesDir);
   },
   filename: (req, file, cb) => {
+    // Only the TEMP filename (uploads/.tmp/) — never the storage key the
+    // photo actually gets stored/served under. Deleted the moment
+    // storage.upload() finishes.
     const safeName = `${Date.now()}-${file.originalname.replace(/\s+/g, "-")}`;
     cb(null, safeName);
   },
@@ -28,9 +32,14 @@ const profilePictureStorage = multer.diskStorage({
 
 const uploadProfilePicture = multer({
   storage: profilePictureStorage,
+  // First layer of MIME validation, reusing storage.js's allowlist (see
+  // videos.js's identical pattern) — tighter than the old "any image/*"
+  // check, which would have accepted image/svg+xml (SVGs can carry
+  // embedded scripts, not something to allow through a profile photo
+  // upload).
   fileFilter: (req, file, cb) => {
-    if (!file.mimetype.startsWith("image/")) {
-      return cb(new Error("Only image files are allowed"));
+    if (!storage.isAllowed("image", file.mimetype)) {
+      return cb(new Error(`Unsupported image type: ${file.mimetype}`));
     }
     cb(null, true);
   },
@@ -149,8 +158,11 @@ router.post("/api/users/:id/photo", uploadProfilePicture.single("photo"), async 
     // Beta Readiness Sprint 1: same storage_key pattern as videos — new
     // uploads go through the active provider, profile_picture_url stays
     // NULL for these rows (resolved on read via withResolvedPhotoUrl).
-    const storageKey = `profile-pictures/${req.file.filename}`;
-    await storage.upload(storageKey, req.file.path, req.file.mimetype);
+    // Opaque key: no original filename, just the owning user's id and a
+    // random UUID — see videos.js's identical reasoning.
+    const extension = storage.extensionFor("image", req.file.mimetype);
+    const storageKey = `profile-pictures/${id}/${crypto.randomUUID()}${extension}`;
+    await storage.upload(storageKey, req.file.path, req.file.mimetype, { category: "image" });
 
     const result = await client.query(
       `

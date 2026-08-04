@@ -10,7 +10,10 @@
   What it does: finds videos/users rows that still have a legacy local
   file_url/profile_picture_url and no storage_key/profile_picture_key,
   checks whether the file is STILL actually present on this disk right
-  now, and if so uploads it to R2 and sets the key column. Rows whose
+  now, and if so uploads it to R2 and sets the key column, using the same
+  opaque UUID key shape (videos/{teamId}/{year}/{uuid}.ext,
+  profile-pictures/{userId}/{uuid}.ext) as the live upload routes — no
+  original filename carried over, even for backfilled rows. Rows whose
   files are already gone (this has already happened once to this project
   — see ARCHITECTURE.md's storage section) are logged and skipped, not
   treated as an error. Never deletes the local file, never clears
@@ -21,9 +24,31 @@
 
 const path = require("path");
 const fs = require("fs");
+const crypto = require("crypto");
 
 const client = require("../db/client");
 const storage = require("../services/storage/storage");
+
+// Legacy rows only have an extension to go on (no stored original
+// mimetype) — reverse of storage.js's extensionFor() allowlist, so a
+// backfilled row still gets a real, validated content type rather than a
+// guessed/hardcoded one.
+const EXTENSION_TO_MIME = {
+  ".mp4": "video/mp4",
+  ".mov": "video/quicktime",
+  ".webm": "video/webm",
+  ".avi": "video/x-msvideo",
+  ".3gp": "video/3gpp",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".png": "image/png",
+  ".webp": "image/webp",
+  ".gif": "image/gif",
+};
+
+function mimeTypeFor(localPath, fallback) {
+  return EXTENSION_TO_MIME[path.extname(localPath).toLowerCase()] || fallback;
+}
 
 if (process.env.STORAGE_PROVIDER !== "r2") {
   console.error(
@@ -43,19 +68,19 @@ function localPathFor(urlPath) {
 // no matter what happens.
 const backfillTempDir = path.join(__dirname, "../../uploads/.tmp");
 
-async function uploadWithoutDeletingSource(key, sourcePath, contentType) {
+async function uploadWithoutDeletingSource(key, sourcePath, contentType, category) {
   if (!fs.existsSync(backfillTempDir)) {
     fs.mkdirSync(backfillTempDir, { recursive: true });
   }
 
   const scratchPath = path.join(backfillTempDir, `backfill-${Date.now()}-${path.basename(sourcePath)}`);
   fs.copyFileSync(sourcePath, scratchPath);
-  await storage.upload(key, scratchPath, contentType);
+  await storage.upload(key, scratchPath, contentType, { category });
 }
 
 async function backfillVideos() {
   const { rows } = await client.query(
-    `SELECT id, file_url FROM videos WHERE storage_key IS NULL AND file_url IS NOT NULL AND file_url NOT LIKE 'http%'`
+    `SELECT id, file_url, team_id, created_at FROM videos WHERE storage_key IS NULL AND file_url IS NOT NULL AND file_url NOT LIKE 'http%'`
   );
 
   let uploaded = 0;
@@ -71,8 +96,17 @@ async function backfillVideos() {
     }
 
     try {
-      const key = `videos/backfill-${video.id}-${path.basename(video.file_url)}`;
-      await uploadWithoutDeletingSource(key, localPath, "video/mp4");
+      const contentType = mimeTypeFor(localPath, "video/mp4");
+      const extension = storage.extensionFor("video", contentType) || path.extname(localPath);
+      // Same opaque-key shape as the live upload route — no original
+      // filename, organized by team (or "unassigned") and the year the
+      // video was actually created, not the year this script happens to
+      // run.
+      const teamSegment = video.team_id || "unassigned";
+      const year = new Date(video.created_at).getFullYear();
+      const key = `videos/${teamSegment}/${year}/${crypto.randomUUID()}${extension}`;
+
+      await uploadWithoutDeletingSource(key, localPath, contentType, "video");
       await client.query("UPDATE videos SET storage_key = $1 WHERE id = $2", [key, video.id]);
       uploaded += 1;
     } catch (error) {
@@ -102,8 +136,11 @@ async function backfillProfilePictures() {
     }
 
     try {
-      const key = `profile-pictures/backfill-${user.id}-${path.basename(user.profile_picture_url)}`;
-      await uploadWithoutDeletingSource(key, localPath, "image/jpeg");
+      const contentType = mimeTypeFor(localPath, "image/jpeg");
+      const extension = storage.extensionFor("image", contentType) || path.extname(localPath);
+      const key = `profile-pictures/${user.id}/${crypto.randomUUID()}${extension}`;
+
+      await uploadWithoutDeletingSource(key, localPath, contentType, "image");
       await client.query("UPDATE users SET profile_picture_key = $1 WHERE id = $2", [key, user.id]);
       uploaded += 1;
     } catch (error) {

@@ -26,8 +26,18 @@ const client = require("../db/client");
 // below). Rather than mark these 'ready' and let the player hit a decode
 // error, they're detected here and held at 'processing' — the client shows
 // a "requires conversion" message for that case instead of a spinner.
+//
+// R2 migration fix: storage_key rows leave file_url NULL (see
+// ARCHITECTURE.md's "Storage strategy"), so this has to check storage_key
+// first — checking file_url alone silently never detected .MOV on any
+// R2-routed upload, a real bug introduced by that migration and caught
+// while implementing the opaque-key refinement. storage_key still carries
+// a real file extension (UUID-named, not filename-preserving, but the
+// extension itself isn't identifying info) specifically so this keeps
+// working.
 function needsFormatConversion(video) {
-  return /\.mov(\?.*)?$/i.test(video.file_url || "");
+  const source = video.storage_key || video.file_url || "";
+  return /\.mov(\?.*)?$/i.test(source);
 }
 
 async function enqueueVideoProcessing(video) {

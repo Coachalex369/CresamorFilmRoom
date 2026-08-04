@@ -47,7 +47,13 @@ async function upload(key, filePath, contentType) {
   await fs.promises.unlink(filePath);
 }
 
-async function getSignedUrl(key, expiresInSeconds = 3600) {
+// 20 minutes, not the more typical 1 hour — a deliberately short window
+// (per explicit request) even though it means a coach reviewing a game
+// film longer than this, or seeking after the window closes, will hit a
+// 403 on the next range request and need to reselect the video to get a
+// fresh URL. No mitigation for that mid-playback interruption yet; worth
+// revisiting if it turns out to bother real beta testers.
+async function getSignedUrl(key, expiresInSeconds = 1200) {
   const command = new GetObjectCommand({ Bucket: BUCKET, Key: key });
   return presign(client, command, { expiresIn: expiresInSeconds });
 }
