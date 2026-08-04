@@ -27,7 +27,26 @@ if (!fs.existsSync(uploadsDir)) {
 const DEFAULT_ALLOWED_ORIGIN = "https://cresamorfilmroom-3.onrender.com";
 const allowedOrigin = process.env.ALLOWED_ORIGIN || DEFAULT_ALLOWED_ORIGIN;
 
-app.use(helmet());
+// Production bug fix (Beta Readiness Sprint 2 follow-up): Helmet's default
+// CSP doesn't set media-src, so it falls back to default-src 'self' —
+// which does NOT match blob: URLs. That silently broke every local
+// recording preview and Film Room playback of an unsynced recording
+// (both play from a blob: URL created off the IndexedDB Blob). Confirmed
+// via direct reproduction: a <video src="blob:..."> load in production
+// failed with "MEDIA_ELEMENT_ERROR: Media load rejected by URL safety
+// check" before this fix. Everything else about Helmet's defaults is
+// still appropriate (see the original Sprint 2 plan) — this adds the one
+// directive this app's blob-URL-based local playback actually needs.
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      directives: {
+        ...helmet.contentSecurityPolicy.getDefaultDirectives(),
+        "media-src": ["'self'", "blob:"],
+      },
+    },
+  })
+);
 app.use(cors({ origin: allowedOrigin }));
 app.use(morgan("dev"));
 app.use(express.json({ limit: "100kb" }));

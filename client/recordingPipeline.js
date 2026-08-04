@@ -106,16 +106,24 @@ async function recordingPipelineUpload(recording) {
 }
 
 async function recordingPipelineProcessNext() {
+  // Production bug fix: the busy flag used to be set AFTER the first
+  // await (getPendingUpload()) — a check-then-set race. Two calls that
+  // both land while busy is still false (e.g. a flaky sideline connection
+  // firing the `online` event repeatedly while a genuine upload is still
+  // in flight) could both pass the guard, both read the same pending[0],
+  // and both start uploading the same recording concurrently. Setting the
+  // flag synchronously, before any await, closes that window — the guard
+  // and the flag-set are now one atomic step.
   if (recordingPipelineBusy) return;
-
-  const pending = await recordingLibrary.getPendingUpload();
-  const next = pending[0];
-  if (!next) return;
-
   recordingPipelineBusy = true;
+
   let succeeded = false;
 
   try {
+    const pending = await recordingLibrary.getPendingUpload();
+    const next = pending[0];
+    if (!next) return;
+
     succeeded = await recordingPipelineUpload(next);
   } finally {
     recordingPipelineBusy = false;

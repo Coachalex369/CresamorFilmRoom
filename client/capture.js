@@ -311,6 +311,23 @@ function pickSupportedMimeType() {
   return candidates.find((type) => window.MediaRecorder && MediaRecorder.isTypeSupported(type)) || "";
 }
 
+// Production bug fix: MediaRecorder happily accepts the loose
+// "video/mp4;codecs=avc1,mp4a" syntax (needed to pick the right encoder),
+// but that same string is NOT a spec-valid Blob/Content-Type value — the
+// unquoted comma inside the codecs parameter isn't legal token/quoted-
+// string syntax. Blob.prototype.type stores it faithfully either way, but
+// browsers silently drop it when generating the real multipart Content-
+// Type header for the upload, and the server ends up seeing "text/plain"
+// (busboy's default for a part with no Content-Type at all) instead of
+// any recognizable video type — every desktop recording using a
+// codec-qualified candidate failed the server's MIME allowlist as a
+// result. Only the base container type ("video/mp4"/"video/webm") is
+// ever needed downstream (server-side validation, extension lookup); the
+// codec parameter's job ends once MediaRecorder has been constructed.
+function baseMimeType(mimeType) {
+  return (mimeType || "").split(";")[0].trim();
+}
+
 function formatTimer(totalSeconds) {
   const minutes = Math.floor(totalSeconds / 60).toString().padStart(2, "0");
   const seconds = Math.floor(totalSeconds % 60).toString().padStart(2, "0");
@@ -360,7 +377,7 @@ captureRecordBtn.addEventListener("click", () => {
   };
 
   capture.recorder.onstop = () => {
-    capture.blob = new Blob(capture.chunks, { type: capture.mimeType || "video/webm" });
+    capture.blob = new Blob(capture.chunks, { type: baseMimeType(capture.mimeType) || "video/webm" });
     captureReviewVideo.src = URL.createObjectURL(capture.blob);
     showCaptureStep("review");
   };

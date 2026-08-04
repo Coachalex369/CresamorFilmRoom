@@ -57,20 +57,34 @@ function allowedTypesFor(category) {
   return { ...ALLOWED_CONTENT_TYPES.video, ...ALLOWED_CONTENT_TYPES.image };
 }
 
+// Production bug fix (Beta Readiness Sprint 2 follow-up): a real
+// MediaRecorder Blob's `type` — and therefore the multipart Content-Type
+// multer reports as `file.mimetype` — carries codec parameters, e.g.
+// "video/mp4;codecs=avc1,mp4a" (see capture.js's pickSupportedMimeType()).
+// The allowlist below is keyed on bare container types, so an exact-match
+// lookup against the untouched header silently rejected every real
+// recording while accepting clean test values like "video/mp4" — the
+// underlying cause of the "authenticated upload always fails" regression.
+// Normalize to the part before the first ";" before every lookup.
+function normalizeContentType(contentType) {
+  return String(contentType || "").split(";")[0].trim().toLowerCase();
+}
+
 function extensionFor(category, contentType) {
-  return allowedTypesFor(category)[contentType] || "";
+  return allowedTypesFor(category)[normalizeContentType(contentType)] || "";
 }
 
 // Exposed so routes can use the SAME allowlist for their own first-layer
 // multer fileFilter — one source of truth, not two lists that can drift.
 function isAllowed(category, contentType) {
-  return Boolean(allowedTypesFor(category)[contentType]);
+  return Boolean(allowedTypesFor(category)[normalizeContentType(contentType)]);
 }
 
 async function upload(key, filePath, contentType, { category } = {}) {
   const allowed = allowedTypesFor(category);
+  const normalized = normalizeContentType(contentType);
 
-  if (!allowed[contentType]) {
+  if (!allowed[normalized]) {
     throw new Error(
       `Rejected upload: content type "${contentType}" is not allowed${
         category ? ` for category "${category}"` : ""
