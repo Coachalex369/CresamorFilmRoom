@@ -91,6 +91,10 @@ function recordingLibrarySubscribe(callback) {
 }
 
 async function recordingLibraryCreate({ blob, title, teamId, uploadedBy, mimeType }) {
+  if (!(blob instanceof Blob)) {
+    throw new Error("recordingLibrary.create() requires a real Blob/File — got " + typeof blob);
+  }
+
   const record = {
     recordingId: generateRecordingId(),
     blob,

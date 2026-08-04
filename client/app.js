@@ -340,8 +340,17 @@ function renderVideoList() {
   // Once a recording is `processed`, the server row (in allVideos) is what
   // shows — the library still keeps its own copy underneath regardless,
   // it just doesn't need to render twice.
+  // A record with no valid Blob (shouldn't happen — recordingLibrary.create()
+  // validates this now — but defends against any pre-existing/corrupted
+  // IndexedDB entry) must not crash rendering for every other video. Skip it,
+  // don't let Array.map's all-or-nothing failure take down the whole list.
   const localEntries = localRecordings
     .filter((record) => record.lifecycle !== "processed")
+    .filter((record) => {
+      if (record.blob instanceof Blob) return true;
+      console.error("Skipping corrupted local recording (invalid blob):", record.recordingId);
+      return false;
+    })
     .map(toLocalVideoLike);
 
   const mergedVideos = [...localEntries, ...allVideos];
