@@ -49,6 +49,8 @@ const clearDrawingsBtn = document.querySelector("#clear-drawings-btn");
 
 const videoUploadInput = document.querySelector("#video-upload");
 const videoList = document.querySelector("#video-list");
+const videoStatusMessage = document.querySelector("#video-status-message");
+const videoStatusText = document.querySelector("#video-status-text");
 
 const highlightTitleInput = document.querySelector("#highlight-title-input");
 const highlightStartBtn = document.querySelector("#highlight-start-btn");
@@ -107,18 +109,120 @@ function updateSpeedDisplay() {
   speedDisplay.textContent = `${filmPlayer.playbackRate}x`;
 }
 
+function showVideoStatusMessage(text) {
+  if (!videoStatusMessage || !videoStatusText) return;
+  videoStatusText.textContent = text;
+  videoStatusMessage.classList.remove("hidden");
+
+  // The loading overlay listens for its own loadstart/error events on
+  // filmPlayer (home.js's wireVideoLoadingOverlay) and isn't guaranteed to
+  // have hidden itself by the time this runs — force it closed so the two
+  // semi-transparent overlays don't stack into a muddy double vignette.
+  const loadingOverlay = document.querySelector("#video-loading-overlay");
+  if (loadingOverlay) loadingOverlay.classList.add("hidden");
+}
+
+function hideVideoStatusMessage() {
+  if (!videoStatusMessage) return;
+  videoStatusMessage.classList.add("hidden");
+}
+
+function unavailableReason(video) {
+  if (video.available === false) return "This video file is no longer available.";
+  if (video.needs_conversion) return "This video's format requires conversion and can't be played yet.";
+  return null;
+}
+
 function selectVideo(video) {
   if (!video) return;
 
   currentVideoId = video.id;
- filmPlayer.src = video.file_url.startsWith("http")
-  ? video.file_url
-  : `${API_URL}${video.file_url}`;
-  filmPlayer.load();
+
+  const reason = unavailableReason(video);
+
+  if (reason) {
+    filmPlayer.removeAttribute("src");
+    filmPlayer.load();
+    showVideoStatusMessage(reason);
+  } else {
+    hideVideoStatusMessage();
+    filmPlayer.src = video.file_url.startsWith("http")
+      ? video.file_url
+      : `${API_URL}${video.file_url}`;
+    filmPlayer.load();
+  }
+
+  playBtn.disabled = Boolean(reason);
+
   resizeDrawCanvas();
   clearDrawings();
   renderVideoList();
   renderCurrentVideoHighlights();
+}
+
+function canDeleteVideoClientSide(video) {
+  if (!currentUser) return false;
+  return (
+    currentUser.role === "coach" ||
+    Number(currentUser.id) === Number(video.uploaded_by)
+  );
+}
+
+async function deleteVideo(video) {
+  const confirmed = confirm(
+    `Delete "${video.title}"?\n\nThis will permanently remove the video and its associated clips.\nThis action cannot be undone.`
+  );
+
+  if (!confirmed) return;
+
+  const deleteBtn = videoList.querySelector(
+    `[data-delete-video-id="${video.id}"]`
+  );
+
+  if (deleteBtn) {
+    deleteBtn.disabled = true;
+    deleteBtn.textContent = "Deleting...";
+  }
+
+  try {
+    await apiFetch(`/api/videos/${video.id}`, {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ requesting_user_id: currentUser.id }),
+    });
+
+    allVideos = allVideos.filter((v) => v.id !== video.id);
+    myClips = myClips.filter((c) => c.video_id !== video.id);
+
+    if (currentVideoId === video.id) {
+      currentVideoId = null;
+      filmPlayer.removeAttribute("src");
+      filmPlayer.load();
+      hideVideoStatusMessage();
+      playBtn.disabled = false;
+
+      if (allVideos.length) {
+        selectVideo(allVideos[0]);
+      } else {
+        renderVideoList();
+        renderCurrentVideoHighlights();
+      }
+    } else {
+      renderVideoList();
+    }
+
+    if (typeof window.refreshHomeAfterVideoDelete === "function") {
+      window.refreshHomeAfterVideoDelete();
+    }
+  } catch (error) {
+    console.error("Delete video failed:", error);
+    showMessage("Could not delete video.");
+
+    if (deleteBtn) {
+      deleteBtn.disabled = false;
+      deleteBtn.textContent = "Delete";
+    }
+  }
 }
 
 function renderVideoList() {
@@ -126,6 +230,8 @@ function renderVideoList() {
 
   allVideos.forEach((video) => {
     const li = document.createElement("li");
+    li.className = "video-item";
+
     const button = document.createElement("button");
 
     button.className = "video-item-btn";
@@ -134,13 +240,38 @@ function renderVideoList() {
       button.classList.add("active");
     }
 
-    button.textContent = video.title;
+    const reason = unavailableReason(video);
+
+    if (reason) {
+      button.classList.add("video-unavailable");
+      button.textContent = video.available === false
+        ? `${video.title} (unavailable)`
+        : `${video.title} (conversion needed)`;
+    } else {
+      button.textContent = video.title;
+    }
 
     button.addEventListener("click", () => {
       selectVideo(video);
     });
 
     li.appendChild(button);
+
+    if (canDeleteVideoClientSide(video)) {
+      const deleteBtn = document.createElement("button");
+      deleteBtn.type = "button";
+      deleteBtn.className = "video-delete-btn";
+      deleteBtn.textContent = "Delete";
+      deleteBtn.dataset.deleteVideoId = video.id;
+
+      deleteBtn.addEventListener("click", (event) => {
+        event.stopPropagation();
+        deleteVideo(video);
+      });
+
+      li.appendChild(deleteBtn);
+    }
+
     videoList.appendChild(li);
   });
 }
@@ -739,12 +870,30 @@ saveHighlightBtn.addEventListener("click", () => {
 /* ---------- PLAYBACK BUTTONS ---------- */
 
 playBtn.addEventListener("click", async () => {
+  const currentVideo = allVideos.find((v) => v.id === currentVideoId);
+  const reason = currentVideo ? unavailableReason(currentVideo) : null;
+
+  if (reason) {
+    showMessage(reason);
+    return;
+  }
+
   try {
     await filmPlayer.play();
   } catch (error) {
     console.error("Play failed:", error);
     showMessage("Could not play video.");
   }
+});
+
+// Playback-fix pass: a safety net for cases the "available"/"needs_conversion"
+// flags from GET /api/videos don't catch (e.g. a file removed between the
+// list load and actual playback). Without this the player just logs
+// NotSupportedError silently on every failed play() attempt.
+filmPlayer.addEventListener("error", () => {
+  if (!filmPlayer.getAttribute("src")) return;
+  showVideoStatusMessage("This video file is no longer available.");
+  playBtn.disabled = true;
 });
 
 pauseBtn.addEventListener("click", () => {

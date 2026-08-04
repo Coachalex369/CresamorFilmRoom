@@ -352,8 +352,15 @@ async function generateClipThumbnail(video, clip) {
 async function loadReelData(videos, clips) {
   const videoById = new Map(videos.map((video) => [video.id, video]));
 
+  // Playback-fix pass: a clip whose video is missing/unavailable would
+  // otherwise rotate into the Featured Reel and just fail to load — filter
+  // it out here instead, same as the delete flow does when it refreshes
+  // this after removing a video.
   const withVideo = clips
-    .filter((clip) => videoById.has(clip.video_id))
+    .filter((clip) => {
+      const video = videoById.get(clip.video_id);
+      return video && video.available !== false && !video.needs_conversion;
+    })
     .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
 
   reelState.clips = withVideo;
@@ -515,12 +522,29 @@ function getContinueWatching() {
   }
 }
 
-function renderContinueWatching() {
+// Playback-fix pass: accepts an optional freshly-fetched videos array.
+// renderHome() calls this once early (for instant render, before its own
+// video fetch resolves) and again once that fetch completes — the
+// availability check only applies once a video list is actually available,
+// so the early call can't wrongly hide a valid entry due to `allVideos`
+// still being stale/empty from a race with app.js's own loadVideos().
+function renderContinueWatching(videos) {
   const entry = getContinueWatching();
 
   if (!entry) {
     continueWatchingSection.classList.add("hidden");
     return;
+  }
+
+  const videoList = Array.isArray(videos) && videos.length ? videos : allVideos;
+
+  if (videoList.length) {
+    const matchingVideo = videoList.find((v) => v.id === entry.videoId);
+
+    if (!matchingVideo || matchingVideo.available === false) {
+      continueWatchingSection.classList.add("hidden");
+      return;
+    }
   }
 
   continueWatchingSection.classList.remove("hidden");
@@ -763,6 +787,7 @@ async function renderHome() {
     renderHeroCard(safeClips);
     await loadReelData(safeVideos, safeClips);
     renderRecentActivity(safeVideos, safeClips);
+    renderContinueWatching(safeVideos);
   } catch (error) {
     console.error("Failed to load Home data:", error);
   }
@@ -864,6 +889,15 @@ if (loginParentBtn) {
 const __originalActivateApp = window.activateApp;
 window.activateApp = function (user) {
   __originalActivateApp(user);
+  renderHome();
+};
+
+// Playback-fix pass: app.js's deleteVideo() calls this after a successful
+// delete so Featured Highlights / Continue Watching drop the removed
+// video without a full page reload — same re-render renderHome() already
+// does on login, just triggered on demand.
+window.refreshHomeAfterVideoDelete = function () {
+  if (!currentUser) return;
   renderHome();
 };
 

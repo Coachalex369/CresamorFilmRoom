@@ -21,6 +21,15 @@
 
 const client = require("../db/client");
 
+// Playback-fix pass: browsers (especially non-Safari) don't reliably play
+// .MOV directly, and this pipeline has no real transcoder yet (see TODOs
+// below). Rather than mark these 'ready' and let the player hit a decode
+// error, they're detected here and held at 'processing' — the client shows
+// a "requires conversion" message for that case instead of a spinner.
+function needsFormatConversion(video) {
+  return /\.mov(\?.*)?$/i.test(video.file_url || "");
+}
+
 async function enqueueVideoProcessing(video) {
   await client.query(
     `UPDATE videos SET processing_status = 'processing' WHERE id = $1`,
@@ -36,11 +45,23 @@ async function enqueueVideoProcessing(video) {
   // TODO(next phase): replace the delay above with a real queue push (a
   // jobs table + worker process, or a hosted queue service) instead of
   // doing the "work" inline in this same async call.
-  // TODO(next phase): plug video transcoding/compression in here.
+  // TODO(next phase): plug video transcoding/compression in here — this is
+  // also where a MOV input would get converted to MP4/H.264 and its
+  // file_url swapped to the converted output before ever calling this
+  // 'ready'.
   // TODO(next phase): plug real thumbnail generation in here, setting
   // videos.thumbnail_url (column added in migration 005 — currently
   // always null; nothing reads it yet either, see the Phase 3 report for
   // why generating it wasn't done this phase).
+
+  if (needsFormatConversion(video)) {
+    const stillProcessing = await client.query(
+      `SELECT * FROM videos WHERE id = $1`,
+      [video.id]
+    );
+
+    return stillProcessing.rows[0];
+  }
 
   const result = await client.query(
     `UPDATE videos SET processing_status = 'ready' WHERE id = $1 RETURNING *`,
@@ -71,4 +92,8 @@ async function enqueueVideoProcessingAsync(video) {
   }
 }
 
-module.exports = { enqueueVideoProcessing, enqueueVideoProcessingAsync };
+module.exports = {
+  enqueueVideoProcessing,
+  enqueueVideoProcessingAsync,
+  needsFormatConversion,
+};

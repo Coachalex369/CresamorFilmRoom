@@ -34,4 +34,27 @@ async function canAccessConversation(userId, conversationId) {
   return result.rows.length > 0;
 }
 
-module.exports = { canAccessConversation };
+// Same caveat as canAccessConversation above: this trusts a client-supplied
+// userId, since no route in the app verifies the JWT bearer token
+// server-side yet (see CLAUDE.md). Real rule: the original uploader, or
+// anyone with the 'coach' role, can delete a video.
+async function canDeleteVideo(userId, videoId) {
+  if (!userId || !videoId) return false;
+
+  const result = await client.query(
+    `
+    SELECT videos.uploaded_by, users.role
+    FROM videos, users
+    WHERE videos.id = $1 AND users.id = $2
+    `,
+    [videoId, userId]
+  );
+
+  if (!result.rows.length) return false;
+
+  const { uploaded_by, role } = result.rows[0];
+
+  return role === "coach" || Number(uploaded_by) === Number(userId);
+}
+
+module.exports = { canAccessConversation, canDeleteVideo };

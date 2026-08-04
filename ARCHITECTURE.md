@@ -52,20 +52,25 @@ Every foreign key column is indexed. Postgres doesn't do this automatically (onl
 2. `canAccessTeam(userId, teamId)` — checks `team_members`, gates team-scoped resources (videos, future events).
 3. Extend video/clip routes to check team membership before returning data, once (1) exists to make the checks meaningful.
 
+A second real check exists alongside it: `canDeleteVideo(userId, videoId)` (same file), gating `DELETE /api/videos/:id` — allowed for the video's original uploader or any user with the `coach` role. Same caveat as above: `userId` is trusted from the request body, not verified against a bearer token.
+
 ## Video pipeline
 
 ```
 Upload → Validate → Create DB record (status: uploading) → enqueueVideoProcessingAsync
   → status: processing → [Video Converter: TODO] → [Thumbnail Generator: TODO] → status: ready
+                       ↳ .MOV input: stays at 'processing' — client shows "requires conversion"
 ```
 
-`POST /api/upload-video` (in `server/routes/videos.js`) only receives the upload and creates the record — it does not wait for processing, and responds immediately. `server/services/videoProcessing.js` is the one seam where real work plugs in later; it currently does nothing but flip status flags (with a deliberate, TODO-marked artificial delay standing in for real processing time). Clients that care about the real status poll `GET /api/videos/:id`.
+`POST /api/upload-video` (in `server/routes/videos.js`) only receives the upload and creates the record — it does not wait for processing, and responds immediately. `server/services/videoProcessing.js` is the one seam where real work plugs in later; it currently does nothing but flip status flags (with a deliberate, TODO-marked artificial delay standing in for real processing time). Clients that care about the real status poll `GET /api/videos/:id`. `.MOV` uploads are a deliberate exception: browsers don't reliably play them and no real transcoder exists yet, so `needsFormatConversion()` holds them at `processing` instead of letting them reach a falsely-`ready` state — the client shows "requires conversion" rather than attempting playback.
 
-**Nothing today gates on `processing_status`** — a video is playable via its `file_url` the instant the file lands on disk, regardless of status. The status field is honest UI feedback (so uploaders aren't staring at a blank screen), not an access control mechanism. When real transcoding lands and produces a *different* playable file (e.g. a compressed version), that's the point where playback would start caring about status — not before.
+**`processing_status` isn't the only playability signal.** `GET /api/videos` and `GET /api/videos/:id` also compute `available` (does the referenced file still exist on disk — added after Render's ephemeral storage lost two uploaded files across a redeploy, see "Storage strategy" below) and `needs_conversion` (is it a `.MOV`) on every read, and the client (`selectVideo()` in `app.js`) uses both to show a clear status message and disable Play instead of attempting to load a file that will 404. Nothing gates actual *access* on `processing_status` beyond that — a `ready` video is playable via its `file_url` the instant the file lands on disk. When real transcoding lands and produces a *different* playable file (e.g. a compressed version), that's the point where playback would start caring about status in an access-control sense — not before.
+
+**Video deletion**: `DELETE /api/videos/:id` (permission described above) deletes the video's `clips` rows, best-effort-deletes the local file (and `thumbnail_url` file, once that's populated) if still present, then removes the `videos` row. Missing files aren't a deletion error — that's the expected case for a video already flagged `available: false`.
 
 ## Storage strategy
 
-**Current**: local disk, under `uploads/` (videos) and `uploads/profile-pictures/` (profile photos), served via Express static middleware. On Render's free tier this is ephemeral — wiped on every redeploy/restart. Acceptable for MVP development, not for production.
+**Current**: local disk, under `uploads/` (videos) and `uploads/profile-pictures/` (profile photos), served via Express static middleware. On Render's free tier this is ephemeral — wiped on every redeploy/restart. This isn't theoretical: it already happened once, silently, and orphaned two `videos` rows pointing at files that no longer existed (surfaced as player 404s, diagnosed and cleaned up — see git history around the playback-fix pass). Acceptable for MVP development, not for production.
 
 **Migration path to object storage** (documented, not implemented — see the Sprint 3 architecture-review response for the full reasoning):
 1. Introduce an S3-compatible bucket (Cloudflare R2 recommended — no egress fees, meaningful for a video-heavy app).

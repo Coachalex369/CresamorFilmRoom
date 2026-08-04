@@ -4,13 +4,51 @@ const fs = require("fs");
 const multer = require("multer");
 
 const client = require("../db/client");
-const { enqueueVideoProcessingAsync } = require("../services/videoProcessing");
+const {
+  enqueueVideoProcessingAsync,
+  needsFormatConversion,
+} = require("../services/videoProcessing");
+const { canDeleteVideo } = require("../services/permissions");
 
 const router = express.Router();
 
 const uploadsDir = path.join(__dirname, "../../uploads");
 if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
+}
+
+// Playback-fix pass: Render's /uploads disk is ephemeral and has already
+// lost files across a redeploy once (see ARCHITECTURE.md's storage
+// section). Rather than let the player discover that via a 404 mid-play,
+// GET responses check file existence up front so the client can show a
+// clear "unavailable" state instead of attempting playback. Only checked
+// for local /uploads paths — external http(s) URLs are assumed reachable
+// (no outbound request made here).
+function isFileAvailable(fileUrl) {
+  if (!fileUrl) return false;
+  if (/^https?:\/\//i.test(fileUrl)) return true;
+
+  const localPath = path.join(__dirname, "../..", fileUrl);
+  return fs.existsSync(localPath);
+}
+
+function withPlaybackStatus(video) {
+  return {
+    ...video,
+    available: isFileAvailable(video.file_url),
+    needs_conversion: needsFormatConversion(video),
+  };
+}
+
+function deleteLocalFileIfPresent(fileUrl) {
+  if (!fileUrl || /^https?:\/\//i.test(fileUrl)) return;
+
+  const localPath = path.join(__dirname, "../..", fileUrl);
+  fs.unlink(localPath, (err) => {
+    if (err && err.code !== "ENOENT") {
+      console.error("Failed to delete file:", localPath, err);
+    }
+  });
 }
 
 const storage = multer.diskStorage({
@@ -35,7 +73,7 @@ router.get("/api/videos", async (req, res) => {
       `
     );
 
-    res.json(result.rows);
+    res.json(result.rows.map(withPlaybackStatus));
   } catch (err) {
     console.error("GET /api/videos error:", err);
     res.status(500).json({ error: "Failed to fetch videos" });
@@ -54,7 +92,7 @@ router.get("/api/videos/:id", async (req, res) => {
       return res.status(404).json({ error: "Video not found" });
     }
 
-    res.json(result.rows[0]);
+    res.json(withPlaybackStatus(result.rows[0]));
   } catch (err) {
     console.error("GET /api/videos/:id error:", err);
     res.status(500).json({ error: "Failed to fetch video" });
@@ -124,6 +162,60 @@ router.post("/api/upload-video", upload.single("video"), async (req, res) => {
   } catch (err) {
     console.error("POST /api/upload-video error:", err);
     res.status(500).json({ error: "Failed to upload video" });
+  }
+});
+
+// Video-delete pass: authorization here is the same known-limited pattern
+// as canAccessConversation — requesting_user_id is trusted from the
+// request body because no route in this app verifies the JWT bearer token
+// server-side yet (see CLAUDE.md's "Known architectural quirks"). This is
+// still real access control (uploader-or-coach, checked against the DB),
+// just not real authentication.
+router.delete("/api/videos/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const requestingUserId = req.body?.requesting_user_id;
+
+    if (!requestingUserId) {
+      return res.status(400).json({ error: "Missing requesting_user_id" });
+    }
+
+    const videoResult = await client.query("SELECT * FROM videos WHERE id = $1", [id]);
+    const video = videoResult.rows[0];
+
+    if (!video) {
+      return res.status(404).json({ error: "Video not found" });
+    }
+
+    const allowed = await canDeleteVideo(requestingUserId, id);
+
+    if (!allowed) {
+      return res.status(403).json({ error: "Not authorized to delete this video" });
+    }
+
+    const conn = await client.connect();
+
+    try {
+      await conn.query("BEGIN");
+      await conn.query("DELETE FROM clips WHERE video_id = $1", [id]);
+      await conn.query("DELETE FROM videos WHERE id = $1", [id]);
+      await conn.query("COMMIT");
+    } catch (txError) {
+      await conn.query("ROLLBACK");
+      throw txError;
+    } finally {
+      conn.release();
+    }
+
+    // Best-effort — the file may already be missing (that's often exactly
+    // why this endpoint is being called), which isn't a deletion failure.
+    deleteLocalFileIfPresent(video.file_url);
+    deleteLocalFileIfPresent(video.thumbnail_url);
+
+    res.json({ success: true, id: Number(id) });
+  } catch (err) {
+    console.error("DELETE /api/videos/:id error:", err);
+    res.status(500).json({ error: "Failed to delete video" });
   }
 });
 
