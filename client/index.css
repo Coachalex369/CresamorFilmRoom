@@ -1410,23 +1410,42 @@ li {
   50% { opacity: 0.3; }
 }
 
-#capture-upload-progress-track {
-  height: 10px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.08);
-  overflow: hidden;
-  margin-top: 0.75rem;
+/* Real-Time Sideline Replay: inline sync status on the Review step,
+   replacing the old full-screen upload/done steps — the coach stays on
+   Review (instant replay) while this updates in place. */
+#capture-review-status {
+  margin-top: 1rem;
 }
 
-#capture-upload-progress-fill {
-  height: 100%;
-  width: 0%;
+#capture-review-status.hidden {
+  display: none;
+}
+
+#capture-review-status-text {
+  margin: 0 0 0.4rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+#capture-review-status-fill {
   background: linear-gradient(90deg, var(--gold), var(--gold-soft));
-  transition: width 0.2s ease;
 }
 
-#capture-step-done h3 {
-  color: var(--text);
+/* Lifecycle badges — Film Room list entries still local/syncing (not yet
+   the server's synced-and-processed row). */
+.video-item-badge {
+  display: inline-block;
+  margin-left: 0.4rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  border: 1px solid var(--muted);
+  color: var(--muted);
+}
+
+.video-item-badge.badge-syncing {
+  border-color: var(--gold);
+  color: var(--gold-soft);
 }
 
 @media (max-width: 600px) {

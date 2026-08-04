@@ -482,13 +482,21 @@
               </div>
             </div>
 
-            <!-- Review -->
+            <!-- Review — this is also the instant-replay surface: the coach
+                 stays here while the recording syncs in the background, no
+                 auto-navigation away and no blocking "Uploading…" step. -->
             <div id="capture-step-review" class="capture-step hidden">
               <h3>Preview</h3>
               <video id="capture-review-video" controls playsinline></video>
-              <div class="capture-step-actions">
+              <div id="capture-review-actions" class="capture-step-actions">
                 <button id="capture-discard-btn" type="button">Discard &amp; Redo</button>
                 <button id="capture-use-video-btn" type="button">Use Video</button>
+              </div>
+              <div id="capture-review-status" class="hidden">
+                <p id="capture-review-status-text"></p>
+                <div class="video-progress-track">
+                  <div id="capture-review-status-fill" class="video-progress-fill"></div>
+                </div>
               </div>
             </div>
 
@@ -508,28 +516,17 @@
               </div>
             </div>
 
-            <!-- Upload progress -->
-            <div id="capture-step-upload" class="capture-step hidden">
-              <p id="capture-upload-status-text">Compressing…</p>
-              <div id="capture-upload-progress-track">
-                <div id="capture-upload-progress-fill"></div>
-              </div>
-            </div>
-
-            <!-- Done -->
-            <div id="capture-step-done" class="capture-step hidden">
-              <h3>Available in Film Room</h3>
-              <button id="capture-done-btn" type="button">Done</button>
-            </div>
           </div>
         </div>
       </section>
     </main>
 
+    <script src="./recordingLibrary.js"></script>
     <script src="./app.js"></script>
     <script src="./mockData.js"></script>
     <script src="./messages.js"></script>
     <script src="./home.js"></script>
+    <script src="./recordingPipeline.js"></script>
     <script src="./capture.js"></script>
   </body>
 </html>

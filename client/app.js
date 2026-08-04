@@ -128,9 +128,15 @@ function hideVideoStatusMessage() {
 }
 
 function unavailableReason(video) {
+  if (video.__local) return null; // local recordings are always instantly playable via their own blob
   if (video.available === false) return "This video file is no longer available.";
   if (video.needs_conversion) return "This video's format requires conversion and can't be played yet.";
   return null;
+}
+
+function resolveVideoSrc(fileUrl) {
+  if (fileUrl.startsWith("http") || fileUrl.startsWith("blob:")) return fileUrl;
+  return `${API_URL}${fileUrl}`;
 }
 
 function selectVideo(video) {
@@ -146,9 +152,7 @@ function selectVideo(video) {
     showVideoStatusMessage(reason);
   } else {
     hideVideoStatusMessage();
-    filmPlayer.src = video.file_url.startsWith("http")
-      ? video.file_url
-      : `${API_URL}${video.file_url}`;
+    filmPlayer.src = resolveVideoSrc(video.file_url);
     filmPlayer.load();
   }
 
@@ -168,7 +172,49 @@ function canDeleteVideoClientSide(video) {
   );
 }
 
+// Real-Time Sideline Replay: local-only recordings (still local/uploading/
+// synced, not yet processed) live in the Recording Library, not the
+// videos table — deleting one removes it from IndexedDB and cancels its
+// place in the sync queue, there's no server row to call DELETE on yet.
+async function deleteLocalRecording(video) {
+  const confirmed = confirm(
+    `Delete "${video.title}"?\n\nThis will remove the local recording${
+      video.__lifecycle === "local" ? " and stop it from syncing" : ""
+    }.\nThis action cannot be undone.`
+  );
+
+  if (!confirmed) return;
+
+  try {
+    await recordingLibrary.remove(video.__recordingId);
+    revokeLocalBlobUrl(video.__recordingId);
+
+    if (currentVideoId === video.id) {
+      currentVideoId = null;
+      filmPlayer.removeAttribute("src");
+      filmPlayer.load();
+      hideVideoStatusMessage();
+      playBtn.disabled = false;
+
+      if (allVideos.length) {
+        selectVideo(allVideos[0]);
+      } else {
+        renderCurrentVideoHighlights();
+      }
+    }
+    // renderVideoList() runs automatically via the recordingLibrary
+    // subscription (refreshLocalRecordings) — no manual call needed here.
+  } catch (error) {
+    console.error("Delete local recording failed:", error);
+    showMessage("Could not delete local recording.");
+  }
+}
+
 async function deleteVideo(video) {
+  if (video.__local) {
+    return deleteLocalRecording(video);
+  }
+
   const confirmed = confirm(
     `Delete "${video.title}"?\n\nThis will permanently remove the video and its associated clips.\nThis action cannot be undone.`
   );
@@ -225,10 +271,82 @@ async function deleteVideo(video) {
   }
 }
 
+// Real-Time Sideline Replay: the Film Room list is a projection — the
+// Recording Library is authoritative for anything this device recorded
+// (shown until it's fully `processed`), the server's `allVideos` is the
+// synchronized team view layered on top. See ARCHITECTURE.md.
+let localRecordings = [];
+const localBlobUrlCache = new Map();
+
+function getLocalBlobUrl(record) {
+  if (!localBlobUrlCache.has(record.recordingId)) {
+    localBlobUrlCache.set(record.recordingId, URL.createObjectURL(record.blob));
+  }
+  return localBlobUrlCache.get(record.recordingId);
+}
+
+function revokeLocalBlobUrl(recordingId) {
+  if (!localBlobUrlCache.has(recordingId)) return;
+  URL.revokeObjectURL(localBlobUrlCache.get(recordingId));
+  localBlobUrlCache.delete(recordingId);
+}
+
+function toLocalVideoLike(record) {
+  return {
+    id: `local-${record.recordingId}`,
+    title: record.title,
+    file_url: getLocalBlobUrl(record),
+    uploaded_by: record.uploadedBy,
+    available: true,
+    needs_conversion: false,
+    __local: true,
+    __recordingId: record.recordingId,
+    __lifecycle: record.lifecycle,
+    __uploadProgress: record.uploadProgress,
+  };
+}
+
+async function refreshLocalRecordings() {
+  try {
+    localRecordings = await recordingLibrary.getAll();
+  } catch (error) {
+    console.error("Failed to load local recordings:", error);
+    localRecordings = [];
+  }
+
+  renderVideoList();
+}
+
+recordingLibrary.subscribe(({ lifecycle }) => {
+  refreshLocalRecordings();
+
+  // The local entry drops out of the merged list the instant it's
+  // `processed` (see renderVideoList below) — refetch the server list
+  // right then so the real row is already there to replace it, instead of
+  // a gap where it's briefly in neither list. Not done for `synced`
+  // recordings that still need_conversion — those deliberately keep
+  // showing their local entry indefinitely, since the local Blob is the
+  // only playable copy until real transcoding exists.
+  if (lifecycle === "processed" && typeof loadVideos === "function") {
+    loadVideos();
+  }
+});
+
+refreshLocalRecordings();
+
 function renderVideoList() {
   videoList.innerHTML = "";
 
-  allVideos.forEach((video) => {
+  // Once a recording is `processed`, the server row (in allVideos) is what
+  // shows — the library still keeps its own copy underneath regardless,
+  // it just doesn't need to render twice.
+  const localEntries = localRecordings
+    .filter((record) => record.lifecycle !== "processed")
+    .map(toLocalVideoLike);
+
+  const mergedVideos = [...localEntries, ...allVideos];
+
+  mergedVideos.forEach((video) => {
     const li = document.createElement("li");
     li.className = "video-item";
 
@@ -249,6 +367,22 @@ function renderVideoList() {
         : `${video.title} (conversion needed)`;
     } else {
       button.textContent = video.title;
+    }
+
+    if (video.__local) {
+      const badge = document.createElement("span");
+      badge.className = "video-item-badge";
+
+      if (video.__lifecycle === "uploading") {
+        badge.classList.add("badge-syncing");
+        badge.textContent = `Syncing ${video.__uploadProgress || 0}%`;
+      } else if (video.__lifecycle === "synced") {
+        badge.textContent = "Synced";
+      } else {
+        badge.textContent = "Local";
+      }
+
+      button.appendChild(badge);
     }
 
     button.addEventListener("click", () => {

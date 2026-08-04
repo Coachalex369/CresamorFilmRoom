@@ -1,33 +1,40 @@
 /*
   capture.js — recording workflow.
 
-  Foundation Sprint Phase 4: rewritten around "should feel like opening the
-  phone camera." Removed the upfront Wrestling/Football yes-no question and
-  the Team Film/Individual Film choice entirely — recording starts
-  immediately on tap. Team assignment moved to AFTER preview, matching:
+  Real-Time Sideline Replay pass: the benchmark changed from "fast uploads"
+  to instant replay. The Review step is now where that happens — recording
+  stops, the local Blob preview plays right there (unchanged mechanic from
+  Foundation Sprint Phase 4), and once a team is confirmed the recording is
+  handed to the Recording Library and synced in the background while the
+  coach keeps watching the SAME preview. There's no more full-screen
+  "Uploading…"/"Done" hand-off — closing the modal is how the coach moves
+  on, and syncing continues regardless of whether the modal is open.
 
-    Record -> Preview -> Confirm -> Assign Team -> Upload -> Done
+    Record -> Preview (instant replay) -> Confirm -> Assign Team
+      -> handed to recordingLibrary + recordingPipeline (background)
+      -> Review keeps playing, small inline status line updates in place
 
-  Capture mechanism now branches by device:
+  Capture mechanism still branches by device (unchanged from Phase 4):
     - Mobile (matchMedia('(pointer: coarse)')): native OS camera via
       <input type="file" capture>, toggled between "environment" (back,
-      default) and "user" (front). This is a deliberate technical choice,
-      not a shortcut — iOS Safari's MediaRecorder support has a real
-      history of codec/reliability problems, and handing off to the native
-      camera app sidesteps all of that entirely while also being *less*
-      code than driving an in-browser recorder. See the Foundation Sprint
-      architecture-review response for the full reasoning.
-    - Desktop: kept the Sprint 1 in-browser MediaRecorder flow (record/
-      pause/resume/stop) — there's no native camera app to hand off to on
-      a laptop.
+      default) and "user" (front) — sidesteps iOS Safari's MediaRecorder
+      codec/reliability history entirely.
+    - Desktop: in-browser MediaRecorder flow (record/pause/resume/stop) —
+      there's no native camera app to hand off to on a laptop.
 
-  Both paths converge on the same Preview -> Assign Team -> Upload steps.
+  This file is a *producer* for the Recording Library — it creates
+  recordings and hands them off, but never touches IndexedDB or performs
+  the upload itself. See client/recordingLibrary.js (the source of truth
+  for every recording, local or synced) and client/recordingPipeline.js
+  (the one consumer that moves them to the cloud) — both loaded before this
+  file. Full ownership model in ARCHITECTURE.md.
 
-  Loaded after app.js/mockData.js/home.js. Reuses globals from app.js
-  (API_URL, currentUser, showMessage, loadVideos, selectVideo).
+  Loaded after app.js/mockData.js/home.js/recordingLibrary.js/
+  recordingPipeline.js. Reuses globals from app.js (API_URL, currentUser,
+  showMessage, loadVideos, selectVideo).
 
-  film_type is no longer collected (explicitly removed per this phase's
-  brief: "do not ask ... Team Film, Individual Film"). The videos.film_type
+  film_type is no longer collected (removed per the Foundation Sprint Phase
+  4 brief: "do not ask ... Team Film, Individual Film"). The videos.film_type
   column still exists and still accepts it server-side for backward
   compatibility, but this flow simply doesn't send it.
 
@@ -66,8 +73,6 @@ const captureSteps = {
   record: document.querySelector("#capture-step-record"),
   review: document.querySelector("#capture-step-review"),
   confirmTeam: document.querySelector("#capture-step-confirm-team"),
-  upload: document.querySelector("#capture-step-upload"),
-  done: document.querySelector("#capture-step-done"),
 };
 
 const captureNativeButtons = document.querySelector("#capture-native-buttons");
@@ -90,18 +95,17 @@ const captureResumeBtn = document.querySelector("#capture-resume-btn");
 const captureStopBtn = document.querySelector("#capture-stop-btn");
 
 const captureReviewVideo = document.querySelector("#capture-review-video");
+const captureReviewActions = document.querySelector("#capture-review-actions");
 const captureDiscardBtn = document.querySelector("#capture-discard-btn");
 const captureUseVideoBtn = document.querySelector("#capture-use-video-btn");
+const captureReviewStatus = document.querySelector("#capture-review-status");
+const captureReviewStatusText = document.querySelector("#capture-review-status-text");
+const captureReviewStatusFill = document.querySelector("#capture-review-status-fill");
 
 const captureSuggestedTeam = document.querySelector("#capture-suggested-team");
 const captureConfirmSuggestedTeamBtn = document.querySelector("#capture-confirm-suggested-team-btn");
 const captureConfirmTeamList = document.querySelector("#capture-confirm-team-list");
 const captureSkipTeamBtn = document.querySelector("#capture-skip-team-btn");
-
-const captureUploadStatusText = document.querySelector("#capture-upload-status-text");
-const captureUploadProgressFill = document.querySelector("#capture-upload-progress-fill");
-
-const captureDoneBtn = document.querySelector("#capture-done-btn");
 
 /* ---------- state ---------- */
 
@@ -114,6 +118,8 @@ const capture = {
   timerInterval: null,
   elapsedSeconds: 0,
   mimeType: null,
+  recordingId: null, // set once handed to recordingLibrary (after team confirm)
+  unsubscribeRecording: null,
 };
 
 /* ---------- modal / step helpers ---------- */
@@ -143,12 +149,24 @@ function teardownCapture() {
     capture.timerInterval = null;
   }
 
+  // Unsubscribe from the Recording Library's change events — the recording
+  // itself (if one was handed off) keeps syncing in the background; this
+  // only stops this modal instance from reacting to further updates for it.
+  if (capture.unsubscribeRecording) {
+    capture.unsubscribeRecording();
+    capture.unsubscribeRecording = null;
+  }
+
   capture.recorder = null;
   capture.chunks = [];
   capture.blob = null;
   capture.team = null;
   capture.elapsedSeconds = 0;
+  capture.recordingId = null;
   captureRecordTimer.textContent = "00:00";
+
+  if (captureReviewActions) captureReviewActions.classList.remove("hidden");
+  if (captureReviewStatus) captureReviewStatus.classList.add("hidden");
 }
 
 /* ---------- recording context (smart default for team suggestion) ---------- */
@@ -277,11 +295,17 @@ captureContinueToRecordBtn.addEventListener("click", () => {
 });
 
 function pickSupportedMimeType() {
+  // Real-Time Sideline Replay: MP4/H.264 preferred first (broadest
+  // compatibility, minimizes future FFmpeg need), WebM as fallback — most
+  // desktop MediaRecorder implementations only support WebM today, so this
+  // still ends up on WebM in practice there, but Safari's does support MP4
+  // and should take it.
   const candidates = [
+    "video/mp4;codecs=avc1,mp4a",
+    "video/mp4",
     "video/webm;codecs=vp9,opus",
     "video/webm;codecs=vp8,opus",
     "video/webm",
-    "video/mp4",
   ];
 
   return candidates.find((type) => window.MediaRecorder && MediaRecorder.isTypeSupported(type)) || "";
@@ -420,7 +444,7 @@ async function showConfirmTeamStep() {
 
     captureConfirmSuggestedTeamBtn.onclick = () => {
       capture.team = suggestedTeam;
-      uploadRecording();
+      syncRecording();
     };
   } else {
     captureSuggestedTeam.classList.add("hidden");
@@ -440,7 +464,7 @@ async function showConfirmTeamStep() {
 
       btn.addEventListener("click", () => {
         capture.team = team;
-        uploadRecording();
+        syncRecording();
       });
 
       li.appendChild(btn);
@@ -454,29 +478,10 @@ async function showConfirmTeamStep() {
 
 captureSkipTeamBtn.addEventListener("click", () => {
   capture.team = null;
-  uploadRecording();
+  syncRecording();
 });
 
-/* ---------- upload (reuses the existing /api/upload-video endpoint) ---------- */
-
-// Foundation Sprint Phase 3: polls the real processing_status instead of
-// assuming a fixed delay means "ready" — see server/services/videoProcessing.js.
-async function pollVideoUntilReady(videoId, onStatus, { intervalMs = 500, timeoutMs = 30000 } = {}) {
-  const startedAt = Date.now();
-
-  while (Date.now() - startedAt < timeoutMs) {
-    const video = await apiFetch(`/api/videos/${videoId}`);
-
-    if (onStatus) onStatus(video.processing_status);
-
-    if (video.processing_status === "ready") return video;
-    if (video.processing_status === "failed") throw new Error("Video processing failed");
-
-    await new Promise((resolve) => setTimeout(resolve, intervalMs));
-  }
-
-  throw new Error("Video processing timed out");
-}
+/* ---------- sync: hand the recording to the Recording Library, stay on Review ---------- */
 
 function buildRecordingTitle() {
   const teamLabel = capture.team ? capture.team.name : "No Team";
@@ -484,80 +489,62 @@ function buildRecordingTitle() {
   return `${teamLabel} — ${stamp}`;
 }
 
-function uploadRecording() {
-  if (!capture.blob) return;
+function renderRecordingStatus(record) {
+  if (!captureReviewStatus || !record) return;
 
-  showCaptureStep("upload");
-  captureUploadStatusText.textContent = "Uploading…";
-  captureUploadProgressFill.style.width = "0%";
+  captureReviewStatus.classList.remove("hidden");
 
-  const formData = new FormData();
-  const isNativeFile = typeof File !== "undefined" && capture.blob instanceof File;
-  const extension = (capture.mimeType || "video/webm").includes("mp4") ? "mp4" : "webm";
-  const filename = isNativeFile ? capture.blob.name : `recording-${Date.now()}.${extension}`;
-
-  formData.append("video", capture.blob, filename);
-  formData.append("title", buildRecordingTitle());
-  formData.append("uploaded_by", currentUser.id);
-  // film_type intentionally not sent — removed from this flow per the
-  // Foundation Sprint Phase 4 brief ("do not ask ... Team Film, Individual
-  // Film"). The column still exists server-side for backward compatibility.
-  if (capture.team) {
-    formData.append("team_id", capture.team.id);
+  if (record.lifecycle === "local") {
+    // Reverted to local — either still queued for a first attempt, or a
+    // previous attempt failed and it's waiting to retry.
+    captureReviewStatusText.textContent = record.lastError
+      ? "Sync paused — will retry automatically."
+      : "Waiting to sync…";
+    captureReviewStatusFill.style.width = "0%";
+  } else if (record.lifecycle === "uploading") {
+    captureReviewStatusText.textContent = `Syncing to ${
+      capture.team ? capture.team.name : "library"
+    }… ${record.uploadProgress || 0}%`;
+    captureReviewStatusFill.style.width = `${record.uploadProgress || 0}%`;
+  } else if (record.lifecycle === "synced" || record.lifecycle === "processed") {
+    captureReviewStatusText.textContent = "Synced ✓";
+    captureReviewStatusFill.style.width = "100%";
   }
-
-  const xhr = new XMLHttpRequest();
-
-  xhr.open("POST", `${API_URL}/api/upload-video`);
-
-  xhr.upload.addEventListener("progress", (event) => {
-    if (event.lengthComputable) {
-      const percent = Math.round((event.loaded / event.total) * 100);
-      captureUploadProgressFill.style.width = `${percent}%`;
-    }
-  });
-
-  xhr.addEventListener("load", async () => {
-    if (xhr.status >= 200 && xhr.status < 300) {
-      saveRecordingContext(capture.team);
-
-      try {
-        const uploaded = JSON.parse(xhr.responseText);
-
-        const ready = await pollVideoUntilReady(uploaded.id, (status) => {
-          captureUploadStatusText.textContent =
-            status === "processing" ? "Processing…" : "Uploading…";
-        });
-
-        showCaptureStep("done");
-        await loadVideos();
-        selectVideo(ready);
-      } catch (error) {
-        console.error("Processing failed or timed out:", error);
-        showMessage(
-          "Upload succeeded, but processing is taking longer than expected. It'll appear in Film Room once it's ready."
-        );
-        showCaptureStep("done");
-      }
-    } else {
-      console.error("Upload failed:", xhr.status, xhr.responseText);
-      showMessage("Upload failed. Please try again.");
-      showCaptureStep("review");
-    }
-  });
-
-  xhr.addEventListener("error", () => {
-    showMessage("Upload failed. Check your connection and try again.");
-    showCaptureStep("review");
-  });
-
-  xhr.send(formData);
 }
 
-captureDoneBtn.addEventListener("click", () => {
-  closeCaptureModal();
-  switchToScreen("film-screen");
-});
+// This is the actual instant-replay moment: the recording is handed off to
+// the Recording Library (persisted to IndexedDB — safe even if the modal
+// is closed or the tab dies) and enqueued with recordingPipeline, but we
+// deliberately do NOT navigate away or show a blocking "Uploading…" step.
+// The review video (already playing the local Blob) keeps playing exactly
+// as it was; a small inline status line takes over from the Discard/Use
+// Video buttons and updates itself via recordingLibrary.subscribe() as the
+// sync progresses in the background.
+async function syncRecording() {
+  if (!capture.blob) return;
+
+  saveRecordingContext(capture.team);
+
+  const record = await recordingLibrary.create({
+    blob: capture.blob,
+    title: buildRecordingTitle(),
+    teamId: capture.team ? capture.team.id : null,
+    uploadedBy: currentUser.id,
+  });
+
+  capture.recordingId = record.recordingId;
+
+  if (captureReviewActions) captureReviewActions.classList.add("hidden");
+  renderRecordingStatus(record);
+
+  capture.unsubscribeRecording = recordingLibrary.subscribe(({ recordingId, record: updated }) => {
+    if (recordingId !== capture.recordingId) return;
+    renderRecordingStatus(updated);
+  });
+
+  showCaptureStep("review");
+  recordingPipeline.enqueue(record.recordingId);
+}
 
 /* ---------- open/close wiring ---------- */
 
