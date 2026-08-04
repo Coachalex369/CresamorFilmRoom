@@ -4,10 +4,9 @@
   "description": "Cresamor Film Room MVP",
   "main": "server/server.js",
   "scripts": {
-  "start": "node server/server.js",
-  "dev": "nodemon server/server.js",
-  "db:schema": "psql $env:DATABASE_URL -f server/db/schema.sql"
-   },
+    "start": "node server/server.js",
+    "dev": "nodemon server/server.js"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Coachalex369/CresamorFilmRoom.git"
