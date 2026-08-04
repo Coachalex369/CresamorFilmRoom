@@ -1,20 +1,15 @@
 const express = require("express");
 
 const client = require("../db/client");
+const { authenticate } = require("../middleware/authenticate");
 
 const router = express.Router();
 
-router.post("/api/clips", async (req, res) => {
+router.post("/api/clips", authenticate, async (req, res) => {
   try {
-    const { title, start_time, end_time, video_id, user_id } = req.body;
+    const { title, start_time, end_time, video_id } = req.body;
 
-    if (
-      !title ||
-      start_time === undefined ||
-      end_time === undefined ||
-      !video_id ||
-      !user_id
-    ) {
+    if (!title || start_time === undefined || end_time === undefined || !video_id) {
       return res.status(400).json({ error: "Missing required clip fields" });
     }
 
@@ -24,7 +19,7 @@ router.post("/api/clips", async (req, res) => {
       VALUES ($1, $2, $3, $4, $5)
       RETURNING *
       `,
-      [title, start_time, end_time, video_id, user_id]
+      [title, start_time, end_time, video_id, req.user.id]
     );
 
     res.status(201).json(result.rows[0]);
@@ -34,7 +29,7 @@ router.post("/api/clips", async (req, res) => {
   }
 });
 
-router.get("/api/users/:id/clips", async (req, res) => {
+router.get("/api/users/:id/clips", authenticate, async (req, res) => {
   try {
     const { id } = req.params;
 

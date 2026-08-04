@@ -6,8 +6,15 @@ const multer = require("multer");
 
 const client = require("../db/client");
 const storage = require("../services/storage/storage");
+const { authenticate } = require("../middleware/authenticate");
+const { requireOwner } = require("../middleware/authorize");
+const { uploadLimiter } = require("../middleware/rateLimiters");
 
 const router = express.Router();
+
+// Beta Readiness Sprint 2: environment-driven, matching MAX_VIDEO_UPLOAD_MB
+// in videos.js — see that file's comment for why this isn't hardcoded.
+const MAX_PHOTO_UPLOAD_MB = Number(process.env.MAX_PHOTO_UPLOAD_MB) || 5;
 
 // Beta Readiness Sprint 1 (R2 migration): same temp-dir-then-storage.upload()
 // pattern as videos.js — see that file's comment and ARCHITECTURE.md's
@@ -43,7 +50,7 @@ const uploadProfilePicture = multer({
     }
     cb(null, true);
   },
-  limits: { fileSize: 5 * 1024 * 1024 },
+  limits: { fileSize: MAX_PHOTO_UPLOAD_MB * 1024 * 1024 },
 });
 
 const PROFILE_FIELDS = `
@@ -65,7 +72,7 @@ async function withResolvedPhotoUrl(user) {
   };
 }
 
-router.get("/api/users/:id/profile", async (req, res) => {
+router.get("/api/users/:id/profile", authenticate, async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -85,7 +92,7 @@ router.get("/api/users/:id/profile", async (req, res) => {
   }
 });
 
-router.put("/api/users/:id/profile", async (req, res) => {
+router.put("/api/users/:id/profile", authenticate, requireOwner("id"), async (req, res) => {
   try {
     const { id } = req.params;
     const {
@@ -147,42 +154,49 @@ router.put("/api/users/:id/profile", async (req, res) => {
   }
 });
 
-router.post("/api/users/:id/photo", uploadProfilePicture.single("photo"), async (req, res) => {
-  try {
-    const { id } = req.params;
+router.post(
+  "/api/users/:id/photo",
+  authenticate,
+  requireOwner("id"),
+  uploadLimiter,
+  uploadProfilePicture.single("photo"),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
 
-    if (!req.file) {
-      return res.status(400).json({ error: "No photo uploaded" });
+      if (!req.file) {
+        return res.status(400).json({ error: "No photo uploaded" });
+      }
+
+      // Beta Readiness Sprint 1: same storage_key pattern as videos — new
+      // uploads go through the active provider, profile_picture_url stays
+      // NULL for these rows (resolved on read via withResolvedPhotoUrl).
+      // Opaque key: no original filename, just the owning user's id and a
+      // random UUID — see videos.js's identical reasoning.
+      const extension = storage.extensionFor("image", req.file.mimetype);
+      const storageKey = `profile-pictures/${id}/${crypto.randomUUID()}${extension}`;
+      await storage.upload(storageKey, req.file.path, req.file.mimetype, { category: "image" });
+
+      const result = await client.query(
+        `
+        UPDATE users
+        SET profile_picture_key = $1
+        WHERE id = $2
+        RETURNING ${PROFILE_FIELDS}
+        `,
+        [storageKey, id]
+      );
+
+      if (!result.rows[0]) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      res.json(await withResolvedPhotoUrl(result.rows[0]));
+    } catch (err) {
+      console.error("POST /api/users/:id/photo error:", err);
+      res.status(500).json({ error: "Failed to upload photo" });
     }
-
-    // Beta Readiness Sprint 1: same storage_key pattern as videos — new
-    // uploads go through the active provider, profile_picture_url stays
-    // NULL for these rows (resolved on read via withResolvedPhotoUrl).
-    // Opaque key: no original filename, just the owning user's id and a
-    // random UUID — see videos.js's identical reasoning.
-    const extension = storage.extensionFor("image", req.file.mimetype);
-    const storageKey = `profile-pictures/${id}/${crypto.randomUUID()}${extension}`;
-    await storage.upload(storageKey, req.file.path, req.file.mimetype, { category: "image" });
-
-    const result = await client.query(
-      `
-      UPDATE users
-      SET profile_picture_key = $1
-      WHERE id = $2
-      RETURNING ${PROFILE_FIELDS}
-      `,
-      [storageKey, id]
-    );
-
-    if (!result.rows[0]) {
-      return res.status(404).json({ error: "User not found" });
-    }
-
-    res.json(await withResolvedPhotoUrl(result.rows[0]));
-  } catch (err) {
-    console.error("POST /api/users/:id/photo error:", err);
-    res.status(500).json({ error: "Failed to upload photo" });
   }
-});
+);
 
 module.exports = router;

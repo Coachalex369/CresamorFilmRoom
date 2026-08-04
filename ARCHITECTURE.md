@@ -45,14 +45,38 @@ Every foreign key column is indexed. Postgres doesn't do this automatically (onl
 
 ## Permission model
 
-**Current state**: one real check exists — `server/services/permissions.js`'s `canAccessConversation(userId, conversationId)`, which queries `conversation_participants` and gates both conversation-message routes with a genuine `403` for non-participants. Everything else in the app has no server-side authorization check at all: routes trust a client-supplied `user_id`/`uploaded_by`, and **no route verifies the JWT bearer token server-side**, even though login/register issue real tokens. This is a known, pre-existing gap, not something any session so far has been asked to fix — flagging it here so it's not mistaken for solved.
+**Current state (Beta Readiness Sprint 2 — server-side auth): every route that returns or mutates non-public data now verifies the JWT bearer token server-side.** This closed the single biggest gap in the app — previously, no route checked the token at all, and identity was whatever a client claimed in a body/query field (`user_id`, `uploaded_by`, `requesting_user_id`, `sender_id`). Two real privilege bugs existed as a direct result and were fixed in this sprint: `GET /api/conversations` returned every conversation in the system when `user_id` was omitted, and `POST /api/users/:id/teams` let any caller grant themselves (or anyone) a coach-level `role_on_team` with no check at all.
 
-**Intended shape**, per the product brief, once real auth verification exists: permission checks should inherit down the hierarchy — Organization → School → Team → Conversation → Resource. `canAccessConversation` is the first real link in that chain. The natural next steps, in order of how directly they build on what exists:
-1. Verify the JWT server-side (middleware, applied broadly) — this is the actual prerequisite for everything else meaning anything; without it, every permission check downstream is still trusting a client-supplied identity.
-2. `canAccessTeam(userId, teamId)` — checks `team_members`, gates team-scoped resources (videos, future events).
-3. Extend video/clip routes to check team membership before returning data, once (1) exists to make the checks meaningful.
+**Auth is split into two middleware modules**, deliberately — "who are you" and "what can you do" are different concerns:
+- **`server/middleware/authenticate.js`** — `authenticate(req, res, next)`. Reads `Authorization: Bearer <token>`, verifies it against `JWT_SECRET`, then reloads the user fresh from Postgres by `id` and attaches a minimal `req.user = { id, email, role }`. The JWT payload itself carries **only `{ id }`** — email/role are never trusted from the token, so a role change or account deletion takes effect on the very next request instead of waiting out the token's 7-day expiry. Every rejection path (missing header, bad signature, expired token, token for a deleted user) returns the same generic `401` and gets audit-logged as `auth_rejected`, so a caller can't fingerprint the failure reason and there's a record of probing behavior.
+- **`server/middleware/authorize.js`** — composable checks used *after* `authenticate`: `requireRole(...roles)`, `requireOwner(paramName)`, `requireConversationParticipant(paramName)`. Routes read declaratively — `router.post("/api/teams", authenticate, requireRole("coach"), handler)` — for anything that's a single binary gate on one resource. Routes whose "authorization" is really a per-row filter over a list (`GET /api/videos`, `GET /api/conversations`) don't fit that shape and stay behind `authenticate` alone, filtering inline via `permissions.js` — there's no single yes/no gate a middleware could enforce before the handler runs for those.
 
-A second real check exists alongside it: `canDeleteVideo(userId, videoId)` (same file), gating `DELETE /api/videos/:id` — allowed for the video's original uploader or any user with the `coach` role. Same caveat as above: `userId` is trusted from the request body, not verified against a bearer token.
+**`server/services/permissions.js`** holds the actual resource-specific rules, all now driven by `req.user.id` rather than a client-supplied value:
+- `canAccessConversation(userId, conversationId)` — queries `conversation_participants`.
+- `canDeleteVideo(userId, videoId)` — original uploader or any `coach`.
+- `canAccessTeam(userId, teamId)` — queries `team_members`; a coach passes automatically (coach access is a superset everywhere in this app).
+- `canViewVideo(userId, video)` — `video.team_id === null` (the "unassigned" case) is visible only to the uploader or a coach; otherwise follows `canAccessTeam`.
+- `canManageTeamMembership(userId, targetUserId, roleOnTeam)` — the role-escalation fix: a coach may set any membership including a coach-level role; a non-coach may only add *themselves*, and only with a non-coach role.
+
+**Known, deliberate scope limits** (flagged, not oversights):
+- **Team-scoped video visibility is a real behavior change**: `GET /api/videos` previously returned everything to everyone; it now filters to team-visible-or-own-uploaded per row.
+- **No parent-child linking table exists**, so parents get no broad access from role alone — own account/profile/conversations-they're-actually-in only. Inventing broad parent access from role alone was explicitly rejected as unsafe.
+- **No coach-can-edit-athlete-profile permission exists.** `PUT /api/users/:id/profile` is strictly owner-only until that's a defined product feature.
+- **No token revocation list.** Logout is client-side-only (clears `localStorage`); a JWT remains cryptographically valid until its natural 7-day expiry even after "logout." Accepted limitation for a beta, not solved here.
+- **`GET /api/users/:id/clips`/`GET /api/users/:id/teams` visibility was deliberately left open** (any authenticated user can view) rather than narrowed to owner/team-only — narrowing wasn't asked for and is a separate product decision.
+
+**Security audit log** (`security_audit_log` table, migration `007`): a lightweight, durable, queryable trail — not process logs, which Render doesn't retain or let you query. `server/services/auditLog.js`'s `logSecurityEvent(eventType, { userId, ip, metadata })` is called (awaited, so an entry is guaranteed to exist before the response returns) at: `login_success`, `login_failure`, `auth_rejected`, `video_deleted`, `team_membership_changed`, and rate-limit hits (`login_rate_limited`, etc.). Never logs a token, password, or password hash. **Retention**: no automatic pruning ships — at beta scale, unbounded retention is the safer default for a security trail than an aggressive auto-expiry that could delete evidence of a real incident before anyone's looked at it. When it does need pruning, the plan is a manual `DELETE FROM security_audit_log WHERE created_at < now() - interval '1 year'`, matching this project's "no cron jobs, no background workers" pattern — not automated unless row count or compliance needs actually demand it.
+
+**Other beta hardening shipped in this sprint**:
+- **Rate limiting** (`server/middleware/rateLimiters.js`, `express-rate-limit`, in-memory store — fine for a single Render instance): login (10/15min/IP), register (5/hour/IP), video/photo upload (30/hour/IP). Deliberately loose, beta-appropriate limits, not production-hardened ones.
+- **Helmet** (`app.use(helmet())` in `server/app.js`) — standard security headers, default CSP. Safe with no config exceptions: the client has no inline scripts/styles and no external CDN resources.
+- **CORS is environment-driven**, not hardcoded: `ALLOWED_ORIGIN` env var, defaulting to the deployed Render origin if unset.
+- **Upload size limits are environment-driven**: `MAX_VIDEO_UPLOAD_MB` (default 3072) and `MAX_PHOTO_UPLOAD_MB` (default 5), both wired into their routes' multer config. The video default was raised well past the historical 500MB figure — the temp-file-then-stream upload path never buffers a file in memory, so the real ceiling is disk space and abuse prevention, not RAM.
+- **`express.json({ limit: "100kb" })`** made explicit (was relying on Express's implicit default).
+
+**Env vars added this sprint** (Render dashboard in production, local `.env` for dev — same handling as `DATABASE_URL`/`JWT_SECRET`/the R2 vars): `ALLOWED_ORIGIN`, `MAX_VIDEO_UPLOAD_MB`, `MAX_PHOTO_UPLOAD_MB`. All three have safe in-code defaults, so leaving them unset in an existing environment changes nothing.
+
+**Testing**: `server/scripts/testAuth.js` — plain Node, no test-framework dependency, run by hand (`node server/scripts/testAuth.js`). Spins up the real app on a throwaway local port and drives it over real HTTP requests against whatever `DATABASE_URL` is configured, using clearly-namespaced test users/teams/videos that it deletes in a `finally` block regardless of pass/fail. Covers token rejection paths, the two fixed bugs, ownership/role/participant gates, forged-identity-field rejection, rate limiting, and audit-log writes. Does **not** cover signed R2 playback or a real browser exercising the Recording Pipeline's XHR flow — those need manual verification once R2 setup (see "Storage strategy") is complete.
 
 ## Recording pipeline
 
@@ -133,6 +157,8 @@ Camera → Local Library (IndexedDB) → Recording Pipeline → Cloud → Team L
 - A visible Local Film / Team Film split in the UI — the distinction is real in the data model (Recording Library vs. server) but Film Room still renders one unified list.
 - `events`/Calendar backend — UI still reads `mockData.js`'s `MOCK_EVENTS`.
 - `watch_progress` (Continue Watching) — still `localStorage`, deliberately (it's session/UX state, not data an athlete would expect to migrate with them, though a cross-device "resume where I left off" is a reasonable future upgrade).
-- Parent-child account linking — accounts exist, linking doesn't.
+- Parent-child account linking — accounts exist, linking doesn't. Parent access stays deliberately narrow (see "Permission model") until this exists.
 - Direct browser-to-R2 uploads (presigned PUT) — uploads still go through the Express server, keeping multer's validation/auth checks in one place. Worth revisiting for very large files.
-- JWT server-side verification (see "Permission model" above) — the single biggest real gap between this app and a production-ready one, and the next planned sprint after Beta Readiness Sprint 1 (this one).
+- Server-side token revocation (see "Permission model") — logout is client-side-only; a JWT stays valid until natural expiry.
+- Coach-editing-an-athlete's-profile — no such permission exists; profile edits are strictly owner-only.
+- An org-admin role tier — any coach can create a team; there's no finer-grained gate above "coach" yet.

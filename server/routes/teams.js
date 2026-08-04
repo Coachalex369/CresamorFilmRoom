@@ -1,6 +1,10 @@
 const express = require("express");
 
 const client = require("../db/client");
+const { authenticate } = require("../middleware/authenticate");
+const { requireRole } = require("../middleware/authorize");
+const { canManageTeamMembership } = require("../services/permissions");
+const { logSecurityEvent } = require("../services/auditLog");
 
 const router = express.Router();
 
@@ -9,7 +13,7 @@ const router = express.Router();
    hierarchy. Organizations don't have their own endpoint yet — nothing
    client-side needs to query them standalone (see the Phase 1 report). */
 
-router.get("/api/schools", async (req, res) => {
+router.get("/api/schools", authenticate, async (req, res) => {
   try {
     const result = await client.query(
       `
@@ -27,7 +31,7 @@ router.get("/api/schools", async (req, res) => {
   }
 });
 
-router.get("/api/teams", async (req, res) => {
+router.get("/api/teams", authenticate, async (req, res) => {
   try {
     const result = await client.query(
       `
@@ -45,7 +49,7 @@ router.get("/api/teams", async (req, res) => {
   }
 });
 
-router.post("/api/teams", async (req, res) => {
+router.post("/api/teams", authenticate, requireRole("coach"), async (req, res) => {
   try {
     const { name, sport, school_id } = req.body;
 
@@ -69,7 +73,7 @@ router.post("/api/teams", async (req, res) => {
   }
 });
 
-router.get("/api/users/:id/teams", async (req, res) => {
+router.get("/api/users/:id/teams", authenticate, async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -91,13 +95,22 @@ router.get("/api/users/:id/teams", async (req, res) => {
   }
 });
 
-router.post("/api/users/:id/teams", async (req, res) => {
+// Beta Readiness Sprint 2 bug fix: this used to have NO authorization
+// check at all — any caller could set role_on_team to "coach" for any
+// user on any team. Now: a coach may manage anyone's membership
+// (including granting a coach-level role); a non-coach may only add
+// THEMSELVES, and only with a non-coach role_on_team.
+router.post("/api/users/:id/teams", authenticate, async (req, res) => {
   try {
     const { id } = req.params;
     const { team_id, role_on_team, is_primary } = req.body;
 
     if (!team_id) {
       return res.status(400).json({ error: "team_id is required" });
+    }
+
+    if (!(await canManageTeamMembership(req.user.id, id, role_on_team))) {
+      return res.status(403).json({ error: "Not authorized to manage this team membership" });
     }
 
     const result = await client.query(
@@ -110,6 +123,12 @@ router.post("/api/users/:id/teams", async (req, res) => {
       `,
       [team_id, id, role_on_team || null, is_primary !== undefined ? is_primary : true]
     );
+
+    await logSecurityEvent("team_membership_changed", {
+      userId: req.user.id,
+      ip: req.ip,
+      metadata: { targetUserId: Number(id), teamId: Number(team_id), roleOnTeam: role_on_team || null },
+    });
 
     res.status(201).json(result.rows[0]);
   } catch (err) {

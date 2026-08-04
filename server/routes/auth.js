@@ -3,10 +3,12 @@ const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 
 const client = require("../db/client");
+const { logSecurityEvent } = require("../services/auditLog");
+const { loginLimiter, registerLimiter } = require("../middleware/rateLimiters");
 
 const router = express.Router();
 
-router.post("/api/auth/register", async (req, res) => {
+router.post("/api/auth/register", registerLimiter, async (req, res) => {
   try {
     const { email, password, role } = req.body;
 
@@ -42,9 +44,14 @@ router.post("/api/auth/register", async (req, res) => {
       [user.id]
     );
 
-    const token = jwt.sign(user, process.env.JWT_SECRET, {
+    // JWT payload carries only the id — email/role are reloaded from
+    // Postgres on every authenticated request (see middleware/authenticate.js)
+    // rather than trusted from a token that could be up to 7 days stale.
+    const token = jwt.sign({ id: user.id }, process.env.JWT_SECRET, {
       expiresIn: "7d",
     });
+
+    await logSecurityEvent("login_success", { userId: user.id, ip: req.ip, metadata: { via: "register" } });
 
     res.status(201).json({ token, user });
   } catch (err) {
@@ -53,7 +60,7 @@ router.post("/api/auth/register", async (req, res) => {
   }
 });
 
-router.post("/api/auth/login", async (req, res) => {
+router.post("/api/auth/login", loginLimiter, async (req, res) => {
   try {
     const { email, password } = req.body;
 
@@ -69,12 +76,14 @@ router.post("/api/auth/login", async (req, res) => {
     const user = result.rows[0];
 
     if (!user) {
+      await logSecurityEvent("login_failure", { ip: req.ip, metadata: { email } });
       return res.status(401).json({ error: "Invalid login" });
     }
 
     const valid = await bcrypt.compare(password, user.password_hash);
 
     if (!valid) {
+      await logSecurityEvent("login_failure", { userId: user.id, ip: req.ip, metadata: { email } });
       return res.status(401).json({ error: "Invalid login" });
     }
 
@@ -84,9 +93,14 @@ router.post("/api/auth/login", async (req, res) => {
       role: user.role,
     };
 
-    const token = jwt.sign(payload, process.env.JWT_SECRET, {
+    // Same minimal-payload rule as register — only id is signed into the
+    // token; the response body still returns the full payload for the
+    // client to use immediately.
+    const token = jwt.sign({ id: user.id }, process.env.JWT_SECRET, {
       expiresIn: "7d",
     });
+
+    await logSecurityEvent("login_success", { userId: user.id, ip: req.ip });
 
     res.json({ token, user: payload });
   } catch (err) {

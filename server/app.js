@@ -1,5 +1,6 @@
 const express = require("express");
 const cors = require("cors");
+const helmet = require("helmet");
 const morgan = require("morgan");
 const path = require("path");
 const fs = require("fs");
@@ -18,9 +19,18 @@ if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
 }
 
-app.use(cors());
+// Beta Readiness Sprint 2: CORS is environment-driven rather than a
+// hardcoded domain — ALLOWED_ORIGIN lets local dev (localhost:3000) and
+// any future staging domain override this with a one-line env var
+// instead of a code change, while production stays safe with zero
+// required config (falls back to the deployed Render origin).
+const DEFAULT_ALLOWED_ORIGIN = "https://cresamorfilmroom-3.onrender.com";
+const allowedOrigin = process.env.ALLOWED_ORIGIN || DEFAULT_ALLOWED_ORIGIN;
+
+app.use(helmet());
+app.use(cors({ origin: allowedOrigin }));
 app.use(morgan("dev"));
-app.use(express.json());
+app.use(express.json({ limit: "100kb" }));
 app.use(express.static(path.join(__dirname, "../client")));
 app.use("/uploads", express.static(uploadsDir));
 

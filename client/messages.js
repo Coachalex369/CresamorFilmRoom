@@ -34,8 +34,6 @@ if (staleMessageForm && realMessageForm) {
   staleMessageForm.replaceWith(realMessageForm);
 }
 
-const realMessageUsernameInput = realMessageForm?.querySelector("#message-username-input");
-const realMessageRoleInput = realMessageForm?.querySelector("#message-role-input");
 const realMessageBodyInput = realMessageForm?.querySelector("#message-input");
 
 let currentConversationId = null;
@@ -61,7 +59,7 @@ async function ensureCurrentConversation() {
   if (currentConversationId || !currentUser) return currentConversationId;
 
   try {
-    const conversations = await apiFetch(`/api/conversations?user_id=${currentUser.id}`);
+    const conversations = await apiFetch("/api/conversations");
     currentConversationId = conversations?.[0]?.id || null;
   } catch (error) {
     console.error("Failed to load conversations:", error);
@@ -77,9 +75,7 @@ async function loadMessages() {
   if (!conversationId || !currentUser) return;
 
   try {
-    const messages = await apiFetch(
-      `/api/conversations/${conversationId}/messages?user_id=${currentUser.id}`
-    );
+    const messages = await apiFetch(`/api/conversations/${conversationId}/messages`);
 
     realMessageThread.innerHTML = "";
     (Array.isArray(messages) ? messages : []).forEach((message) => {
@@ -109,8 +105,6 @@ window.markCurrentConversationRead = async function () {
   try {
     await apiFetch(`/api/conversations/${conversationId}/read`, {
       method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ user_id: currentUser.id }),
     });
   } catch (error) {
     console.error("Failed to mark conversation read:", error);
@@ -122,8 +116,6 @@ if (realMessageForm) {
     event.preventDefault();
 
     const body = realMessageBodyInput.value.trim();
-    const username = realMessageUsernameInput.value.trim() || "User";
-    const role = realMessageRoleInput.value;
 
     if (!body) return;
 
@@ -138,12 +130,7 @@ if (realMessageForm) {
       await apiFetch(`/api/conversations/${conversationId}/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          sender_id: currentUser ? currentUser.id : null,
-          username,
-          role,
-          body,
-        }),
+        body: JSON.stringify({ body }),
       });
 
       realMessageBodyInput.value = "";

@@ -1,20 +1,12 @@
 /*
-  permissions.js — permission groundwork (Foundation Sprint Phase 2).
+  permissions.js — permission groundwork (Foundation Sprint Phase 2),
+  extended in Beta Readiness Sprint 2 (server-side auth). Every function
+  here now runs against req.user.id, supplied by middleware/authenticate.js
+  after verifying a JWT — not a client-claimed body/query field anymore.
 
-  This is deliberately small. The brief asks every request to eventually
-  answer "should this user be allowed to see this resource?", inheriting
-  through Organization -> School -> Team -> Conversation -> Resource. This
-  file is the first real seam for that — it does NOT attempt to solve the
-  bigger, pre-existing gap that no route in this app verifies the JWT
-  bearer token server-side (see CLAUDE.md's "Known architectural quirks").
-  That's a known, separate, larger piece of work. What this file adds is
-  narrower and immediately real: given a claimed user_id, is that user
-  actually a participant of the conversation they're trying to read/post
-  to. That's genuine access control, just not authentication.
-
-  As the Organization -> School -> Team hierarchy grows (Phase 3+), extend
-  this file with more resource-specific checks (e.g. canAccessTeamFilm)
-  rather than scattering ad-hoc permission queries through server/app.js.
+  As the Organization -> School -> Team hierarchy grows, extend this file
+  with more resource-specific checks rather than scattering ad-hoc
+  permission queries through the route files.
 */
 
 const client = require("../db/client");
@@ -34,10 +26,8 @@ async function canAccessConversation(userId, conversationId) {
   return result.rows.length > 0;
 }
 
-// Same caveat as canAccessConversation above: this trusts a client-supplied
-// userId, since no route in the app verifies the JWT bearer token
-// server-side yet (see CLAUDE.md). Real rule: the original uploader, or
-// anyone with the 'coach' role, can delete a video.
+// Real rule: the original uploader, or anyone with the 'coach' role, can
+// delete a video.
 async function canDeleteVideo(userId, videoId) {
   if (!userId || !videoId) return false;
 
@@ -57,4 +47,62 @@ async function canDeleteVideo(userId, videoId) {
   return role === "coach" || Number(uploaded_by) === Number(userId);
 }
 
-module.exports = { canAccessConversation, canDeleteVideo };
+// Coach access is a superset everywhere in this app — a coach can access
+// any team without needing an explicit team_members row.
+async function canAccessTeam(userId, teamId) {
+  if (!userId || !teamId) return false;
+
+  const result = await client.query(
+    `
+    SELECT users.role, team_members.team_id AS membership_team_id
+    FROM users
+    LEFT JOIN team_members ON team_members.user_id = users.id AND team_members.team_id = $2
+    WHERE users.id = $1
+    `,
+    [userId, teamId]
+  );
+
+  if (!result.rows.length) return false;
+
+  const { role, membership_team_id } = result.rows[0];
+
+  return role === "coach" || membership_team_id !== null;
+}
+
+// video.team_id === null is the "unassigned" case (see videos.js's upload
+// route) — visible only to the uploader or a coach, since there's no team
+// to scope it to. Otherwise, visibility follows team membership.
+async function canViewVideo(userId, video) {
+  if (!userId || !video) return false;
+
+  if (video.team_id === null || video.team_id === undefined) {
+    if (Number(video.uploaded_by) === Number(userId)) return true;
+
+    const result = await client.query("SELECT role FROM users WHERE id = $1", [userId]);
+    return result.rows[0]?.role === "coach";
+  }
+
+  return canAccessTeam(userId, video.team_id);
+}
+
+// The role-escalation fix for POST /api/users/:id/teams: a coach may set
+// any membership, including a coach-level role_on_team, for anyone. A
+// non-coach may only add THEMSELVES, and only with a non-coach role.
+async function canManageTeamMembership(userId, targetUserId, roleOnTeam) {
+  if (!userId) return false;
+
+  const result = await client.query("SELECT role FROM users WHERE id = $1", [userId]);
+  const role = result.rows[0]?.role;
+
+  if (role === "coach") return true;
+
+  return Number(userId) === Number(targetUserId) && roleOnTeam !== "coach";
+}
+
+module.exports = {
+  canAccessConversation,
+  canDeleteVideo,
+  canAccessTeam,
+  canViewVideo,
+  canManageTeamMembership,
+};

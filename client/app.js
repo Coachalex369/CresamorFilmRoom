@@ -1,7 +1,20 @@
 const API_URL = "https://cresamorfilmroom-3.onrender.com";
 
+// Beta Readiness Sprint 2: every request now carries the bearer token
+// automatically — no call site needs to remember to attach it. A 401
+// means the token is missing/invalid/expired/for a deleted user; there's
+// nothing a retry can fix, so local auth state is cleared and the user is
+// sent back to the login screen. window.logoutLocalState (not a captured
+// reference) because home.js patches that function — the patched version
+// needs to run, not app.js's original.
 async function apiFetch(path, options = {}) {
-  const response = await fetch(`${API_URL}${path}`, options);
+  const headers = { ...(options.headers || {}) };
+
+  if (authToken) {
+    headers.Authorization = `Bearer ${authToken}`;
+  }
+
+  const response = await fetch(`${API_URL}${path}`, { ...options, headers });
   const text = await response.text();
 
   let data = null;
@@ -16,7 +29,14 @@ async function apiFetch(path, options = {}) {
   }
 
   if (!response.ok) {
-    throw new Error(data?.error || "Request failed.");
+    if (response.status === 401 && typeof window.logoutLocalState === "function") {
+      window.logoutLocalState();
+      showMessage("Your session expired — please log in again.");
+    }
+
+    const error = new Error(data?.error || "Request failed.");
+    error.status = response.status;
+    throw error;
   }
 
   return data;
@@ -233,8 +253,6 @@ async function deleteVideo(video) {
   try {
     await apiFetch(`/api/videos/${video.id}`, {
       method: "DELETE",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ requesting_user_id: currentUser.id }),
     });
 
     allVideos = allVideos.filter((v) => v.id !== video.id);
@@ -693,7 +711,6 @@ async function saveHighlight() {
         start_time: clipStartTime,
         end_time: clipEndTime,
         video_id: currentVideoId,
-        user_id: currentUser.id,
       }),
     });
 
@@ -733,7 +750,6 @@ function uploadVideo(file) {
 
   formData.append("video", file);
   formData.append("title", file.name);
-  formData.append("uploaded_by", currentUser.id);
 
   const startedAt = Date.now();
 
@@ -748,6 +764,10 @@ function uploadVideo(file) {
   const xhr = new XMLHttpRequest();
 
   xhr.open("POST", `${API_URL}/api/upload-video`);
+
+  if (authToken) {
+    xhr.setRequestHeader("Authorization", `Bearer ${authToken}`);
+  }
 
   xhr.upload.addEventListener("progress", (event) => {
     if (!event.lengthComputable || !progressSection) return;
@@ -780,6 +800,14 @@ function uploadVideo(file) {
       if (videoUploadInput) {
         videoUploadInput.value = "";
       }
+    } else if (xhr.status === 401) {
+      console.error("Upload failed: session expired");
+
+      if (typeof window.logoutLocalState === "function") {
+        window.logoutLocalState();
+      }
+
+      showMessage("Your session expired — please log in again.");
     } else {
       console.error("Upload failed:", xhr.status, xhr.responseText);
       showMessage("Could not upload video.");
@@ -1181,53 +1209,6 @@ tabButtons.forEach((button) => {
     }, 50);
   });
 });
-
-/* ---------- SIMPLE MESSAGE SYSTEM ---------- */
-
-const messageForm = document.getElementById("message-form");
-const messageInput = document.getElementById("message-input");
-const messageUsernameInput = document.getElementById("message-username-input");
-const messageRoleInput = document.getElementById("message-role-input");
-const messageThread = document.getElementById("message-thread");
-
-if (messageForm) {
-  messageForm.addEventListener("submit", (event) => {
-    event.preventDefault();
-
-    const text = messageInput.value.trim();
-    const username = messageUsernameInput.value.trim() || "User";
-    const role = messageRoleInput.value;
-
-    if (!text) return;
-
-    const messageRow = document.createElement("div");
-
-    messageRow.classList.add("message-row");
-
-    if (role === "coach") {
-      messageRow.classList.add("coach-message");
-    } else {
-      messageRow.classList.add("player-message");
-    }
-
-    const usernameElement = document.createElement("p");
-
-    usernameElement.className = "message-username";
-    usernameElement.textContent = username;
-
-    const bubbleElement = document.createElement("p");
-
-    bubbleElement.className = "message-bubble";
-    bubbleElement.textContent = text;
-
-    messageRow.appendChild(usernameElement);
-    messageRow.appendChild(bubbleElement);
-    messageThread.appendChild(messageRow);
-
-    messageInput.value = "";
-    messageThread.scrollTop = messageThread.scrollHeight;
-  });
-}
 
 /* ---------- RESIZE SAFETY ---------- */
 

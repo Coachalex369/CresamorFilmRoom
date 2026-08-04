@@ -9,10 +9,20 @@ const {
   enqueueVideoProcessingAsync,
   needsFormatConversion,
 } = require("../services/videoProcessing");
-const { canDeleteVideo } = require("../services/permissions");
+const { canDeleteVideo, canViewVideo } = require("../services/permissions");
 const storage = require("../services/storage/storage");
+const { authenticate } = require("../middleware/authenticate");
+const { uploadLimiter } = require("../middleware/rateLimiters");
+const { logSecurityEvent } = require("../services/auditLog");
 
 const router = express.Router();
+
+// Beta Readiness Sprint 2: environment-driven, not hardcoded, so a full
+// game recording exceeding the default doesn't require a code change to
+// accommodate. Streaming multipart upload to R2 (see storage/r2Storage.js)
+// never buffers the file in memory, so this ceiling is about reasonable
+// abuse prevention and temp-disk space, not RAM.
+const MAX_VIDEO_UPLOAD_MB = Number(process.env.MAX_VIDEO_UPLOAD_MB) || 3072;
 
 // Beta Readiness Sprint 1 (R2 migration): multer now writes to a scratch
 // temp dir, not the final destination. storage.upload() (local disk or
@@ -100,9 +110,10 @@ const upload = multer({
     }
     cb(null, true);
   },
+  limits: { fileSize: MAX_VIDEO_UPLOAD_MB * 1024 * 1024 },
 });
 
-router.get("/api/videos", async (req, res) => {
+router.get("/api/videos", authenticate, async (req, res) => {
   try {
     const result = await client.query(
       `
@@ -112,7 +123,15 @@ router.get("/api/videos", async (req, res) => {
       `
     );
 
-    res.json(await Promise.all(result.rows.map(withPlaybackStatus)));
+    // Team-scoped visibility (Beta Readiness Sprint 2): a per-row filter,
+    // not a route-level gate — canViewVideo covers both the team_id IS
+    // NULL case (uploader-or-coach) and the team-membership case.
+    const visible = [];
+    for (const video of result.rows) {
+      if (await canViewVideo(req.user.id, video)) visible.push(video);
+    }
+
+    res.json(await Promise.all(visible.map(withPlaybackStatus)));
   } catch (err) {
     console.error("GET /api/videos error:", err);
     res.status(500).json({ error: "Failed to fetch videos" });
@@ -121,7 +140,7 @@ router.get("/api/videos", async (req, res) => {
 
 // Foundation Sprint Phase 3: added so clients can poll a single video's
 // processing_status after upload instead of re-fetching the whole list.
-router.get("/api/videos/:id", async (req, res) => {
+router.get("/api/videos/:id", authenticate, async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -131,6 +150,10 @@ router.get("/api/videos/:id", async (req, res) => {
       return res.status(404).json({ error: "Video not found" });
     }
 
+    if (!(await canViewVideo(req.user.id, result.rows[0]))) {
+      return res.status(403).json({ error: "Not authorized to view this video" });
+    }
+
     res.json(await withPlaybackStatus(result.rows[0]));
   } catch (err) {
     console.error("GET /api/videos/:id error:", err);
@@ -138,11 +161,11 @@ router.get("/api/videos/:id", async (req, res) => {
   }
 });
 
-router.post("/api/videos", async (req, res) => {
+router.post("/api/videos", authenticate, async (req, res) => {
   try {
-    const { title, file_url, uploaded_by } = req.body;
+    const { title, file_url } = req.body;
 
-    if (!title || !file_url || !uploaded_by) {
+    if (!title || !file_url) {
       return res.status(400).json({ error: "Missing required video fields" });
     }
 
@@ -152,7 +175,7 @@ router.post("/api/videos", async (req, res) => {
       VALUES ($1, $2, $3)
       RETURNING *
       `,
-      [title, file_url, uploaded_by]
+      [title, file_url, req.user.id]
     );
 
     res.status(201).json(result.rows[0]);
@@ -162,15 +185,15 @@ router.post("/api/videos", async (req, res) => {
   }
 });
 
-router.post("/api/upload-video", upload.single("video"), async (req, res) => {
+router.post("/api/upload-video", authenticate, uploadLimiter, upload.single("video"), async (req, res) => {
   try {
-    const { title, uploaded_by, team_id, film_type } = req.body;
+    const { title, team_id, film_type } = req.body;
 
     if (!req.file) {
       return res.status(400).json({ error: "No video file uploaded" });
     }
 
-    if (!title || !uploaded_by) {
+    if (!title) {
       return res.status(400).json({ error: "Missing required upload fields" });
     }
 
@@ -201,7 +224,7 @@ router.post("/api/upload-video", upload.single("video"), async (req, res) => {
       VALUES ($1, $2, $3, 'uploading', $4, $5)
       RETURNING *
       `,
-      [title, storageKey, uploaded_by, team_id || null, film_type || null]
+      [title, storageKey, req.user.id, team_id || null, film_type || null]
     );
 
     // Foundation Sprint Phase 3: this route now only receives the upload —
@@ -219,20 +242,12 @@ router.post("/api/upload-video", upload.single("video"), async (req, res) => {
   }
 });
 
-// Video-delete pass: authorization here is the same known-limited pattern
-// as canAccessConversation — requesting_user_id is trusted from the
-// request body because no route in this app verifies the JWT bearer token
-// server-side yet (see CLAUDE.md's "Known architectural quirks"). This is
-// still real access control (uploader-or-coach, checked against the DB),
-// just not real authentication.
-router.delete("/api/videos/:id", async (req, res) => {
+// Video-delete pass, hardened in Beta Readiness Sprint 2: identity now
+// comes from the verified JWT (req.user.id), not a client-supplied body
+// field. Authorization logic (uploader-or-coach) is unchanged.
+router.delete("/api/videos/:id", authenticate, async (req, res) => {
   try {
     const { id } = req.params;
-    const requestingUserId = req.body?.requesting_user_id;
-
-    if (!requestingUserId) {
-      return res.status(400).json({ error: "Missing requesting_user_id" });
-    }
 
     const videoResult = await client.query("SELECT * FROM videos WHERE id = $1", [id]);
     const video = videoResult.rows[0];
@@ -241,7 +256,7 @@ router.delete("/api/videos/:id", async (req, res) => {
       return res.status(404).json({ error: "Video not found" });
     }
 
-    const allowed = await canDeleteVideo(requestingUserId, id);
+    const allowed = await canDeleteVideo(req.user.id, id);
 
     if (!allowed) {
       return res.status(403).json({ error: "Not authorized to delete this video" });
@@ -271,6 +286,12 @@ router.delete("/api/videos/:id", async (req, res) => {
       deleteLocalFileIfPresent(video.file_url);
     }
     deleteLocalFileIfPresent(video.thumbnail_url);
+
+    await logSecurityEvent("video_deleted", {
+      userId: req.user.id,
+      ip: req.ip,
+      metadata: { videoId: Number(id), uploadedBy: video.uploaded_by },
+    });
 
     res.json({ success: true, id: Number(id) });
   } catch (err) {

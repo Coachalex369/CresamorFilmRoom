@@ -33,7 +33,6 @@ async function recordingPipelineUpload(recording) {
 
     formData.append("video", recording.blob, recordingPipelineUploadFilename(recording));
     formData.append("title", recording.title);
-    formData.append("uploaded_by", recording.uploadedBy);
 
     if (recording.teamId) {
       formData.append("team_id", recording.teamId);
@@ -41,6 +40,15 @@ async function recordingPipelineUpload(recording) {
 
     const xhr = new XMLHttpRequest();
     xhr.open("POST", `${API_URL}/api/upload-video`);
+
+    // Beta Readiness Sprint 2: an offline-queued recording gets attributed
+    // to whoever is logged in when the sync finally succeeds — not
+    // necessarily who was logged in when it was recorded. That's the
+    // correct consequence of trusting the token as the source of
+    // identity, not a bug.
+    if (authToken) {
+      xhr.setRequestHeader("Authorization", `Bearer ${authToken}`);
+    }
 
     xhr.upload.addEventListener("progress", (event) => {
       if (!event.lengthComputable) return;
@@ -68,6 +76,15 @@ async function recordingPipelineUpload(recording) {
           await recordingLibrary.markFailed(recording.recordingId, error);
           resolve(false);
         }
+      } else if (xhr.status === 401) {
+        console.error("Upload failed: session expired");
+
+        if (typeof window.logoutLocalState === "function") {
+          window.logoutLocalState();
+        }
+
+        await recordingLibrary.markFailed(recording.recordingId, new Error("Session expired"));
+        resolve(false);
       } else {
         console.error("Upload failed:", xhr.status, xhr.responseText);
         await recordingLibrary.markFailed(
