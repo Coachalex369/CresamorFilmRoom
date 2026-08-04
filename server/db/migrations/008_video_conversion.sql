@@ -18,7 +18,16 @@
 --
 -- Additive only aside from the constraint swap (which only widens the
 -- allowed value set); safe to run once against production, safe to re-run.
-
+--
+-- TODO(future cleanup migration): once production has run long enough
+-- that no row anywhere still has processing_status = 'processing'
+-- (confirm via `SELECT count(*) FROM videos WHERE processing_status =
+-- 'processing'` returning 0 — the UPDATE below migrates every row that
+-- currently has it, so this only matters if something reintroduces the
+-- value later), drop 'processing' from this CHECK constraint. Not urgent
+-- and not worth doing pre-emptively — a constraint tolerating one unused
+-- legacy value is harmless — but it should eventually go so the allowed
+-- set doesn't accumulate historical cruft indefinitely.
 ALTER TABLE videos DROP CONSTRAINT IF EXISTS videos_processing_status_check;
 ALTER TABLE videos ADD CONSTRAINT videos_processing_status_check
   CHECK (processing_status IN ('uploading', 'processing', 'queued', 'converting', 'ready', 'failed', 'deferred'));
