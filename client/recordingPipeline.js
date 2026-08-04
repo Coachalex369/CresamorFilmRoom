@@ -61,14 +61,21 @@ async function recordingPipelineUpload(recording) {
         try {
           const uploaded = JSON.parse(xhr.responseText);
 
+          // Production bug fix: this used to mark the recording
+          // 'processed' (hiding the local copy) the instant the upload
+          // response looked good — trusting that a 201 meant the video
+          // was genuinely visible/retrievable. It wasn't always true (a
+          // real permissions bug briefly made a video invisible even to
+          // its own uploader), and the local recording would vanish with
+          // nothing to replace it. Now this only records 'synced' —
+          // app.js's loadVideos()/reconcileSyncedRecordings() promotes it
+          // to 'processed' (and only then does the local copy stop
+          // showing) once the server row is actually confirmed
+          // retrievable, not merely accepted.
           await recordingLibrary.markSynced(recording.recordingId, {
             serverVideoId: uploaded.id,
             needsConversion: Boolean(uploaded.needs_conversion),
           });
-
-          if (!uploaded.needs_conversion) {
-            await recordingLibrary.markProcessed(recording.recordingId);
-          }
 
           resolve(true);
         } catch (error) {

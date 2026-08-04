@@ -69,15 +69,23 @@ async function canAccessTeam(userId, teamId) {
   return role === "coach" || membership_team_id !== null;
 }
 
-// video.team_id === null is the "unassigned" case (see videos.js's upload
-// route) — visible only to the uploader or a coach, since there's no team
-// to scope it to. Otherwise, visibility follows team membership.
+// Production bug fix: the uploader must always be able to see their own
+// video, regardless of team_id — matching canDeleteVideo's existing
+// unconditional uploader check. This was previously only granted in the
+// team_id === null branch, so a non-coach who tagged a recording with a
+// team they aren't actually a team_members row for (the capture.js team
+// picker doesn't verify membership before offering a team) lost
+// visibility into their OWN upload — GET /api/videos/:id even 403'd for
+// its own uploader. video.team_id === null is the "unassigned" case (see
+// videos.js's upload route) — visible to the uploader (below) or a coach,
+// since there's no team to scope it to. Otherwise, visibility follows
+// team membership for everyone except the uploader.
 async function canViewVideo(userId, video) {
   if (!userId || !video) return false;
 
-  if (video.team_id === null || video.team_id === undefined) {
-    if (Number(video.uploaded_by) === Number(userId)) return true;
+  if (Number(video.uploaded_by) === Number(userId)) return true;
 
+  if (video.team_id === null || video.team_id === undefined) {
     const result = await client.query("SELECT role FROM users WHERE id = $1", [userId]);
     return result.rows[0]?.role === "coach";
   }

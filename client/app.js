@@ -377,14 +377,14 @@ async function refreshLocalRecordings() {
 recordingLibrary.subscribe(({ lifecycle }) => {
   refreshLocalRecordings();
 
-  // The local entry drops out of the merged list the instant it's
-  // `processed` (see renderVideoList below) — refetch the server list
-  // right then so the real row is already there to replace it, instead of
-  // a gap where it's briefly in neither list. Not done for `synced`
-  // recordings that still need_conversion — those deliberately keep
-  // showing their local entry indefinitely, since the local Blob is the
-  // only playable copy until real transcoding exists.
-  if (lifecycle === "processed" && typeof loadVideos === "function") {
+  // Production bug fix: `processed` (the state that hides the local
+  // copy) is now only ever reached via reconcileSyncedRecordings()
+  // finding real confirmation in the server list — so the refetch has to
+  // trigger on `synced` (the point that needs checking), not `processed`
+  // (which is now the checked-and-confirmed outcome, set by loadVideos()
+  // itself). See recordingPipeline.js and reconcileSyncedRecordings()
+  // above for the full reasoning.
+  if (lifecycle === "synced" && typeof loadVideos === "function") {
     loadVideos();
   }
 });
@@ -584,31 +584,85 @@ function renderCurrentVideoHighlights() {
 async function loadVideos() {
   try {
     const videos = await apiFetch("/api/videos");
+    allVideos = Array.isArray(videos) ? videos : [];
 
-    if (!Array.isArray(videos) || videos.length === 0) {
+    // Production bug fix: this used to early-return here on an empty
+    // server list, replacing the ENTIRE list with "No videos found" —
+    // wiping out any not-yet-synced local recordings too, even though
+    // renderVideoList()'s merge would have correctly kept showing them.
+    // A local recording must remain visible regardless of what the
+    // server currently returns.
+    renderVideoList();
+
+    if (!allVideos.length && !localRecordings.length) {
       // Foundation Sprint Phase 5: removed a blocking alert() here — it fired
       // for every first-time athlete (only coaches could upload) and froze
       // the tab, including for browser automation. The inline empty-state
       // message below already communicates the same thing without blocking.
       videoList.innerHTML = "<li>No videos found.</li>";
-      return;
-    }
-
-    allVideos = videos;
-    renderVideoList();
-
-    const stillExists = allVideos.find(
-      (video) => Number(video.id) === Number(currentVideoId)
-    );
-
-    if (stillExists) {
-      selectVideo(stillExists);
     } else {
-      selectVideo(allVideos[0]);
+      const stillExists = allVideos.find(
+        (video) => Number(video.id) === Number(currentVideoId)
+      );
+
+      if (stillExists) {
+        selectVideo(stillExists);
+      } else if (allVideos[0]) {
+        selectVideo(allVideos[0]);
+      }
     }
+
+    await reconcileSyncedRecordings();
   } catch (error) {
     console.error("Failed to load videos:", error);
     showMessage("Could not load video.");
+  }
+}
+
+// Production bug fix: a local recording used to get marked 'processed'
+// (hiding its local copy) the instant the upload response looked
+// successful — trusting a 201 meant it was genuinely visible. That trust
+// was misplaced once (a real permissions bug briefly hid a video even
+// from its own uploader), and the local recording vanished with nothing
+// server-side to replace it. This runs every time the server video list
+// is refetched and only promotes a 'synced' recording to 'processed' —
+// the point at which its local copy stops rendering — once the matching
+// server row is ACTUALLY present in that list. A recording that still
+// needs conversion additionally waits for processing_status === 'ready':
+// the local Blob is genuinely playable right now and stays the
+// authoritative copy until the converted version actually is too,
+// matching this project's existing "local Film until real transcoding
+// completes" philosophy — now that real transcoding exists, "completes"
+// means processing_status flips to ready, not merely that the row exists.
+async function reconcileSyncedRecordings() {
+  // Reads IndexedDB fresh rather than trusting the module-level
+  // localRecordings snapshot — this runs from loadVideos(), which can be
+  // triggered concurrently with refreshLocalRecordings() (both fire from
+  // the same subscribe callback), so localRecordings isn't guaranteed to
+  // reflect the latest lifecycle change yet by the time this reads it.
+  let freshLocal;
+  try {
+    freshLocal = await recordingLibrary.getAll();
+  } catch (error) {
+    console.error("Failed to read local recordings for reconciliation:", error);
+    return;
+  }
+
+  const syncedPending = freshLocal.filter(
+    (record) => record.lifecycle === "synced" && record.serverVideoId
+  );
+
+  if (!syncedPending.length) return;
+
+  for (const record of syncedPending) {
+    const serverVideo = allVideos.find(
+      (video) => Number(video.id) === Number(record.serverVideoId)
+    );
+
+    if (!serverVideo) continue;
+    if (record.needsConversion && serverVideo.processing_status !== "ready") continue;
+
+    await recordingLibrary.markProcessed(record.recordingId);
   }
 }
 
