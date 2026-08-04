@@ -1,21 +1,58 @@
 /*
-  capture.js — Phase 2: recording workflow using MediaDevices/MediaRecorder.
+  capture.js — recording workflow.
+
+  Foundation Sprint Phase 4: rewritten around "should feel like opening the
+  phone camera." Removed the upfront Wrestling/Football yes-no question and
+  the Team Film/Individual Film choice entirely — recording starts
+  immediately on tap. Team assignment moved to AFTER preview, matching:
+
+    Record -> Preview -> Confirm -> Assign Team -> Upload -> Done
+
+  Capture mechanism now branches by device:
+    - Mobile (matchMedia('(pointer: coarse)')): native OS camera via
+      <input type="file" capture>, toggled between "environment" (back,
+      default) and "user" (front). This is a deliberate technical choice,
+      not a shortcut — iOS Safari's MediaRecorder support has a real
+      history of codec/reliability problems, and handing off to the native
+      camera app sidesteps all of that entirely while also being *less*
+      code than driving an in-browser recorder. See the Foundation Sprint
+      architecture-review response for the full reasoning.
+    - Desktop: kept the Sprint 1 in-browser MediaRecorder flow (record/
+      pause/resume/stop) — there's no native camera app to hand off to on
+      a laptop.
+
+  Both paths converge on the same Preview -> Assign Team -> Upload steps.
 
   Loaded after app.js/mockData.js/home.js. Reuses globals from app.js
-  (API_URL, currentUser, showMessage, loadVideos, selectVideo) plus MOCK_TEAMS
-  from mockData.js (no real teams backend exists yet).
+  (API_URL, currentUser, showMessage, loadVideos, selectVideo).
 
-  IMPORTANT — persistence limitation: film_type/team choice CANNOT be stored
-  server-side without a schema change (out of scope this session). It's kept
-  as client-side metadata only, folded into the uploaded video's title, e.g.
-  "Practice Cuts — Team Film — Cresamor Wrestling". This is a documented
-  known limitation, not a bug.
+  film_type is no longer collected (explicitly removed per this phase's
+  brief: "do not ask ... Team Film, Individual Film"). The videos.film_type
+  column still exists and still accepts it server-side for backward
+  compatibility, but this flow simply doesn't send it.
 
   The existing manual file-picker upload (#video-upload / uploadVideo() in
   app.js) is completely untouched and remains available as a fallback.
 */
 
 const RECORDING_CONTEXT_KEY = "cresamor_last_recording_context";
+
+const isMobileLikely = window.matchMedia("(pointer: coarse)").matches;
+
+let cachedTeams = null;
+
+async function loadTeams() {
+  if (cachedTeams) return cachedTeams;
+
+  try {
+    cachedTeams = await apiFetch("/api/teams");
+  } catch (error) {
+    console.error("Failed to load teams:", error);
+    cachedTeams = [];
+  }
+
+  return cachedTeams;
+}
 
 /* ---------- DOM refs ---------- */
 
@@ -24,23 +61,21 @@ const captureModal = document.querySelector("#capture-modal");
 const captureCloseBtn = document.querySelector("#capture-close-btn");
 
 const captureSteps = {
-  context: document.querySelector("#capture-step-context"),
-  picker: document.querySelector("#capture-step-picker"),
+  camera: document.querySelector("#capture-step-camera"),
   device: document.querySelector("#capture-step-device"),
   record: document.querySelector("#capture-step-record"),
   review: document.querySelector("#capture-step-review"),
+  confirmTeam: document.querySelector("#capture-step-confirm-team"),
   upload: document.querySelector("#capture-step-upload"),
   done: document.querySelector("#capture-step-done"),
 };
 
-const captureContextQuestion = document.querySelector("#capture-context-question");
-const captureContextYesBtn = document.querySelector("#capture-context-yes-btn");
-const captureContextNoBtn = document.querySelector("#capture-context-no-btn");
-
-const captureTypeTeamBtn = document.querySelector("#capture-type-team-btn");
-const captureTypeIndividualBtn = document.querySelector("#capture-type-individual-btn");
-const captureTeamChoice = document.querySelector("#capture-team-choice");
-const captureTeamList = document.querySelector("#capture-team-list");
+const captureNativeButtons = document.querySelector("#capture-native-buttons");
+const captureNativeBackBtn = document.querySelector("#capture-native-back-btn");
+const captureNativeFrontBtn = document.querySelector("#capture-native-front-btn");
+const captureNativeInput = document.querySelector("#capture-native-input");
+const captureDesktopStart = document.querySelector("#capture-desktop-start");
+const captureStartDesktopBtn = document.querySelector("#capture-start-desktop-btn");
 
 const captureDeviceSelect = document.querySelector("#capture-device-select");
 const captureDevicePreview = document.querySelector("#capture-device-preview");
@@ -56,7 +91,12 @@ const captureStopBtn = document.querySelector("#capture-stop-btn");
 
 const captureReviewVideo = document.querySelector("#capture-review-video");
 const captureDiscardBtn = document.querySelector("#capture-discard-btn");
-const captureUploadBtn = document.querySelector("#capture-upload-btn");
+const captureUseVideoBtn = document.querySelector("#capture-use-video-btn");
+
+const captureSuggestedTeam = document.querySelector("#capture-suggested-team");
+const captureConfirmSuggestedTeamBtn = document.querySelector("#capture-confirm-suggested-team-btn");
+const captureConfirmTeamList = document.querySelector("#capture-confirm-team-list");
+const captureSkipTeamBtn = document.querySelector("#capture-skip-team-btn");
 
 const captureUploadStatusText = document.querySelector("#capture-upload-status-text");
 const captureUploadProgressFill = document.querySelector("#capture-upload-progress-fill");
@@ -66,12 +106,11 @@ const captureDoneBtn = document.querySelector("#capture-done-btn");
 /* ---------- state ---------- */
 
 const capture = {
-  filmType: null, // 'team' | 'individual'
   team: null, // { id, name, sport } | null
-  stream: null,
+  stream: null, // desktop MediaRecorder path only
   recorder: null,
   chunks: [],
-  blob: null,
+  blob: null, // Blob (desktop) or File (native capture)
   timerInterval: null,
   elapsedSeconds: 0,
   mimeType: null,
@@ -107,11 +146,12 @@ function teardownCapture() {
   capture.recorder = null;
   capture.chunks = [];
   capture.blob = null;
+  capture.team = null;
   capture.elapsedSeconds = 0;
   captureRecordTimer.textContent = "00:00";
 }
 
-/* ---------- entry point: context-aware start ---------- */
+/* ---------- recording context (smart default for team suggestion) ---------- */
 
 function getLastRecordingContext() {
   try {
@@ -121,12 +161,16 @@ function getLastRecordingContext() {
   }
 }
 
-function saveRecordingContext(sport, team) {
-  localStorage.setItem(
-    RECORDING_CONTEXT_KEY,
-    JSON.stringify({ sport, teamName: team ? team.name : null })
-  );
+function saveRecordingContext(team) {
+  if (!team) {
+    localStorage.removeItem(RECORDING_CONTEXT_KEY);
+    return;
+  }
+
+  localStorage.setItem(RECORDING_CONTEXT_KEY, JSON.stringify({ teamId: team.id }));
 }
+
+/* ---------- entry point: straight to the camera, no upfront questions ---------- */
 
 function startCaptureFlow() {
   if (!currentUser) {
@@ -135,89 +179,45 @@ function startCaptureFlow() {
   }
 
   openCaptureModal();
+  showCaptureStep("camera");
 
-  const context = getLastRecordingContext();
-
-  if (context && context.sport === "wrestling") {
-    const team = MOCK_TEAMS.find((t) => t.sport === "wrestling") || null;
-    captureContextQuestion.textContent = "Record for Wrestling?";
-    showCaptureStep("context");
-
-    captureContextYesBtn.onclick = () => {
-      capture.filmType = "individual";
-      capture.team = team;
-      goToDeviceStep();
-    };
-
-    captureContextNoBtn.onclick = () => {
-      showPickerStep();
-    };
-
-    return;
+  if (isMobileLikely) {
+    captureNativeButtons.classList.remove("hidden");
+    captureDesktopStart.classList.add("hidden");
+  } else {
+    captureNativeButtons.classList.add("hidden");
+    captureDesktopStart.classList.remove("hidden");
   }
-
-  if (context && context.sport === "football") {
-    const team = MOCK_TEAMS.find((t) => t.sport === "football") || null;
-    captureContextQuestion.textContent = "Record for Football (Team Film)?";
-    showCaptureStep("context");
-
-    captureContextYesBtn.onclick = () => {
-      capture.filmType = "team";
-      capture.team = team;
-      goToDeviceStep();
-    };
-
-    captureContextNoBtn.onclick = () => {
-      showPickerStep();
-    };
-
-    return;
-  }
-
-  showPickerStep();
 }
 
-/* ---------- picker step: Team Film / Individual Film + Choose Team ---------- */
+/* ---------- mobile path: native camera via file input capture ---------- */
 
-function showPickerStep() {
-  captureTeamChoice.classList.add("hidden");
-  showCaptureStep("picker");
-}
-
-function renderTeamList() {
-  captureTeamList.innerHTML = "";
-
-  MOCK_TEAMS.forEach((team) => {
-    const li = document.createElement("li");
-    const btn = document.createElement("button");
-
-    btn.type = "button";
-    btn.className = "capture-team-btn";
-    btn.textContent = `${team.name} (${team.sport})`;
-
-    btn.addEventListener("click", () => {
-      capture.team = team;
-      goToDeviceStep();
-    });
-
-    li.appendChild(btn);
-    captureTeamList.appendChild(li);
-  });
-}
-
-captureTypeTeamBtn.addEventListener("click", () => {
-  capture.filmType = "team";
-  renderTeamList();
-  captureTeamChoice.classList.remove("hidden");
+captureNativeBackBtn.addEventListener("click", () => {
+  captureNativeInput.setAttribute("capture", "environment");
+  captureNativeInput.click();
 });
 
-captureTypeIndividualBtn.addEventListener("click", () => {
-  capture.filmType = "individual";
-  renderTeamList();
-  captureTeamChoice.classList.remove("hidden");
+captureNativeFrontBtn.addEventListener("click", () => {
+  captureNativeInput.setAttribute("capture", "user");
+  captureNativeInput.click();
 });
 
-/* ---------- device step ---------- */
+captureNativeInput.addEventListener("change", (event) => {
+  const file = event.target.files[0];
+  if (!file) return;
+
+  capture.blob = file;
+  captureReviewVideo.src = URL.createObjectURL(file);
+  showCaptureStep("review");
+
+  captureNativeInput.value = ""; // allow picking the same file again later
+});
+
+/* ---------- desktop path: in-browser MediaRecorder (Sprint 1, unchanged mechanics) ---------- */
+
+captureStartDesktopBtn.addEventListener("click", () => {
+  goToDeviceStep();
+});
 
 async function goToDeviceStep() {
   showCaptureStep("device");
@@ -276,8 +276,6 @@ captureContinueToRecordBtn.addEventListener("click", () => {
   showCaptureStep("record");
 });
 
-/* ---------- recording ---------- */
-
 function pickSupportedMimeType() {
   const candidates = [
     "video/webm;codecs=vp9,opus",
@@ -318,7 +316,7 @@ captureRecordBtn.addEventListener("click", () => {
 
   // Capture-time quality control: constrained resolution (set when the
   // stream was acquired) + capped bitrate here — this is the whole
-  // "compression" strategy for Sprint 1 (no ffmpeg, no deployment changes).
+  // "compression" strategy (no ffmpeg, no deployment changes).
   const options = capture.mimeType
     ? { mimeType: capture.mimeType, videoBitsPerSecond: 2_500_000 }
     : { videoBitsPerSecond: 2_500_000 };
@@ -392,25 +390,98 @@ captureDiscardBtn.addEventListener("click", () => {
   capture.blob = null;
   capture.chunks = [];
   captureReviewVideo.removeAttribute("src");
-  capturePreviewVideo.srcObject = capture.stream;
-  showCaptureStep("record");
+
+  if (capture.stream) {
+    // Desktop path — camera's still open, go straight back to recording.
+    capturePreviewVideo.srcObject = capture.stream;
+    showCaptureStep("record");
+  } else {
+    // Native/mobile path — nothing to resume, start over from the camera step.
+    startCaptureFlow();
+  }
 });
 
-captureUploadBtn.addEventListener("click", () => {
+captureUseVideoBtn.addEventListener("click", () => {
+  showConfirmTeamStep();
+});
+
+/* ---------- assign team (after preview, per the desired flow) ---------- */
+
+async function showConfirmTeamStep() {
+  showCaptureStep("confirmTeam");
+
+  const teams = await loadTeams();
+  const context = getLastRecordingContext();
+  const suggestedTeam = context ? teams.find((t) => t.id === context.teamId) : null;
+
+  if (suggestedTeam) {
+    captureSuggestedTeam.classList.remove("hidden");
+    captureConfirmSuggestedTeamBtn.textContent = `✓ Confirm: ${suggestedTeam.name}`;
+
+    captureConfirmSuggestedTeamBtn.onclick = () => {
+      capture.team = suggestedTeam;
+      uploadRecording();
+    };
+  } else {
+    captureSuggestedTeam.classList.add("hidden");
+  }
+
+  captureConfirmTeamList.innerHTML = "";
+
+  teams
+    .filter((t) => !suggestedTeam || t.id !== suggestedTeam.id)
+    .forEach((team) => {
+      const li = document.createElement("li");
+      const btn = document.createElement("button");
+
+      btn.type = "button";
+      btn.className = "capture-team-btn";
+      btn.textContent = team.sport ? `${team.name} (${team.sport})` : team.name;
+
+      btn.addEventListener("click", () => {
+        capture.team = team;
+        uploadRecording();
+      });
+
+      li.appendChild(btn);
+      captureConfirmTeamList.appendChild(li);
+    });
+
+  if (!teams.length) {
+    captureConfirmTeamList.innerHTML = "<li>No teams yet — an admin needs to create one.</li>";
+  }
+}
+
+captureSkipTeamBtn.addEventListener("click", () => {
+  capture.team = null;
   uploadRecording();
 });
 
 /* ---------- upload (reuses the existing /api/upload-video endpoint) ---------- */
 
-function buildRecordingTitle() {
-  const typeLabel = capture.filmType === "team" ? "Team Film" : "Individual Film";
-  const teamLabel = capture.team ? capture.team.name : "No Team Selected";
-  const stamp = new Date().toLocaleString();
+// Foundation Sprint Phase 3: polls the real processing_status instead of
+// assuming a fixed delay means "ready" — see server/services/videoProcessing.js.
+async function pollVideoUntilReady(videoId, onStatus, { intervalMs = 500, timeoutMs = 30000 } = {}) {
+  const startedAt = Date.now();
 
-  // film_type/team can't be persisted as real columns without a schema
-  // change (out of scope this session) — folding them into the title is
-  // the documented client-side-metadata workaround.
-  return `${typeLabel} — ${teamLabel} — ${stamp}`;
+  while (Date.now() - startedAt < timeoutMs) {
+    const video = await apiFetch(`/api/videos/${videoId}`);
+
+    if (onStatus) onStatus(video.processing_status);
+
+    if (video.processing_status === "ready") return video;
+    if (video.processing_status === "failed") throw new Error("Video processing failed");
+
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+
+  throw new Error("Video processing timed out");
+}
+
+function buildRecordingTitle() {
+  const teamLabel = capture.team ? capture.team.name : "No Team";
+  const stamp = new Date().toLocaleString();
+  return `${teamLabel} — ${stamp}`;
 }
 
 function uploadRecording() {
@@ -421,11 +492,19 @@ function uploadRecording() {
   captureUploadProgressFill.style.width = "0%";
 
   const formData = new FormData();
+  const isNativeFile = typeof File !== "undefined" && capture.blob instanceof File;
   const extension = (capture.mimeType || "video/webm").includes("mp4") ? "mp4" : "webm";
+  const filename = isNativeFile ? capture.blob.name : `recording-${Date.now()}.${extension}`;
 
-  formData.append("video", capture.blob, `recording-${Date.now()}.${extension}`);
+  formData.append("video", capture.blob, filename);
   formData.append("title", buildRecordingTitle());
   formData.append("uploaded_by", currentUser.id);
+  // film_type intentionally not sent — removed from this flow per the
+  // Foundation Sprint Phase 4 brief ("do not ask ... Team Film, Individual
+  // Film"). The column still exists server-side for backward compatibility.
+  if (capture.team) {
+    formData.append("team_id", capture.team.id);
+  }
 
   const xhr = new XMLHttpRequest();
 
@@ -438,25 +517,28 @@ function uploadRecording() {
     }
   });
 
-  xhr.addEventListener("load", () => {
+  xhr.addEventListener("load", async () => {
     if (xhr.status >= 200 && xhr.status < 300) {
-      captureUploadStatusText.textContent = "Processing…";
+      saveRecordingContext(capture.team);
 
-      if (capture.team) {
-        saveRecordingContext(capture.team.sport, capture.team);
-      }
+      try {
+        const uploaded = JSON.parse(xhr.responseText);
 
-      setTimeout(async () => {
+        const ready = await pollVideoUntilReady(uploaded.id, (status) => {
+          captureUploadStatusText.textContent =
+            status === "processing" ? "Processing…" : "Uploading…";
+        });
+
         showCaptureStep("done");
-
-        try {
-          const uploaded = JSON.parse(xhr.responseText);
-          await loadVideos();
-          selectVideo(uploaded);
-        } catch (error) {
-          console.error("Post-upload refresh failed:", error);
-        }
-      }, 400);
+        await loadVideos();
+        selectVideo(ready);
+      } catch (error) {
+        console.error("Processing failed or timed out:", error);
+        showMessage(
+          "Upload succeeded, but processing is taking longer than expected. It'll appear in Film Room once it's ready."
+        );
+        showCaptureStep("done");
+      }
     } else {
       console.error("Upload failed:", xhr.status, xhr.responseText);
       showMessage("Upload failed. Please try again.");
