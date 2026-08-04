@@ -49,4 +49,10 @@ async function remove(key) {
   });
 }
 
-module.exports = { upload, getSignedUrl, exists, remove };
+// A copy, not upload()'s move-semantics rename — the source (the real
+// stored object) must stay in place for a download.
+async function downloadToFile(key, destPath) {
+  await fs.promises.copyFile(resolvePath(key), destPath);
+}
+
+module.exports = { upload, getSignedUrl, exists, remove, downloadToFile };

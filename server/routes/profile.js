@@ -168,6 +168,13 @@ router.post(
         return res.status(400).json({ error: "No photo uploaded" });
       }
 
+      // Beta Stabilization Sprint: capture the previous key BEFORE
+      // overwriting it, so it can be cleaned up from R2 after the new
+      // upload and DB update both succeed — replacing a picture used to
+      // leave the old object orphaned in the bucket forever.
+      const existing = await client.query("SELECT profile_picture_key FROM users WHERE id = $1", [id]);
+      const oldKey = existing.rows[0]?.profile_picture_key;
+
       // Beta Readiness Sprint 1: same storage_key pattern as videos — new
       // uploads go through the active provider, profile_picture_url stays
       // NULL for these rows (resolved on read via withResolvedPhotoUrl).
@@ -189,6 +196,13 @@ router.post(
 
       if (!result.rows[0]) {
         return res.status(404).json({ error: "User not found" });
+      }
+
+      // Only after the DB update has committed to the new key — best
+      // effort, same "log don't throw on cleanup failure" shape as video
+      // deletion.
+      if (oldKey && oldKey !== storageKey) {
+        await storage.remove(oldKey);
       }
 
       res.json(await withResolvedPhotoUrl(result.rows[0]));

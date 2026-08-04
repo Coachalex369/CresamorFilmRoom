@@ -147,9 +147,19 @@ function hideVideoStatusMessage() {
   videoStatusMessage.classList.add("hidden");
 }
 
+// Beta Stabilization Sprint: status-driven rather than the old single
+// generic "conversion needed" message — processing_status now carries a
+// real, user-visible lifecycle (uploading -> queued -> converting ->
+// ready/failed, or deferred for a valid-but-oversized file), and coaches
+// should see which of those a video is actually in.
 function unavailableReason(video) {
   if (video.__local) return null; // local recordings are always instantly playable via their own blob
   if (video.available === false) return "This video file is no longer available.";
+  if (video.processing_status === "uploading") return "This video is still uploading.";
+  if (video.processing_status === "queued") return "This video is queued for conversion.";
+  if (video.processing_status === "converting") return "This video is being converted and can't be played yet.";
+  if (video.processing_status === "failed") return "Conversion failed for this video.";
+  if (video.processing_status === "deferred") return "This video is too large for automatic conversion.";
   if (video.needs_conversion) return "This video's format requires conversion and can't be played yet.";
   return null;
 }
@@ -289,6 +299,35 @@ async function deleteVideo(video) {
   }
 }
 
+// Beta Stabilization Sprint: the safe manual retry — lets a coach unstick
+// a 'failed' conversion or force one through despite the 'deferred' size
+// cap, without needing a developer. Re-fetches the video list afterward
+// so the badge/status updates to "Queued" immediately.
+async function retryVideoConversion(video) {
+  const retryBtn = videoList.querySelector(`[data-retry-video-id="${video.id}"]`);
+
+  if (retryBtn) {
+    retryBtn.disabled = true;
+    retryBtn.textContent = "Retrying...";
+  }
+
+  try {
+    await apiFetch(`/api/videos/${video.id}/retry-conversion`, {
+      method: "POST",
+    });
+
+    await loadVideos();
+  } catch (error) {
+    console.error("Retry conversion failed:", error);
+    showMessage("Could not retry conversion.");
+
+    if (retryBtn) {
+      retryBtn.disabled = false;
+      retryBtn.textContent = "Retry Conversion";
+    }
+  }
+}
+
 // Real-Time Sideline Replay: the Film Room list is a projection — the
 // Recording Library is authoritative for anything this device recorded
 // (shown until it's fully `processed`), the server's `allVideos` is the
@@ -389,9 +428,21 @@ function renderVideoList() {
 
     if (reason) {
       button.classList.add("video-unavailable");
-      button.textContent = video.available === false
-        ? `${video.title} (unavailable)`
-        : `${video.title} (conversion needed)`;
+      // Short label here (the list is compact); the full sentence from
+      // unavailableReason() shows in the bigger status message once this
+      // video is actually selected (see selectVideo()).
+      const shortLabels = {
+        uploading: "uploading",
+        queued: "queued",
+        converting: "converting",
+        failed: "conversion failed",
+        deferred: "too large",
+      };
+      const shortLabel =
+        video.available === false
+          ? "unavailable"
+          : shortLabels[video.processing_status] || "conversion needed";
+      button.textContent = `${video.title} (${shortLabel})`;
     } else {
       button.textContent = video.title;
     }
@@ -410,6 +461,27 @@ function renderVideoList() {
       }
 
       button.appendChild(badge);
+    } else if (video.processing_status && video.processing_status !== "ready") {
+      // Beta Stabilization Sprint: same small-badge pattern as local
+      // recordings, applied to server-side videos still moving through
+      // the real conversion lifecycle.
+      const badge = document.createElement("span");
+      badge.className = "video-item-badge";
+
+      const statusLabels = {
+        uploading: "Uploading",
+        queued: "Queued",
+        converting: "Converting",
+        failed: "Failed",
+        deferred: "Too large",
+      };
+
+      if (video.processing_status === "converting" || video.processing_status === "queued") {
+        badge.classList.add("badge-syncing");
+      }
+
+      badge.textContent = statusLabels[video.processing_status] || video.processing_status;
+      button.appendChild(badge);
     }
 
     button.addEventListener("click", () => {
@@ -419,6 +491,23 @@ function renderVideoList() {
     li.appendChild(button);
 
     if (canDeleteVideoClientSide(video)) {
+      // Beta Stabilization Sprint: lets a coach self-serve a stuck or
+      // oversized conversion without needing a developer.
+      if (video.processing_status === "failed" || video.processing_status === "deferred") {
+        const retryBtn = document.createElement("button");
+        retryBtn.type = "button";
+        retryBtn.className = "video-retry-btn";
+        retryBtn.textContent = "Retry Conversion";
+        retryBtn.dataset.retryVideoId = video.id;
+
+        retryBtn.addEventListener("click", (event) => {
+          event.stopPropagation();
+          retryVideoConversion(video);
+        });
+
+        li.appendChild(retryBtn);
+      }
+
       const deleteBtn = document.createElement("button");
       deleteBtn.type = "button";
       deleteBtn.className = "video-delete-btn";

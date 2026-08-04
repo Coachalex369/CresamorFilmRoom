@@ -8,6 +8,8 @@ const client = require("../db/client");
 const {
   enqueueVideoProcessingAsync,
   needsFormatConversion,
+  retryConversion,
+  MAX_AUTO_CONVERSION_SIZE_BYTES,
 } = require("../services/videoProcessing");
 const { canDeleteVideo, canViewVideo } = require("../services/permissions");
 const storage = require("../services/storage/storage");
@@ -230,10 +232,26 @@ router.post("/api/upload-video", authenticate, uploadLimiter, upload.single("vid
     // Foundation Sprint Phase 3: this route now only receives the upload —
     // it responds immediately instead of blocking on processing. The
     // client (capture.js) polls GET /api/videos/:id to observe
-    // uploading -> processing -> ready. Deliberately NOT awaited: when
-    // real transcoding lands here and takes real time, this request/
-    // response contract already doesn't assume it's fast.
-    enqueueVideoProcessingAsync(inserted.rows[0]);
+    // uploading -> queued -> converting -> ready. Deliberately NOT
+    // awaited: conversion can take real time, and this request/response
+    // contract already doesn't assume it's fast.
+    //
+    // Beta Stabilization Sprint: the size cap on automatic conversion is
+    // decided right here, once, using req.file.size — multer already has
+    // it, so this needs no extra I/O. 'deferred' is a distinct non-error
+    // state (not 'failed') for a valid file that's simply too large for
+    // the automatic queue on this beta instance; it skips the queue
+    // entirely rather than risking tying it up for a very long time. A
+    // manual retry (POST /api/videos/:id/retry-conversion) always
+    // attempts conversion regardless of size.
+    if (needsFormatConversion(inserted.rows[0]) && req.file.size > MAX_AUTO_CONVERSION_SIZE_BYTES) {
+      await client.query(`UPDATE videos SET processing_status = 'deferred' WHERE id = $1`, [
+        inserted.rows[0].id,
+      ]);
+      inserted.rows[0].processing_status = "deferred";
+    } else {
+      enqueueVideoProcessingAsync(inserted.rows[0]);
+    }
 
     res.status(201).json(inserted.rows[0]);
   } catch (err) {
@@ -285,6 +303,14 @@ router.delete("/api/videos/:id", authenticate, async (req, res) => {
     } else {
       deleteLocalFileIfPresent(video.file_url);
     }
+
+    // Beta Stabilization Sprint: a converted video also has a retained
+    // original (source_storage_key) — both objects belong to the same
+    // video and must go together, never left orphaned in R2.
+    if (video.source_storage_key && video.source_storage_key !== video.storage_key) {
+      await storage.remove(video.source_storage_key);
+    }
+
     deleteLocalFileIfPresent(video.thumbnail_url);
 
     await logSecurityEvent("video_deleted", {
@@ -297,6 +323,40 @@ router.delete("/api/videos/:id", authenticate, async (req, res) => {
   } catch (err) {
     console.error("DELETE /api/videos/:id error:", err);
     res.status(500).json({ error: "Failed to delete video" });
+  }
+});
+
+// Beta Stabilization Sprint: the safe manual retry mechanism — what
+// unsticks a video stuck in 'converting' (e.g. from a crash the boot-time
+// auto-requeue hasn't caught yet), a genuinely 'failed' conversion, or a
+// 'deferred' one exceeding the automatic size cap (retry always attempts
+// it regardless of size). Same uploader-or-coach authority as delete —
+// reused, not reinvented.
+router.post("/api/videos/:id/retry-conversion", authenticate, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const videoResult = await client.query("SELECT * FROM videos WHERE id = $1", [id]);
+    const video = videoResult.rows[0];
+
+    if (!video) {
+      return res.status(404).json({ error: "Video not found" });
+    }
+
+    if (!(await canDeleteVideo(req.user.id, id))) {
+      return res.status(403).json({ error: "Not authorized to retry this video" });
+    }
+
+    if (!["converting", "failed", "deferred"].includes(video.processing_status)) {
+      return res.status(400).json({ error: `Video is not in a retriable state (currently '${video.processing_status}')` });
+    }
+
+    await retryConversion(video.id);
+
+    res.json({ success: true, id: Number(id), processing_status: "queued" });
+  } catch (err) {
+    console.error("POST /api/videos/:id/retry-conversion error:", err);
+    res.status(500).json({ error: "Failed to retry conversion" });
   }
 });
 

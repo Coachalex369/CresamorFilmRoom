@@ -234,6 +234,13 @@ async function handleProfilePhotoSelected(file) {
   } catch (error) {
     console.error("Photo upload failed:", error);
     if (editProfilePhotoStatus) editProfilePhotoStatus.textContent = "Could not upload photo.";
+
+    // Beta Stabilization Sprint: the optimistic local-blob preview shown
+    // above (before the upload even started) was left showing the failed
+    // new photo even though the real Home header correctly kept the old
+    // one — revert the edit-modal swatch back to the last-known-good
+    // picture so it doesn't display something that was never saved.
+    renderProfilePhotoPreview(currentProfile?.profile_picture_url);
   }
 }
 

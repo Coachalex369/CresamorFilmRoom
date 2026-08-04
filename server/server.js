@@ -2,6 +2,7 @@ require("dotenv").config();
 
 const app = require("./app");
 const client = require("./db/client");
+const { requeueStuckConversions } = require("./services/videoProcessing");
 
 const PORT = process.env.PORT || 3000;
 
@@ -11,6 +12,13 @@ async function startServer() {
   try {
     await client.query("SELECT 1");
     console.log("Connected to PostgreSQL");
+
+    // Beta Stabilization Sprint: the conversion queue is in-memory and
+    // doesn't survive a redeploy — anything still 'queued'/'converting'
+    // at boot is orphaned work from the previous process life, re-queued
+    // here so a redeploy mid-conversion self-heals instead of getting
+    // stuck forever.
+    await requeueStuckConversions();
 
     server = app.listen(PORT, () => {
       console.log(`Server running on http://localhost:${PORT}`);

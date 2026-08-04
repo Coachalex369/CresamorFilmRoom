@@ -12,6 +12,7 @@
 */
 
 const fs = require("fs");
+const { pipeline } = require("stream/promises");
 const {
   S3Client,
   HeadObjectCommand,
@@ -77,4 +78,13 @@ async function remove(key) {
   }
 }
 
-module.exports = { upload, getSignedUrl, exists, remove };
+// Beta Stabilization Sprint (MOV conversion): the first download-oriented
+// function this project has needed — everything before this was upload-
+// only. Streams straight to disk via pipeline(), never buffers the whole
+// object in memory, matching the upload side's existing discipline.
+async function downloadToFile(key, destPath) {
+  const response = await client.send(new GetObjectCommand({ Bucket: BUCKET, Key: key }));
+  await pipeline(response.Body, fs.createWriteStream(destPath));
+}
+
+module.exports = { upload, getSignedUrl, exists, remove, downloadToFile };

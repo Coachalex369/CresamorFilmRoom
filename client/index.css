@@ -257,6 +257,25 @@ li {
   cursor: not-allowed;
 }
 
+.video-retry-btn {
+  flex-shrink: 0;
+  background: transparent;
+  border: 1px solid var(--muted);
+  color: var(--muted);
+  font-size: 0.8rem;
+  padding: 0.3rem 0.5rem;
+}
+
+.video-retry-btn:hover {
+  border-color: var(--gold);
+  color: var(--gold-soft);
+}
+
+.video-retry-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .highlight-item-btn small {
   display: block;
   color: var(--muted);
