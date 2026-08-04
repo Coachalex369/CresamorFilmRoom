@@ -20,6 +20,9 @@
   },
   "homepage": "https://github.com/Coachalex369/CresamorFilmRoom#readme",
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1102.0",
+    "@aws-sdk/lib-storage": "^3.1102.0",
+    "@aws-sdk/s3-request-presigner": "^3.1102.0",
     "bcrypt": "^6.0.0",
     "cors": "^2.8.6",
     "dotenv": "^17.4.1",

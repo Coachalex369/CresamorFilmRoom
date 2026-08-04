@@ -4,17 +4,21 @@ const fs = require("fs");
 const multer = require("multer");
 
 const client = require("../db/client");
+const storage = require("../services/storage/storage");
 
 const router = express.Router();
 
-const profilePicturesDir = path.join(__dirname, "../../uploads/profile-pictures");
-if (!fs.existsSync(profilePicturesDir)) {
-  fs.mkdirSync(profilePicturesDir, { recursive: true });
+// Beta Readiness Sprint 1 (R2 migration): same temp-dir-then-storage.upload()
+// pattern as videos.js — see that file's comment and ARCHITECTURE.md's
+// "Storage strategy" for why.
+const tempProfilePicturesDir = path.join(__dirname, "../../uploads/.tmp");
+if (!fs.existsSync(tempProfilePicturesDir)) {
+  fs.mkdirSync(tempProfilePicturesDir, { recursive: true });
 }
 
 const profilePictureStorage = multer.diskStorage({
   destination: (req, file, cb) => {
-    cb(null, profilePicturesDir);
+    cb(null, tempProfilePicturesDir);
   },
   filename: (req, file, cb) => {
     const safeName = `${Date.now()}-${file.originalname.replace(/\s+/g, "-")}`;
@@ -35,8 +39,22 @@ const uploadProfilePicture = multer({
 
 const PROFILE_FIELDS = `
   id, email, role, display_name, school, team, graduation_year, profile_picture_url,
+  profile_picture_key,
   bio, height_inches, weight_lbs, primary_position, goals, accomplishments, social_links
 `;
+
+// profile_picture_key IS NOT NULL means this row goes through the storage
+// abstraction (same rule as videos.storage_key) — resolve it to a
+// signed/direct URL and surface it as profile_picture_url so the client
+// (which already just reads profile_picture_url) needs no changes.
+async function withResolvedPhotoUrl(user) {
+  if (!user.profile_picture_key) return user;
+
+  return {
+    ...user,
+    profile_picture_url: await storage.getSignedUrl(user.profile_picture_key),
+  };
+}
 
 router.get("/api/users/:id/profile", async (req, res) => {
   try {
@@ -51,7 +69,7 @@ router.get("/api/users/:id/profile", async (req, res) => {
       return res.status(404).json({ error: "User not found" });
     }
 
-    res.json(result.rows[0]);
+    res.json(await withResolvedPhotoUrl(result.rows[0]));
   } catch (err) {
     console.error("GET /api/users/:id/profile error:", err);
     res.status(500).json({ error: "Failed to fetch profile" });
@@ -113,7 +131,7 @@ router.put("/api/users/:id/profile", async (req, res) => {
       return res.status(404).json({ error: "User not found" });
     }
 
-    res.json(result.rows[0]);
+    res.json(await withResolvedPhotoUrl(result.rows[0]));
   } catch (err) {
     console.error("PUT /api/users/:id/profile error:", err);
     res.status(500).json({ error: "Failed to update profile" });
@@ -128,23 +146,27 @@ router.post("/api/users/:id/photo", uploadProfilePicture.single("photo"), async 
       return res.status(400).json({ error: "No photo uploaded" });
     }
 
-    const photoUrl = `/uploads/profile-pictures/${req.file.filename}`;
+    // Beta Readiness Sprint 1: same storage_key pattern as videos — new
+    // uploads go through the active provider, profile_picture_url stays
+    // NULL for these rows (resolved on read via withResolvedPhotoUrl).
+    const storageKey = `profile-pictures/${req.file.filename}`;
+    await storage.upload(storageKey, req.file.path, req.file.mimetype);
 
     const result = await client.query(
       `
       UPDATE users
-      SET profile_picture_url = $1
+      SET profile_picture_key = $1
       WHERE id = $2
       RETURNING ${PROFILE_FIELDS}
       `,
-      [photoUrl, id]
+      [storageKey, id]
     );
 
     if (!result.rows[0]) {
       return res.status(404).json({ error: "User not found" });
     }
 
-    res.json(result.rows[0]);
+    res.json(await withResolvedPhotoUrl(result.rows[0]));
   } catch (err) {
     console.error("POST /api/users/:id/photo error:", err);
     res.status(500).json({ error: "Failed to upload photo" });

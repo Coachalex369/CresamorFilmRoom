@@ -36,8 +36,8 @@ organizations ──< schools ──< teams ──< team_members >── users
 
 - **`organizations` / `schools` / `teams`**: the real hierarchy. One seeded default org/school exists so this isn't empty; multi-tenant admin UI for creating orgs/schools doesn't exist yet.
 - **`team_members`**: many-to-many, the *only* source of truth for "who's on what team." No denormalized `users.primary_team_id` — deliberately, to avoid a second place that can drift out of sync. `users.team` (free text) still exists for backward display compatibility but is deprecated; don't write new features against it.
-- **`users`**: auth fields (`email`/`password_hash`/`role` — `coach`/`athlete`/`parent`) plus a full athlete-profile field set (`display_name`, `school`, `bio`, `height_inches`, `weight_lbs`, `primary_position`, `goals`, `accomplishments`, `profile_picture_url`, `social_links` JSONB). The JSONB choice for social/recruiting links is deliberate — that's the one part of the profile shape that's genuinely open-ended (new platforms appear over time), so it's the one field spared from "add a column per feature."
-- **`videos`**: `team_id`/`film_type` for real team/individual-film classification (replacing an earlier "stuff it into the title string" workaround), `processing_status` (state machine: `uploading` → `processing` → `ready`/`failed`), `thumbnail_url` (schema exists, always `null` so far — nothing generates or displays it yet).
+- **`users`**: auth fields (`email`/`password_hash`/`role` — `coach`/`athlete`/`parent`) plus a full athlete-profile field set (`display_name`, `school`, `bio`, `height_inches`, `weight_lbs`, `primary_position`, `goals`, `accomplishments`, `profile_picture_url`, `profile_picture_key`, `social_links` JSONB). The JSONB choice for social/recruiting links is deliberate — that's the one part of the profile shape that's genuinely open-ended (new platforms appear over time), so it's the one field spared from "add a column per feature." `profile_picture_key` (Beta Readiness Sprint 1) routes through the storage abstraction when set; `profile_picture_url` is legacy-only — see "Storage strategy."
+- **`videos`**: `team_id`/`film_type` for real team/individual-film classification (replacing an earlier "stuff it into the title string" workaround), `processing_status` (state machine: `uploading` → `processing` → `ready`/`failed`), `thumbnail_url` (schema exists, always `null` so far — nothing generates or displays it yet), `storage_key` (Beta Readiness Sprint 1 — same legacy-vs-abstraction split as `profile_picture_key`; `file_url` is nullable now for exactly this reason).
 - **`clips`**: highlights, always real/DB-backed since before any of this session's work.
 - **`conversations` / `conversation_participants` / `messages`**: real conversation model. The MVP UI still only ever shows one thread, but the schema already supports per-team, per-category (`coach`/`parent`/`team`/`athlete`/`direct`), or direct-message conversations — building that UI is additive from here, not a schema change.
 
@@ -85,18 +85,32 @@ Camera → Local Library (IndexedDB) → Recording Pipeline → Cloud → Team L
 
 ## Storage strategy
 
-**Two distinct storage layers exist now, deliberately — don't conflate them:**
-1. **This device's own copy** (IndexedDB, via `recordingLibrary.js`) — durable across app reload/restart, but local to the device that recorded it. Not guaranteed forever: `navigator.storage.persist()` isn't called yet, so a browser under real disk pressure can evict it. Documented gap, not implemented this pass.
-2. **The team's shared copy** (Postgres `videos` row + a file on the server) — below.
+**Two distinct storage layers exist, deliberately — don't conflate them:**
+1. **This device's own copy** (IndexedDB, via `recordingLibrary.js`) — durable across app reload/restart, but local to the device that recorded it. Not guaranteed forever: `navigator.storage.persist()` isn't called yet, so a browser under real disk pressure can evict it. Documented gap, not implemented.
+2. **The team's shared copy** — Postgres row + a file behind the storage abstraction below.
 
-**Server-side, current**: local disk, under `uploads/` (videos) and `uploads/profile-pictures/` (profile photos), served via Express static middleware. On Render's free tier this is ephemeral — wiped on every redeploy/restart. This isn't theoretical: it already happened once, silently, and orphaned two `videos` rows pointing at files that no longer existed (surfaced as player 404s, diagnosed and cleaned up — see git history around the playback-fix pass). Acceptable for MVP development, not for production.
+**Server-side storage is now provider-swappable** (`server/services/storage/`), built for Beta Readiness Sprint 1 after Render's ephemeral disk silently lost two real videos (see the playback-fix pass in `CLAUDE.md`'s history) — durability for beta testers' film isn't optional the way it was for MVP development.
 
-**Migration path to object storage** (documented, not implemented — see the Sprint 3 architecture-review response for the full reasoning):
-1. Introduce an S3-compatible bucket (Cloudflare R2 recommended — no egress fees, meaningful for a video-heavy app).
-2. Swap `multer.diskStorage` for `multer-s3` (or R2's S3-compatible equivalent) in `server/routes/videos.js` and `server/routes/profile.js` — the only code that needs to change.
-3. **No database schema change required.** `file_url`/`profile_picture_url`/`thumbnail_url` are already plain strings, and the client already branches on `startsWith("http")` wherever it resolves a URL (see `resolveUploadUrl()` in `home.js`, and the equivalent logic in `capture.js`) — a bucket URL is just a different string in the same column. This was future-proofed by accident, but it holds.
-4. One-off migration script: list existing local files, upload to the bucket, update the corresponding `file_url` rows. A few dozen lines, run once.
-5. Decide public-bucket-plus-CDN vs. signed URLs based on whether film needs to stay private to a team — that decision interacts with the permission model above, so it's worth deciding deliberately rather than defaulting.
+- **`storage.js`** — the facade. Everything (routes, the backfill script) imports this, never a specific provider directly. Picks `r2Storage.js` or `localStorage.js` based on `process.env.STORAGE_PROVIDER` (`local` default — local dev needs zero setup; `r2` for production).
+- **`localStorage.js`** — the original `uploads/` disk behavior, unchanged, just extracted behind the same interface.
+- **`r2Storage.js`** — Cloudflare R2 (S3-API-compatible, via the standard AWS SDK v3: `@aws-sdk/client-s3`, `@aws-sdk/lib-storage`, `@aws-sdk/s3-request-presigner`). The bucket is **private** — no public access. Playback goes through `getSignedUrl()`, a short-lived (1 hour default) signed GET URL, never a permanent public link.
+- Interface, identical for both: `upload(key, filePath, contentType)`, `getSignedUrl(key, expiresInSeconds)`, `exists(key)`, `remove(key)`.
+- **Uploads go through a temp file, not an in-memory buffer.** Multer writes to `uploads/.tmp/` (gitignored, self-cleaning); `storage.upload()` streams from there to the real destination — `Upload` from `@aws-sdk/lib-storage` does true streaming multipart for R2 (no full-file memory buffering), which matters on Render's constrained instance for anything approaching a full game recording.
+
+**Schema**: `videos.storage_key` / `users.profile_picture_key` (both nullable, added in migration `006_r2_storage.sql`). `storage_key IS NOT NULL` means "this row goes through the storage abstraction, resolve via `getSignedUrl()`/`exists()`." `NULL` means a **legacy row** — `file_url`/`profile_picture_url` are read directly, exactly as before this migration, forever, regardless of what `STORAGE_PROVIDER` is set to today. Old rows are never rewritten in place; only new uploads adopt `storage_key`. (`videos.file_url`'s original `NOT NULL` constraint was dropped as part of this — new storage_key rows leave it `NULL` by design; every pre-existing row already had a real value, so this was safe to apply immediately.)
+
+**Env vars** (Render dashboard in production, local `.env` for dev — same handling as `DATABASE_URL`/`JWT_SECRET`): `STORAGE_PROVIDER`, `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME`.
+
+**Manual Cloudflare setup** (one-time, done by the project owner — Claude Code sessions don't have Cloudflare access):
+1. Cloudflare dashboard → R2 → create a bucket (e.g. `cresamor-film`) — private by default, no public-access option to enable.
+2. R2 → "Manage API tokens" → create an **Account API token** scoped to R2 Object Read & Write on that bucket (not a global API key). Note the Access Key ID and Secret Access Key (secret shown once).
+3. Note the Cloudflare **Account ID** (dashboard sidebar, or the R2 overview page).
+4. Render → `CresamorFilmRoom-3` → Environment: set the 5 env vars above. Render redeploys automatically on save.
+5. For local testing against the real bucket: add the same 5 vars to the local `.env`; leave `STORAGE_PROVIDER` unset for everyday local dev (keeps using local disk), set it to `r2` only when deliberately testing against the bucket.
+
+**Backfill**: `server/scripts/backfillR2.js` — optional, manual, never auto-run (`node server/scripts/backfillR2.js`). Finds legacy rows whose local file is *still actually present* on disk right now and uploads it to R2, setting `storage_key`. Never deletes the local file or clears `file_url`. Anything already lost to a prior redeploy stays lost — this rescues what's still there today, it doesn't recover history.
+
+**What's still local-disk-only**: nothing new — the `uploads/` directory itself still exists as the destination for the `local` provider and as where legacy files are read from. Thumbnail generation is still not implemented (unchanged); the storage abstraction is ready for it whenever it lands.
 
 ## Deployment reality
 
@@ -116,4 +130,5 @@ Camera → Local Library (IndexedDB) → Recording Pipeline → Cloud → Team L
 - `events`/Calendar backend — UI still reads `mockData.js`'s `MOCK_EVENTS`.
 - `watch_progress` (Continue Watching) — still `localStorage`, deliberately (it's session/UX state, not data an athlete would expect to migrate with them, though a cross-device "resume where I left off" is a reasonable future upgrade).
 - Parent-child account linking — accounts exist, linking doesn't.
-- JWT server-side verification (see "Permission model" above) — the single biggest real gap between this app and a production-ready one.
+- Direct browser-to-R2 uploads (presigned PUT) — uploads still go through the Express server, keeping multer's validation/auth checks in one place. Worth revisiting for very large files.
+- JWT server-side verification (see "Permission model" above) — the single biggest real gap between this app and a production-ready one, and the next planned sprint after Beta Readiness Sprint 1 (this one).
