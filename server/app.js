@@ -77,5 +77,6 @@ app.use(require("./routes/clips"));
 app.use(require("./routes/profile"));
 app.use(require("./routes/conversations"));
 app.use(require("./routes/teams"));
+app.use(require("./routes/invitations"));
 
 module.exports = app;

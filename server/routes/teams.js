@@ -3,7 +3,7 @@ const express = require("express");
 const client = require("../db/client");
 const { authenticate } = require("../middleware/authenticate");
 const { requireRole } = require("../middleware/authorize");
-const { canManageTeamMembership } = require("../services/permissions");
+const { canManageTeamMembership, canAccessTeam } = require("../services/permissions");
 const { logSecurityEvent } = require("../services/auditLog");
 
 const router = express.Router();
@@ -49,6 +49,11 @@ router.get("/api/teams", authenticate, async (req, res) => {
   }
 });
 
+// Teams MVP: auto-joins the creating coach as an active team_members row
+// (role_on_team='coach') — didn't happen before this feature. Without it
+// a coach couldn't manage (invite to / revoke members from) the very
+// team they just created, since canManageTeam requires a real, active
+// team_members row with role_on_team='coach', not just users.role==='coach'.
 router.post("/api/teams", authenticate, requireRole("coach"), async (req, res) => {
   try {
     const { name, sport, school_id } = req.body;
@@ -66,10 +71,85 @@ router.post("/api/teams", authenticate, requireRole("coach"), async (req, res) =
       [name, sport || null, school_id || null]
     );
 
-    res.status(201).json(result.rows[0]);
+    const team = result.rows[0];
+
+    await client.query(
+      `
+      INSERT INTO team_members (team_id, user_id, role_on_team, is_primary)
+      VALUES ($1, $2, 'coach', true)
+      ON CONFLICT (team_id, user_id) DO UPDATE
+        SET role_on_team = 'coach', revoked_at = NULL, revoked_by = NULL
+      `,
+      [team.id, req.user.id]
+    );
+
+    res.status(201).json(team);
   } catch (err) {
     console.error("POST /api/teams error:", err);
     res.status(500).json({ error: "Failed to create team" });
+  }
+});
+
+// Teams MVP: team detail — name/sport/school plus an active member count.
+// Read access follows canAccessTeam (member-or-any-coach), same as the
+// roster below — management actions (invite/revoke) are gated by the
+// narrower canManageTeam instead, in routes/invitations.js.
+router.get("/api/teams/:id", authenticate, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!(await canAccessTeam(req.user.id, id))) {
+      return res.status(403).json({ error: "Not authorized to view this team" });
+    }
+
+    const result = await client.query(
+      `
+      SELECT teams.*, schools.name AS school_name,
+        (SELECT COUNT(*) FROM team_members WHERE team_members.team_id = teams.id AND team_members.revoked_at IS NULL) AS member_count
+      FROM teams
+      LEFT JOIN schools ON schools.id = teams.school_id
+      WHERE teams.id = $1
+      `,
+      [id]
+    );
+
+    if (!result.rows.length) {
+      return res.status(404).json({ error: "Team not found" });
+    }
+
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error("GET /api/teams/:id error:", err);
+    res.status(500).json({ error: "Failed to fetch team" });
+  }
+});
+
+// Teams MVP: active roster only (revoked_at IS NULL) — a revoked member
+// disappears from here immediately, matching "Revoking access should...
+// immediately block future team film and team-page access."
+router.get("/api/teams/:id/members", authenticate, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!(await canAccessTeam(req.user.id, id))) {
+      return res.status(403).json({ error: "Not authorized to view this team's roster" });
+    }
+
+    const result = await client.query(
+      `
+      SELECT users.id, users.display_name, users.email, team_members.role_on_team, team_members.created_at AS joined_at
+      FROM team_members
+      JOIN users ON users.id = team_members.user_id
+      WHERE team_members.team_id = $1 AND team_members.revoked_at IS NULL
+      ORDER BY team_members.role_on_team, users.display_name
+      `,
+      [id]
+    );
+
+    res.json(result.rows);
+  } catch (err) {
+    console.error("GET /api/teams/:id/members error:", err);
+    res.status(500).json({ error: "Failed to fetch team roster" });
   }
 });
 
@@ -79,10 +159,11 @@ router.get("/api/users/:id/teams", authenticate, async (req, res) => {
 
     const result = await client.query(
       `
-      SELECT teams.*, team_members.role_on_team, team_members.is_primary
+      SELECT teams.*, team_members.role_on_team, team_members.is_primary,
+        (SELECT COUNT(*) FROM team_members tm2 WHERE tm2.team_id = teams.id AND tm2.revoked_at IS NULL) AS member_count
       FROM team_members
       JOIN teams ON teams.id = team_members.team_id
-      WHERE team_members.user_id = $1
+      WHERE team_members.user_id = $1 AND team_members.revoked_at IS NULL
       ORDER BY team_members.is_primary DESC, teams.name
       `,
       [id]

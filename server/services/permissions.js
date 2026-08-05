@@ -48,7 +48,9 @@ async function canDeleteVideo(userId, videoId) {
 }
 
 // Coach access is a superset everywhere in this app — a coach can access
-// any team without needing an explicit team_members row.
+// any team without needing an explicit team_members row. A revoked
+// membership (revoked_at IS NOT NULL) does not count as membership for a
+// non-coach — see Teams MVP's revoke-access feature.
 async function canAccessTeam(userId, teamId) {
   if (!userId || !teamId) return false;
 
@@ -56,7 +58,10 @@ async function canAccessTeam(userId, teamId) {
     `
     SELECT users.role, team_members.team_id AS membership_team_id
     FROM users
-    LEFT JOIN team_members ON team_members.user_id = users.id AND team_members.team_id = $2
+    LEFT JOIN team_members
+      ON team_members.user_id = users.id
+      AND team_members.team_id = $2
+      AND team_members.revoked_at IS NULL
     WHERE users.id = $1
     `,
     [userId, teamId]
@@ -67,6 +72,37 @@ async function canAccessTeam(userId, teamId) {
   const { role, membership_team_id } = result.rows[0];
 
   return role === "coach" || membership_team_id !== null;
+}
+
+// Teams MVP: gates team-MANAGEMENT actions (create invitation, revoke a
+// member) — deliberately narrower than canAccessTeam's blanket
+// any-coach-sees-every-team rule above, which stays unchanged for
+// viewing. "Coaches may manage only teams assigned to them" means an
+// active team_members row on THAT team with role_on_team = 'coach', not
+// just users.role === 'coach' in general. POST /api/teams auto-inserts
+// this row for the creator, so a coach can always manage a team they
+// just created.
+async function canManageTeam(userId, teamId) {
+  if (!userId || !teamId) return false;
+
+  const result = await client.query(
+    `
+    SELECT 1
+    FROM team_members
+    WHERE user_id = $1 AND team_id = $2 AND role_on_team = 'coach' AND revoked_at IS NULL
+    `,
+    [userId, teamId]
+  );
+
+  return result.rows.length > 0;
+}
+
+// Teams MVP: the roster/team-detail read path. Same access shape as
+// canAccessTeam (member-or-any-coach) — reused directly rather than
+// duplicated, since viewing the roster is a read, not a management
+// action (that's canManageTeam above).
+async function canViewTeamRoster(userId, teamId) {
+  return canAccessTeam(userId, teamId);
 }
 
 // Production bug fix: the uploader must always be able to see their own
@@ -111,6 +147,8 @@ module.exports = {
   canAccessConversation,
   canDeleteVideo,
   canAccessTeam,
+  canManageTeam,
+  canViewTeamRoster,
   canViewVideo,
   canManageTeamMembership,
 };

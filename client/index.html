@@ -24,6 +24,19 @@
     <main>
       <!-- LOGIN SCREEN -->
       <section id="login-screen">
+        <!-- Teams MVP: shown instead of (above) the plain login form when
+             a pending invitation is detected pre-login — see invitations.js. -->
+        <div id="invitation-preview" class="auth-card hidden">
+          <h2>You're Invited!</h2>
+          <p>
+            You've been invited to join <strong id="invitation-preview-team"></strong>
+            as <strong id="invitation-preview-role"></strong>.
+          </p>
+          <p id="invitation-preview-coach"></p>
+        </div>
+
+        <p id="invitation-preview-error" class="hidden"></p>
+
         <div class="auth-card">
           <h2>Login to Cresamor</h2>
 
@@ -40,6 +53,38 @@
             <button id="login-athlete-btn">Login as Athlete</button>
             <button id="login-parent-btn">Login as Parent</button>
           </div>
+
+          <!-- Teams MVP: replaces the 3-button role choice above when a
+               pending invitation already specifies the role. -->
+          <div id="invitation-login-buttons" class="hidden">
+            <button id="invitation-auth-btn" type="button"></button>
+          </div>
+
+          <button id="forgot-password-link" type="button" class="link-btn">Forgot password?</button>
+        </div>
+      </section>
+
+      <!-- FORGOT PASSWORD SCREEN -->
+      <section id="forgot-password-screen" class="hidden">
+        <div class="auth-card">
+          <h2>Reset your password</h2>
+          <p>Enter your email and we'll send you instructions to reset your password.</p>
+          <input type="email" id="forgot-password-email-input" placeholder="Email" />
+          <button id="forgot-password-submit-btn" type="button">Send reset instructions</button>
+          <p id="forgot-password-confirmation" class="hidden"></p>
+          <button id="forgot-password-back-btn" type="button" class="link-btn">Back to login</button>
+        </div>
+      </section>
+
+      <!-- RESET PASSWORD SCREEN -->
+      <section id="reset-password-screen" class="hidden">
+        <div class="auth-card">
+          <h2>Choose a new password</h2>
+          <p>Enter a new password for your Cresamor account.</p>
+          <input type="password" id="reset-password-input" placeholder="New password" />
+          <input type="password" id="reset-password-confirm-input" placeholder="Confirm new password" />
+          <button id="reset-password-submit-btn" type="button">Reset password</button>
+          <p id="reset-password-error" class="hidden"></p>
         </div>
       </section>
 
@@ -400,11 +445,87 @@
 
         <!-- TEAMS SCREEN -->
         <section id="teams-screen" class="app-screen">
-          <div class="placeholder-screen">
-            <h2>Teams</h2>
-            <p>Team management is coming soon.</p>
+          <div id="teams-list-view">
+            <div id="teams-header">
+              <h2>Teams</h2>
+              <button id="create-team-btn" type="button">+ Create Team</button>
+            </div>
+            <p id="teams-empty-state" class="empty-state hidden">
+              You're not on any teams yet. Coaches: create a team to get started.
+            </p>
+            <ul id="teams-list"></ul>
+          </div>
+
+          <div id="team-detail-view" class="hidden">
+            <button id="team-detail-back-btn" type="button" class="link-btn">← All Teams</button>
+            <h2 id="team-detail-name"></h2>
+            <p id="team-detail-meta"></p>
+
+            <div id="team-detail-actions" class="hidden">
+              <button id="invite-member-btn" type="button">Invite Member</button>
+            </div>
+
+            <h3>Roster</h3>
+            <ul id="team-roster-list"></ul>
           </div>
         </section>
+
+        <!-- CREATE TEAM MODAL -->
+        <div id="create-team-modal" class="hidden">
+          <div id="create-team-modal-inner">
+            <button id="create-team-close-btn" type="button" aria-label="Close">✕</button>
+            <h3>Create Team</h3>
+            <input type="text" id="create-team-name-input" placeholder="Team name" />
+            <input type="text" id="create-team-sport-input" placeholder="Sport (optional)" />
+            <div class="capture-step-actions">
+              <button id="create-team-submit-btn" type="button">Create Team</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- INVITE MEMBER MODAL -->
+        <div id="invite-modal" class="hidden">
+          <div id="invite-modal-inner">
+            <button id="invite-close-btn" type="button" aria-label="Close">✕</button>
+
+            <div id="invite-step-form" class="capture-step">
+              <h3>Invite Member</h3>
+              <p id="invite-team-name-label"></p>
+
+              <label for="invite-role-select">Role</label>
+              <select id="invite-role-select">
+                <option value="athlete">Athlete</option>
+                <option value="parent">Parent</option>
+                <option value="assistant_coach">Assistant Coach</option>
+              </select>
+
+              <label for="invite-destination-type-select">Invite by</label>
+              <select id="invite-destination-type-select">
+                <option value="email">Email</option>
+                <option value="phone">Text message</option>
+              </select>
+
+              <input type="text" id="invite-destination-input" placeholder="Email address" />
+
+              <p id="invite-form-error" class="hidden"></p>
+
+              <div class="capture-step-actions">
+                <button id="invite-send-btn" type="button">Send Invite</button>
+              </div>
+            </div>
+
+            <div id="invite-step-confirmation" class="capture-step hidden">
+              <h3>Invitation Ready</h3>
+              <p id="invite-confirmation-message"></p>
+              <input type="text" id="invite-link-input" readonly />
+              <div class="capture-step-actions">
+                <button id="invite-copy-link-btn" type="button">Copy Link</button>
+                <button id="invite-share-sms-btn" type="button" class="hidden">Share via Text</button>
+              </div>
+              <button id="invite-done-btn" type="button">Done</button>
+            </div>
+          </div>
+        </div>
 
         <!-- PROFILE SCREEN -->
         <section id="profile-screen" class="app-screen">
@@ -516,5 +637,7 @@
     <script src="./home.js"></script>
     <script src="./recordingPipeline.js"></script>
     <script src="./capture.js"></script>
+    <script src="./teams.js"></script>
+    <script src="./invitations.js"></script>
   </body>
 </html>
