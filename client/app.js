@@ -147,20 +147,18 @@ function hideVideoStatusMessage() {
   videoStatusMessage.classList.add("hidden");
 }
 
-// Beta Stabilization Sprint: status-driven rather than the old single
-// generic "conversion needed" message — processing_status now carries a
-// real, user-visible lifecycle (uploading -> queued -> converting ->
-// ready/failed, or deferred for a valid-but-oversized file), and coaches
-// should see which of those a video is actually in.
+// Play-First Pipeline: status-driven off the server-computed playback_state
+// field (uploading / preparing_playback / playable / processing_paused /
+// failed) rather than the raw processing_status — video size is never a
+// reason shown here that a video can't be watched; "too large" no longer
+// exists as a user-facing state anywhere in this app.
 function unavailableReason(video) {
   if (video.__local) return null; // local recordings are always instantly playable via their own blob
   if (video.available === false) return "This video file is no longer available.";
-  if (video.processing_status === "uploading") return "This video is still uploading.";
-  if (video.processing_status === "queued") return "This video is queued for conversion.";
-  if (video.processing_status === "converting") return "This video is being converted and can't be played yet.";
-  if (video.processing_status === "failed") return "Conversion failed for this video.";
-  if (video.processing_status === "deferred") return "This video is too large for automatic conversion.";
-  if (video.needs_conversion) return "This video's format requires conversion and can't be played yet.";
+  if (video.playback_state === "uploading") return "This video is still uploading.";
+  if (video.playback_state === "preparing_playback") return "Preparing this video for playback…";
+  if (video.playback_state === "processing_paused") return "This video needs additional processing — check back soon.";
+  if (video.playback_state === "failed") return "Processing failed for this video.";
   return null;
 }
 
@@ -299,10 +297,10 @@ async function deleteVideo(video) {
   }
 }
 
-// Beta Stabilization Sprint: the safe manual retry — lets a coach unstick
-// a 'failed' conversion or force one through despite the 'deferred' size
-// cap, without needing a developer. Re-fetches the video list afterward
-// so the badge/status updates to "Queued" immediately.
+// Play-First Pipeline: the safe manual retry — lets a coach re-trigger
+// classification for a 'failed' or 'processing_paused' video without
+// needing a developer. Re-fetches the video list afterward so the
+// badge/status updates immediately.
 async function retryVideoConversion(video) {
   const retryBtn = videoList.querySelector(`[data-retry-video-id="${video.id}"]`);
 
@@ -312,18 +310,18 @@ async function retryVideoConversion(video) {
   }
 
   try {
-    await apiFetch(`/api/videos/${video.id}/retry-conversion`, {
+    await apiFetch(`/api/videos/${video.id}/retry-classification`, {
       method: "POST",
     });
 
     await loadVideos();
   } catch (error) {
-    console.error("Retry conversion failed:", error);
-    showMessage("Could not retry conversion.");
+    console.error("Retry classification failed:", error);
+    showMessage("Could not retry processing this video.");
 
     if (retryBtn) {
       retryBtn.disabled = false;
-      retryBtn.textContent = "Retry Conversion";
+      retryBtn.textContent = "Retry";
     }
   }
 }
@@ -355,7 +353,6 @@ function toLocalVideoLike(record) {
     file_url: getLocalBlobUrl(record),
     uploaded_by: record.uploadedBy,
     available: true,
-    needs_conversion: false,
     __local: true,
     __recordingId: record.recordingId,
     __lifecycle: record.lifecycle,
@@ -433,15 +430,12 @@ function renderVideoList() {
       // video is actually selected (see selectVideo()).
       const shortLabels = {
         uploading: "uploading",
-        queued: "queued",
-        converting: "converting",
-        failed: "conversion failed",
-        deferred: "too large",
+        preparing_playback: "preparing",
+        processing_paused: "processing",
+        failed: "failed",
       };
       const shortLabel =
-        video.available === false
-          ? "unavailable"
-          : shortLabels[video.processing_status] || "conversion needed";
+        video.available === false ? "unavailable" : shortLabels[video.playback_state] || "preparing";
       button.textContent = `${video.title} (${shortLabel})`;
     } else {
       button.textContent = video.title;
@@ -461,26 +455,25 @@ function renderVideoList() {
       }
 
       button.appendChild(badge);
-    } else if (video.processing_status && video.processing_status !== "ready") {
-      // Beta Stabilization Sprint: same small-badge pattern as local
-      // recordings, applied to server-side videos still moving through
-      // the real conversion lifecycle.
+    } else if (video.playback_state && video.playback_state !== "playable") {
+      // Play-First Pipeline: same small-badge pattern as local recordings,
+      // applied to server-side videos still moving through classification/
+      // remux — keyed off playback_state, not the raw processing_status.
       const badge = document.createElement("span");
       badge.className = "video-item-badge";
 
       const statusLabels = {
         uploading: "Uploading",
-        queued: "Queued",
-        converting: "Converting",
+        preparing_playback: "Preparing",
+        processing_paused: "Processing",
         failed: "Failed",
-        deferred: "Too large",
       };
 
-      if (video.processing_status === "converting" || video.processing_status === "queued") {
+      if (video.playback_state === "preparing_playback") {
         badge.classList.add("badge-syncing");
       }
 
-      badge.textContent = statusLabels[video.processing_status] || video.processing_status;
+      badge.textContent = statusLabels[video.playback_state] || video.playback_state;
       button.appendChild(badge);
     }
 
@@ -491,13 +484,13 @@ function renderVideoList() {
     li.appendChild(button);
 
     if (canDeleteVideoClientSide(video)) {
-      // Beta Stabilization Sprint: lets a coach self-serve a stuck or
-      // oversized conversion without needing a developer.
-      if (video.processing_status === "failed" || video.processing_status === "deferred") {
+      // Play-First Pipeline: lets a coach self-serve a failed or paused
+      // video without needing a developer.
+      if (video.playback_state === "failed" || video.playback_state === "processing_paused") {
         const retryBtn = document.createElement("button");
         retryBtn.type = "button";
         retryBtn.className = "video-retry-btn";
-        retryBtn.textContent = "Retry Conversion";
+        retryBtn.textContent = "Retry";
         retryBtn.dataset.retryVideoId = video.id;
 
         retryBtn.addEventListener("click", (event) => {
@@ -1200,7 +1193,7 @@ playBtn.addEventListener("click", async () => {
   }
 });
 
-// Playback-fix pass: a safety net for cases the "available"/"needs_conversion"
+// Playback-fix pass: a safety net for cases the "available"/"playback_state"
 // flags from GET /api/videos don't catch (e.g. a file removed between the
 // list load and actual playback). Without this the player just logs
 // NotSupportedError silently on every failed play() attempt.

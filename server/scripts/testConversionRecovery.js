@@ -262,6 +262,29 @@ async function main() {
     );
     createdVideoIds.push(freshQueuedInsert.rows[0].id);
 
+    // Case 11/12: Play-First Pipeline — rows stuck in 'classifying' or
+    // 'remuxing' (this process's in-memory classifyQueue is empty on a
+    // fresh boot, so exactly like a stranded 'converting' row, nothing
+    // legitimate is ever in either state at this instant) must be
+    // recovered — re-run through classifyAndRouteOne(), not left stuck.
+    // No size check for this path at all (that's the entire point of the
+    // migration away from the size-capped recovery above) — garbage bytes
+    // are enough to prove "no longer stuck," same spirit as the
+    // no-real-ffmpeg-binary cases above.
+    const stuckClassifyingInsert = await client.query(
+      `INSERT INTO videos (title, storage_key, uploaded_by, processing_status, source_size_bytes)
+       VALUES ($1, $2, $3, 'classifying', $4) RETURNING id`,
+      [`${RUN_TAG}-stuck-classifying`, `convrecovery-test/${RUN_TAG}-stuck-classifying.mov`, testUserId, 1024]
+    );
+    createdVideoIds.push(stuckClassifyingInsert.rows[0].id);
+
+    const stuckRemuxingInsert = await client.query(
+      `INSERT INTO videos (title, storage_key, uploaded_by, processing_status, source_size_bytes)
+       VALUES ($1, $2, $3, 'remuxing', $4) RETURNING id`,
+      [`${RUN_TAG}-stuck-remuxing`, `convrecovery-test/${RUN_TAG}-stuck-remuxing.mov`, testUserId, 1024]
+    );
+    createdVideoIds.push(stuckRemuxingInsert.rows[0].id);
+
     // Deliberately the unguarded inner implementation, not the guarded
     // recoverStrandedConversions() export — see the file header. Case 0
     // above already confirmed the guard itself works; these cases are
@@ -270,9 +293,10 @@ async function main() {
     // header on why this is the real safety mechanism for this call.
     await performStrandedConversionRecovery(createdVideoIds);
 
-    // Give the single-flight queue a moment to finish the fast,
-    // locally-failing (no ffmpeg binary) conversion attempts.
-    await new Promise((resolve) => setTimeout(resolve, 1500));
+    // Give the single-flight queues a moment to finish the fast,
+    // locally-failing (no real video content, and possibly no ffmpeg
+    // binary) conversion/classification attempts.
+    await new Promise((resolve) => setTimeout(resolve, 2500));
 
     const finalStates = await client.query(
       `SELECT id, processing_status, processing_error FROM videos WHERE id = ANY($1::int[])`,
@@ -334,6 +358,20 @@ async function main() {
       "'queued' within grace period -> left completely untouched (no race with fresh uploads)",
       freshQueued.processing_status === "queued" && freshQueued.processing_error === null,
       `status=${freshQueued.processing_status}`
+    );
+
+    const stuckClassifying = byId[stuckClassifyingInsert.rows[0].id];
+    assert(
+      "stuck 'classifying' row -> recovered (no longer stuck)",
+      stuckClassifying.processing_status !== "classifying",
+      `status=${stuckClassifying.processing_status}`
+    );
+
+    const stuckRemuxing = byId[stuckRemuxingInsert.rows[0].id];
+    assert(
+      "stuck 'remuxing' row -> recovered (no longer stuck)",
+      stuckRemuxing.processing_status !== "remuxing",
+      `status=${stuckRemuxing.processing_status}`
     );
   } finally {
     if (createdVideoIds.length) {

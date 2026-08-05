@@ -78,34 +78,14 @@ function samplePeakRssMb(pid) {
   }
 }
 
-// Explicit -map (added after the OOM incident, alongside -threads):
-// without it, ffmpeg's automatic stream selection is a heuristic, not a
-// contract — it happened to drop this project's first real-world
-// Cinematic-mode metadata streams correctly, but "happened to" is not a
-// guarantee for whatever the next phone/camera puts in a container.
-// Pinning to the first video and first (optional — the trailing "?"
-// means "don't error if there's no audio track") audio stream makes the
-// encode input deterministic across devices instead of trusting a
-// heuristic that could change behavior on a future file.
-//
-// Resolves with { peakRssMb } (null if unmeasurable) so callers can log
-// it — see convertVideo()'s conversion_attempt log line.
-function runFfmpeg(inputPath, outputPath) {
+// Low-level bounded-ffmpeg-process runner, extracted so videoRemux.js can
+// reuse the exact same timeout/SIGKILL/RSS-sampling/stderr-tail safety net
+// for its much simpler stream-copy args, instead of duplicating this
+// machinery for a second, less-tested code path. Takes the full argv
+// (everything after "ffmpeg"), resolves { peakRssMb } on a zero exit code.
+function runFfmpegProcess(args) {
   return new Promise((resolve, reject) => {
-    const ffmpeg = spawn("ffmpeg", [
-      "-i", inputPath,
-      "-map", "0:v:0",
-      "-map", "0:a:0?",
-      "-threads", String(FFMPEG_THREADS),
-      "-c:v", "libx264",
-      "-preset", "veryfast",
-      "-x264-params", `threads=${FFMPEG_THREADS}:lookahead_threads=${FFMPEG_THREADS}`,
-      "-c:a", "aac",
-      "-pix_fmt", "yuv420p",
-      "-movflags", "+faststart",
-      "-y",
-      outputPath,
-    ]);
+    const ffmpeg = spawn("ffmpeg", args);
 
     let stderrTail = "";
     let peakRssMb = null;
@@ -159,6 +139,37 @@ function runFfmpeg(inputPath, outputPath) {
       }
     });
   });
+}
+
+// Full transcode args — thin wrapper over runFfmpegProcess() preserving
+// this function's original signature/behavior for convertVideo() below.
+//
+// Explicit -map (added after the OOM incident, alongside -threads):
+// without it, ffmpeg's automatic stream selection is a heuristic, not a
+// contract — it happened to drop this project's first real-world
+// Cinematic-mode metadata streams correctly, but "happened to" is not a
+// guarantee for whatever the next phone/camera puts in a container.
+// Pinning to the first video and first (optional — the trailing "?"
+// means "don't error if there's no audio track") audio stream makes the
+// encode input deterministic across devices instead of trusting a
+// heuristic that could change behavior on a future file. Resolves with
+// { peakRssMb } (null if unmeasurable) so callers can log it — see
+// convertVideo()'s conversion_attempt log line.
+function runFfmpeg(inputPath, outputPath) {
+  return runFfmpegProcess([
+    "-i", inputPath,
+    "-map", "0:v:0",
+    "-map", "0:a:0?",
+    "-threads", String(FFMPEG_THREADS),
+    "-c:v", "libx264",
+    "-preset", "veryfast",
+    "-x264-params", `threads=${FFMPEG_THREADS}:lookahead_threads=${FFMPEG_THREADS}`,
+    "-c:a", "aac",
+    "-pix_fmt", "yuv420p",
+    "-movflags", "+faststart",
+    "-y",
+    outputPath,
+  ]);
 }
 
 function runFfprobe(inputPath) {
@@ -333,4 +344,16 @@ async function convertVideo(video) {
   }
 }
 
-module.exports = { convertVideo };
+module.exports = {
+  convertVideo,
+  // Exported for videoRemux.js — the same bounded spawn/timeout/SIGKILL/
+  // RSS-sampling safety net, reused with a much simpler stream-copy argv
+  // instead of duplicating that machinery for a second code path.
+  runFfmpegProcess,
+  // Exported for videoClassification.js — same ffprobe-invocation logic,
+  // no reason to duplicate it. runFfprobe's positional arg is passed
+  // straight to ffprobe's CLI, which accepts an http(s) URL exactly like a
+  // local path (protocol auto-detected), so classification can probe a
+  // signed R2 URL directly without downloading.
+  runFfprobe,
+};

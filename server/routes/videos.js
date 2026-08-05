@@ -6,10 +6,9 @@ const multer = require("multer");
 
 const client = require("../db/client");
 const {
-  enqueueVideoProcessingAsync,
-  needsFormatConversion,
+  classifyAndRouteAsync,
+  retryClassification,
   retryConversion,
-  MAX_AUTO_CONVERSION_SIZE_BYTES,
 } = require("../services/videoProcessing");
 const { canDeleteVideo, canViewVideo } = require("../services/permissions");
 const storage = require("../services/storage/storage");
@@ -53,6 +52,30 @@ function isFileAvailable(fileUrl) {
   return fs.existsSync(localPath);
 }
 
+// Play-First Pipeline: the single source of truth the client renders,
+// replacing the old needs_conversion computed field. Maps the internal
+// processing_status (which still includes legacy values like 'deferred'
+// for historical rows not yet reclassified, and 'queued'/'converting' for
+// the dormant full-transcode path) onto the small, honest vocabulary the
+// UI actually shows — critically, there is no "too large" / unplayable
+// terminal mapping anywhere in this table anymore.
+const PLAYBACK_STATE_BY_PROCESSING_STATUS = {
+  uploading: "uploading",
+  classifying: "preparing_playback",
+  remuxing: "preparing_playback",
+  queued: "preparing_playback",
+  converting: "preparing_playback",
+  processing: "preparing_playback", // legacy/unused value, tolerated by the DB CHECK constraint
+  ready: "playable",
+  transcode_paused: "processing_paused",
+  deferred: "processing_paused", // legacy — pre-migration rows not yet reclassified
+  failed: "failed",
+};
+
+function playbackStateFor(video) {
+  return PLAYBACK_STATE_BY_PROCESSING_STATUS[video.processing_status] || "preparing_playback";
+}
+
 // storage_key IS NOT NULL means this row goes through the storage
 // abstraction (local disk or R2, whichever is active) — a signed/direct
 // URL and a real existence check. NULL means a legacy row: unchanged
@@ -64,14 +87,14 @@ async function withPlaybackStatus(video) {
       ...video,
       file_url: await storage.getSignedUrl(video.storage_key),
       available: await storage.exists(video.storage_key),
-      needs_conversion: needsFormatConversion(video),
+      playback_state: playbackStateFor(video),
     };
   }
 
   return {
     ...video,
     available: isFileAvailable(video.file_url),
-    needs_conversion: needsFormatConversion(video),
+    playback_state: playbackStateFor(video),
   };
 }
 
@@ -259,27 +282,15 @@ router.post("/api/upload-video", authenticate, uploadLimiter, upload.single("vid
 
     // Foundation Sprint Phase 3: this route now only receives the upload —
     // it responds immediately instead of blocking on processing. The
-    // client (capture.js) polls GET /api/videos/:id to observe
-    // uploading -> queued -> converting -> ready. Deliberately NOT
-    // awaited: conversion can take real time, and this request/response
-    // contract already doesn't assume it's fast.
+    // client polls/reloads to observe uploading -> classifying ->
+    // (remuxing ->) ready. Deliberately NOT awaited: classification/remux
+    // can take real time, and this request/response contract already
+    // doesn't assume it's fast.
     //
-    // Beta Stabilization Sprint: the size cap on automatic conversion is
-    // decided right here, once, using req.file.size — multer already has
-    // it, so this needs no extra I/O. 'deferred' is a distinct non-error
-    // state (not 'failed') for a valid file that's simply too large for
-    // the automatic queue on this beta instance; it skips the queue
-    // entirely rather than risking tying it up for a very long time. A
-    // manual retry (POST /api/videos/:id/retry-conversion) always
-    // attempts conversion regardless of size.
-    if (needsFormatConversion(inserted.rows[0]) && req.file.size > MAX_AUTO_CONVERSION_SIZE_BYTES) {
-      await client.query(`UPDATE videos SET processing_status = 'deferred' WHERE id = $1`, [
-        inserted.rows[0].id,
-      ]);
-      inserted.rows[0].processing_status = "deferred";
-    } else {
-      enqueueVideoProcessingAsync(inserted.rows[0]);
-    }
+    // Play-First Pipeline: every upload goes through classification now —
+    // size plays no part in this decision. See classifyAndRoute() in
+    // videoProcessing.js for the playable/remux/transcode_needed routing.
+    classifyAndRouteAsync(inserted.rows[0]);
 
     res.status(201).json(inserted.rows[0]);
   } catch (err) {
@@ -397,6 +408,45 @@ router.post("/api/videos/:id/retry-conversion", authenticate, async (req, res) =
   } catch (err) {
     console.error("POST /api/videos/:id/retry-conversion error:", err);
     res.status(500).json({ error: "Failed to retry conversion" });
+  }
+});
+
+// Play-First Pipeline's manual retry — what a coach hits for a video
+// that's 'failed' (a genuine classify/remux error), 'transcode_paused'
+// (genuinely incompatible codecs — retrying costs nothing and covers "a
+// transcode worker now exists" without a separate code path), a legacy
+// 'deferred' row not yet reclassified, or one that looks stuck mid
+// 'classifying'/'remuxing'. No size check anywhere in this path — that's
+// the entire point of the migration away from retry-conversion above.
+router.post("/api/videos/:id/retry-classification", authenticate, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const videoResult = await client.query("SELECT * FROM videos WHERE id = $1", [id]);
+    const video = videoResult.rows[0];
+
+    if (!video) {
+      return res.status(404).json({ error: "Video not found" });
+    }
+
+    if (!(await canDeleteVideo(req.user.id, id))) {
+      return res.status(403).json({ error: "Not authorized to retry this video" });
+    }
+
+    if (!["classifying", "remuxing", "failed", "transcode_paused", "deferred"].includes(video.processing_status)) {
+      return res.status(400).json({ error: `Video is not in a retriable state (currently '${video.processing_status}')` });
+    }
+
+    const outcome = await retryClassification(video.id);
+
+    res.json({
+      success: outcome.outcome === "classifying",
+      id: Number(id),
+      processing_status: outcome.processing_status || video.processing_status,
+    });
+  } catch (err) {
+    console.error("POST /api/videos/:id/retry-classification error:", err);
+    res.status(500).json({ error: "Failed to retry classification" });
   }
 });
 

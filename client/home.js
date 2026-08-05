@@ -369,7 +369,7 @@ async function loadReelData(videos, clips) {
   const withVideo = clips
     .filter((clip) => {
       const video = videoById.get(clip.video_id);
-      return video && video.available !== false && !video.needs_conversion;
+      return video && video.available !== false && video.playback_state === "playable";
     })
     .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
 

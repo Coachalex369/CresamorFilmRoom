@@ -1,30 +1,44 @@
 /*
   videoProcessing.js — video processing pipeline.
 
-  Beta Stabilization Sprint: real MOV-to-MP4 conversion replaces the
-  Foundation Sprint Phase 3 placeholder that used to flip
-  processing_status to 'processing' and just... stop there forever (see
-  git history for the old fake 1.5s-delay version). The lifecycle is now
-  real and user-visible:
+  Play-First Video Pipeline: replaces the size-based auto-conversion gate
+  with codec-based classification. Every upload now goes through
+  classifyAndRoute() instead of the old needsFormatConversion()-only
+  branch:
 
-    uploading -> [queued -> converting -> ready] (needs conversion)
-    uploading -> ready                            (doesn't need conversion)
-    ... -> failed        (a genuine conversion error)
-    uploading -> deferred (needs conversion but exceeds the beta
-                            automatic-eligibility size cap — NOT an error,
-                            see MAX_AUTO_CONVERSION_SIZE_BYTES; decided by
-                            the upload route itself, before this module
-                            is ever involved, since only the route knows
-                            the uploaded file's size)
+    uploading -> classifying -> ready              (already browser-playable)
+    uploading -> classifying -> remuxing -> ready   (codecs fine, container isn't —
+                                                      cheap stream-copy, safe on the web dyno)
+    uploading -> classifying -> transcode_paused    (genuinely incompatible codecs —
+                                                      no worker yet this phase; original
+                                                      is preserved, never a dead end)
+    ... -> failed                                    (a genuine classify/remux error)
 
-  Conversion mechanics (ffmpeg spawn, download/upload, temp file
-  lifecycle) live in videoConversion.js — this file owns orchestration
-  only: the single-flight in-process queue, DB status transitions, and
-  the manual-retry / boot-time-requeue entry points.
+  Size no longer participates in this routing decision at all — the old
+  MAX_AUTO_CONVERSION_SIZE_BYTES gate and 'deferred' terminal state are
+  gone from every path that runs on new uploads (see git history / the
+  Play-First Pipeline plan for the full rationale, and the ffprobe-verified
+  proof against the real 654MB video 274).
+
+  The OLD full-transcode path (videoConversion.js's convertVideo(),
+  conversionQueue/conversionBusy, convertOne(), retryConversion(),
+  repairVideo(), and the 'converting'/'queued'/'deferred' recovery
+  logic below) is deliberately left fully intact and untouched — it's
+  dormant (nothing in the new pipeline calls it), but it's exactly the
+  machinery a future full-transcode worker would reuse, and
+  testConversionRecovery.js still exercises it directly.
+
+  Classification/remux mechanics (ffprobe, ffmpeg stream-copy, temp file
+  lifecycle) live in videoClassification.js/videoRemux.js — this file owns
+  orchestration only: the single-flight in-process queue, DB status
+  transitions, and the manual-retry / boot-time-requeue entry points —
+  same split as the legacy conversion path it sits alongside.
 */
 
 const client = require("../db/client");
 const videoConversion = require("./videoConversion");
+const { classifyVideo } = require("./videoClassification");
+const { remuxVideo } = require("./videoRemux");
 const storage = require("./storage/storage");
 
 // Beta limit, not a hard technical ceiling — a very large source file on
@@ -114,40 +128,124 @@ async function convertOne(videoId) {
   }
 }
 
-// Entry point from the upload route. Videos that exceed
-// MAX_AUTO_CONVERSION_SIZE_BYTES never reach this function at all — the
-// route decides 'deferred' itself, since only it knows the uploaded
-// file's size (multer's req.file.size) without an extra round-trip.
-async function enqueueVideoProcessing(video) {
-  if (!needsFormatConversion(video)) {
-    const result = await client.query(
-      `UPDATE videos SET processing_status = 'ready' WHERE id = $1 RETURNING *`,
-      [video.id]
-    );
-    return result.rows[0];
-  }
+// ---------- Play-First Pipeline: classify + remux orchestration ----------
+//
+// Separate single-flight queue from the legacy conversionQueue above —
+// deliberately not shared, since conversionQueue/convertOne's DB updates
+// are specific to the full-transcode lifecycle and that path stays
+// untouched. Same synchronous-set-before-await race-avoidance pattern.
+let classifyBusy = false;
+const classifyQueue = [];
 
-  const result = await client.query(
-    `UPDATE videos SET processing_status = 'queued' WHERE id = $1 RETURNING *`,
-    [video.id]
-  );
-
-  enqueueConversion(video.id);
-
-  return result.rows[0];
+function enqueueClassification(videoId) {
+  classifyQueue.push(videoId);
+  processClassifyQueue();
 }
 
-// Fire-and-forget wrapper for the upload route: the HTTP response must not
-// wait on this, and a failure here must not become an unhandled promise
-// rejection. Only covers failures in the initial status transition itself
-// (e.g. a DB error) — the actual conversion's own failures are caught and
-// recorded independently inside convertOne, since that runs later,
-// decoupled from this call.
-async function enqueueVideoProcessingAsync(video) {
+async function processClassifyQueue() {
+  if (classifyBusy) return;
+  classifyBusy = true;
+
   try {
-    await enqueueVideoProcessing(video);
+    while (classifyQueue.length) {
+      const videoId = classifyQueue.shift();
+      await classifyAndRouteOne(videoId);
+    }
+  } finally {
+    classifyBusy = false;
+  }
+}
+
+// The actual classify -> (nothing | remux) -> ready/transcode_paused/failed
+// pipeline for one video. Re-entrant-safe to call again on an already-
+// classified row (stranded recovery and retryClassification() both do) —
+// it always re-probes from scratch rather than trusting a stale
+// classification column.
+async function classifyAndRouteOne(videoId) {
+  try {
+    const result = await client.query("SELECT * FROM videos WHERE id = $1", [videoId]);
+    const video = result.rows[0];
+
+    if (!video || !video.storage_key) return;
+
+    await client.query("UPDATE videos SET processing_status = 'classifying' WHERE id = $1", [videoId]);
+
+    const { classification, video_codec, audio_codec, container } = await classifyVideo(video);
+
+    await client.query(
+      `UPDATE videos SET video_codec = $1, audio_codec = $2, container = $3, classification = $4 WHERE id = $5`,
+      [video_codec, audio_codec, container, classification, videoId]
+    );
+
+    if (classification === "playable") {
+      await client.query(
+        `UPDATE videos SET processing_status = 'ready', processing_error = NULL WHERE id = $1`,
+        [videoId]
+      );
+      return;
+    }
+
+    if (classification === "transcode_needed") {
+      // Honest, non-terminal — the non-negotiable rule this whole pipeline
+      // exists for: never claim a video is unplayable. Original is fully
+      // preserved; retryClassification() re-evaluates it later (e.g. once
+      // a future transcode worker exists).
+      await client.query(
+        `UPDATE videos SET processing_status = 'transcode_paused', processing_error = NULL WHERE id = $1`,
+        [videoId]
+      );
+      return;
+    }
+
+    // classification === 'remux'
+    await client.query("UPDATE videos SET processing_status = 'remuxing' WHERE id = $1", [videoId]);
+
+    const { newKey } = await remuxVideo(video);
+
+    await client.query(
+      `
+      UPDATE videos
+      SET storage_key = $1, source_storage_key = $2, processing_status = 'ready', processing_error = NULL
+      WHERE id = $3
+      `,
+      [newKey, video.storage_key, videoId]
+    );
   } catch (error) {
-    console.error("Video processing failed:", error);
+    console.error("Video classification/remux failed:", videoId, error);
+
+    const message = String(error?.message || error).slice(0, 500);
+    try {
+      await client.query(
+        `UPDATE videos SET processing_status = 'failed', processing_error = $1 WHERE id = $2`,
+        [message, videoId]
+      );
+    } catch (updateError) {
+      console.error("Failed to mark video classification as failed:", videoId, updateError);
+    }
+  }
+}
+
+// Entry point from the upload route — replaces the old
+// enqueueVideoProcessing()'s needsFormatConversion()-only branch. Every
+// upload goes through classification now; size plays no part in this
+// decision. Status transition to 'classifying' happens inside
+// classifyAndRouteOne() itself (queued, not awaited here) rather than
+// synchronously in this function, since the queue needs to own that
+// transition to stay consistent with stranded-recovery re-running the
+// same function on an already-'classifying' row.
+async function classifyAndRoute(video) {
+  enqueueClassification(video.id);
+}
+
+// Fire-and-forget wrapper for the upload route, mirroring the legacy
+// enqueueVideoProcessingAsync()'s contract: the HTTP response must not
+// wait on this, and a failure here must not become an unhandled promise
+// rejection.
+async function classifyAndRouteAsync(video) {
+  try {
+    await classifyAndRoute(video);
+  } catch (error) {
+    console.error("Video classify-and-route failed to enqueue:", error);
 
     try {
       await client.query(
@@ -222,6 +320,29 @@ async function retryConversion(videoId) {
   );
   enqueueConversion(videoId);
   return { outcome: "queued", processing_status: "queued" };
+}
+
+// The Play-First Pipeline's retry entry point — covers 'failed' (genuine
+// classify/remux error, retry might just work) and 'transcode_paused'
+// (genuinely incompatible codecs; retrying doesn't invent a worker, but
+// re-running classification costs nothing and covers "was misclassified"
+// and "a worker now exists" uniformly, without a separate code path for
+// each). No size check anywhere in this pipeline — that's the entire
+// point of the migration away from retryConversion() above.
+async function retryClassification(videoId) {
+  const result = await client.query("SELECT * FROM videos WHERE id = $1", [videoId]);
+  const video = result.rows[0];
+
+  if (!video) {
+    return { outcome: "not_found" };
+  }
+
+  if (!video.storage_key) {
+    return { outcome: "no_storage_key" };
+  }
+
+  enqueueClassification(videoId);
+  return { outcome: "classifying", processing_status: "classifying" };
 }
 
 // Admin-only repair path for a row whose processing_status/
@@ -506,11 +627,55 @@ async function performStrandedConversionRecovery(candidateIds = null) {
       `found ${queuedSummary.found}, resumed ${queuedSummary.resumed}, ` +
       `deferred ${queuedSummary.deferred} (oversized), failed ${queuedSummary.failed} (size unverifiable).`
   );
+
+  const classifyRecoverySummary = await performClassifyRemuxRecovery(candidateIds);
+  console.log(
+    `Startup classification recovery — 'classifying'/'remuxing': found ${classifyRecoverySummary.found}, ` +
+      `re-queued ${classifyRecoverySummary.requeued}.`
+  );
+}
+
+// Play-First Pipeline equivalent of recoverRowBatch() above — 'classifying'
+// and 'remuxing' are both states that only exist while THIS process's
+// in-memory classifyQueue is actively working an item, so exactly like
+// 'converting' (and unlike 'queued'), nothing legitimate is ever in either
+// state at the instant a fresh process boots — no grace period needed.
+// No size check: the whole point of this pipeline is that size doesn't
+// gate anything, so recovery just re-runs classifyAndRouteOne() from
+// scratch, same as retryClassification() does for a coach-triggered retry.
+async function performClassifyRemuxRecovery(candidateIds = null) {
+  let rows = [];
+  try {
+    const result = await client.query(
+      `SELECT id FROM videos
+       WHERE processing_status IN ('classifying', 'remuxing')
+         AND ($1::int[] IS NULL OR id = ANY($1::int[]))`,
+      [candidateIds]
+    );
+    rows = result.rows;
+  } catch (error) {
+    console.error("Startup classification recovery: failed to query stranded rows:", error);
+  }
+
+  for (const row of rows) {
+    enqueueClassification(row.id);
+  }
+
+  return { found: rows.length, requeued: rows.length };
 }
 
 module.exports = {
-  enqueueVideoProcessing,
-  enqueueVideoProcessingAsync,
+  // Play-First Pipeline — the active path for every new upload.
+  classifyAndRoute,
+  classifyAndRouteAsync,
+  retryClassification,
+  // Exported directly (not just via the fire-and-forget queue) for
+  // server/scripts/reclassifyDeferredVideos.js, which needs to await each
+  // row's outcome synchronously to report results as it processes a batch.
+  classifyAndRouteOne,
+  // Legacy full-transcode path — dormant (nothing in the new pipeline
+  // calls these), kept intact for testConversionRecovery.js and as the
+  // machinery a future transcode worker would reuse.
   needsFormatConversion,
   retryConversion,
   recoverStrandedConversions,
