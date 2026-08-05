@@ -407,7 +407,21 @@ function renderVideoList() {
     })
     .map(toLocalVideoLike);
 
-  const mergedVideos = [...localEntries, ...allVideos];
+  // A recording that's synced to the server but not yet promoted to
+  // 'processed' (still preparing playback — see reconcileSyncedRecordings())
+  // already has a local card above; showing its server-side row too would
+  // duplicate it under the same title while it's mid-classify/remux.
+  // Suppressed at render time, not in the reconciliation logic itself,
+  // since that function's job is deciding WHEN to promote, not what to
+  // render meanwhile.
+  const pendingServerIds = new Set(
+    localRecordings
+      .filter((record) => record.lifecycle !== "processed" && record.serverVideoId)
+      .map((record) => Number(record.serverVideoId))
+  );
+  const serverEntries = allVideos.filter((video) => !pendingServerIds.has(Number(video.id)));
+
+  const mergedVideos = [...localEntries, ...serverEntries];
 
   mergedVideos.forEach((video) => {
     const li = document.createElement("li");
@@ -620,13 +634,11 @@ async function loadVideos() {
 // server-side to replace it. This runs every time the server video list
 // is refetched and only promotes a 'synced' recording to 'processed' —
 // the point at which its local copy stops rendering — once the matching
-// server row is ACTUALLY present in that list. A recording that still
-// needs conversion additionally waits for processing_status === 'ready':
-// the local Blob is genuinely playable right now and stays the
-// authoritative copy until the converted version actually is too,
-// matching this project's existing "local Film until real transcoding
-// completes" philosophy — now that real transcoding exists, "completes"
-// means processing_status flips to ready, not merely that the row exists.
+// server row is ACTUALLY present AND playable (playback_state ===
+// 'playable'). The local Blob is genuinely playable right now and stays
+// the authoritative copy until the server copy actually is too, matching
+// this project's existing "local Film until real processing completes"
+// philosophy.
 async function reconcileSyncedRecordings() {
   // Reads IndexedDB fresh rather than trusting the module-level
   // localRecordings snapshot — this runs from loadVideos(), which can be
@@ -653,7 +665,14 @@ async function reconcileSyncedRecordings() {
     );
 
     if (!serverVideo) continue;
-    if (record.needsConversion && serverVideo.processing_status !== "ready") continue;
+    // The local Blob is genuinely playable right now and stays the
+    // authoritative copy until the server copy actually is too — matching
+    // this project's "local Film until real processing completes"
+    // philosophy. playback_state is the single source of truth for that
+    // (record.needsConversion is never populated by the upload response
+    // and was always a dead signal here — this used to promote as soon as
+    // ANY matching server row existed, even one still classifying/remuxing).
+    if (serverVideo.playback_state !== "playable") continue;
 
     await recordingLibrary.markProcessed(record.recordingId);
   }
@@ -692,6 +711,7 @@ function activateApp(user) {
   setCoachVisibility(user.role);
   loadVideos();
   loadMyClips();
+  refreshVideoPollingState();
 
   setTimeout(() => {
     resizeDrawCanvas();
@@ -701,6 +721,7 @@ function activateApp(user) {
 function logoutLocalState() {
   currentUser = null;
   authToken = null;
+  stopVideoPolling();
 
   localStorage.removeItem("token");
   localStorage.removeItem("user");
@@ -1344,6 +1365,103 @@ tabButtons.forEach((button) => {
       resizeDrawCanvas();
     }, 50);
   });
+});
+
+/* ---------- FILM ROOM POLLING ---------- */
+
+// Cross-device visibility fix: without this, a laptop tab already open
+// before a phone recording syncs (or before a video's classify/remux
+// finishes) never learns about it — the list and player just sit on
+// stale data until the user manually reloads. That staleness is also
+// what makes a video LOOK broken: an already-fetched signed URL can end
+// up pointing at the pre-remux original object, whose container the
+// browser can't decode, surfacing as the same generic "no longer
+// available" message a truly missing file would show. Mirrors
+// messages.js's established polling pattern (same gating: screen active +
+// tab visible + logged in) rather than inventing a new one.
+const VIDEO_POLL_INTERVAL_MS = 8000;
+let filmScreenActive = false;
+let videoPollTimer = null;
+let videoPollBusy = false;
+
+async function pollVideosQuietly() {
+  if (videoPollBusy || !currentUser) return;
+  videoPollBusy = true;
+
+  try {
+    const videos = await apiFetch("/api/videos");
+    allVideos = Array.isArray(videos) ? videos : [];
+    // List/badge markup only — renderVideoList() never touches filmPlayer,
+    // so this is always safe even while a video is actively playing.
+    renderVideoList();
+
+    const current = allVideos.find((video) => Number(video.id) === Number(currentVideoId));
+    if (current && playBtn.disabled) {
+      // The selected video wasn't playable before this poll — nothing
+      // could have been interrupted, so it's safe to wire up the player
+      // now that fresher data may have unlocked it (e.g. remux finished).
+      selectVideo(current);
+    } else if (!currentVideoId && allVideos[0]) {
+      selectVideo(allVideos[0]);
+    }
+
+    await reconcileSyncedRecordings();
+  } catch (error) {
+    if (error?.status === 401) {
+      stopVideoPolling();
+      return;
+    }
+    console.error("Video poll failed:", error);
+  } finally {
+    videoPollBusy = false;
+  }
+}
+
+function startVideoPolling() {
+  if (!videoPollTimer) {
+    videoPollTimer = setInterval(pollVideosQuietly, VIDEO_POLL_INTERVAL_MS);
+  }
+}
+
+function stopVideoPolling() {
+  if (videoPollTimer) {
+    clearInterval(videoPollTimer);
+    videoPollTimer = null;
+  }
+}
+
+// Polling only actually runs when the Film screen is the selected tab AND
+// the tab/window is visible AND someone's logged in — any other
+// combination stops the timer. Called from the tab-click listener,
+// visibilitychange, window focus, and login/logout.
+function refreshVideoPollingState({ immediate = false } = {}) {
+  const shouldPoll = filmScreenActive && document.visibilityState === "visible" && Boolean(currentUser);
+
+  if (shouldPoll) {
+    startVideoPolling();
+    if (immediate) pollVideosQuietly();
+  } else {
+    stopVideoPolling();
+  }
+}
+
+// Independent listener on the same tab buttons the tab-navigation section
+// below already wires — doesn't touch that click handler, just observes
+// the same clicks (multiple listeners on one element is fine, same
+// precedent as messages.js).
+document.querySelectorAll(".tab-btn").forEach((button) => {
+  button.addEventListener("click", () => {
+    filmScreenActive = button.dataset.screen === "film-screen";
+    refreshVideoPollingState({ immediate: true });
+  });
+});
+
+document.addEventListener("visibilitychange", () => {
+  refreshVideoPollingState({ immediate: document.visibilityState === "visible" });
+});
+
+window.addEventListener("focus", () => {
+  refreshVideoPollingState({ immediate: true });
 });
 
 /* ---------- RESIZE SAFETY ---------- */
