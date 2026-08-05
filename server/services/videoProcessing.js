@@ -224,6 +224,88 @@ async function retryConversion(videoId) {
   return { outcome: "queued", processing_status: "queued" };
 }
 
+// Admin-only repair path for a row whose processing_status/
+// processing_error got corrupted by something OTHER than a genuine
+// conversion failure — this is what video 78 needed after local test code
+// (since fixed) swept it up and wrote a local-filesystem error into it.
+// Deliberately NOT built on retryConversion(): that function is the
+// coach-facing manual retry for a GENUINELY failed/deferred conversion,
+// with that audience's assumptions baked in (no server-side confirmation
+// step, callable by any uploader-or-coach over HTTP). This one is for an
+// operator who has already looked at the row and the real object and
+// confirmed the error text is stale, not a real conversion problem.
+// Never exposed via any HTTP route — invoked only by hand through
+// server/scripts/repairVideo.js, same convention as backfillR2.js.
+//
+// Gated on isRecoveryEnvironmentSafe() for the WHOLE function, not just
+// the enqueue decision at the end — caught while testing this locally:
+// storage.exists() is provider-aware, so run locally (STORAGE_PROVIDER
+// unset, local disk active) it checks THIS MACHINE's filesystem, not R2.
+// A real production video's object obviously never exists on a laptop —
+// which would make the "verify the object is really there" check below
+// always fail locally, throwing "the underlying object is genuinely
+// gone" for a video whose R2 object is actually fine. That's a false
+// negative dressed up as a safety check, worse than not checking at all.
+// This function must only ever run where storage.exists() means
+// something — the real production R2 environment.
+async function repairVideo(videoId) {
+  if (!isRecoveryEnvironmentSafe()) {
+    throw new Error(
+      `repairVideo: refusing to run outside the production R2 environment ` +
+        `(NODE_ENV=${JSON.stringify(process.env.NODE_ENV || null)}, ` +
+        `STORAGE_PROVIDER=${JSON.stringify(process.env.STORAGE_PROVIDER || null)}). ` +
+        "storage.exists() only means something against the real bucket — run this " +
+        "from the actual production environment, not a local machine."
+    );
+  }
+
+  const result = await client.query("SELECT * FROM videos WHERE id = $1", [videoId]);
+  const video = result.rows[0];
+
+  if (!video) {
+    throw new Error(`repairVideo: video ${videoId} not found`);
+  }
+
+  // Only ever resets a genuinely-'failed' row — this is a targeted repair
+  // for one specific class of corruption, not a general-purpose status
+  // editor. Resetting a 'ready'/'converting'/'deferred' row would be
+  // actively harmful, not merely unnecessary.
+  if (video.processing_status !== "failed") {
+    throw new Error(
+      `repairVideo: video ${videoId} is '${video.processing_status}', not 'failed' — refusing to touch it`
+    );
+  }
+
+  if (!video.storage_key) {
+    throw new Error(
+      `repairVideo: video ${videoId} has no storage_key — nothing to validate, refusing to touch it`
+    );
+  }
+
+  // The whole premise of this repair is "the underlying object is fine,
+  // only the DB row's status/error text is stale" — verify that premise
+  // directly rather than trusting the caller's word for it.
+  const objectExists = await storage.exists(video.storage_key);
+  if (!objectExists) {
+    throw new Error(
+      `repairVideo: video ${videoId}'s storage_key (${video.storage_key}) does not exist in storage — ` +
+        "the underlying object is genuinely gone, this is not a stale-error case. Refusing to reset it."
+    );
+  }
+
+  const updated = await client.query(
+    `UPDATE videos SET processing_status = 'queued', processing_error = NULL WHERE id = $1 RETURNING *`,
+    [videoId]
+  );
+
+  // Safe to enqueue unconditionally here — the guard at the top of this
+  // function already confirmed we're in the real production R2
+  // environment, so this can only ever call enqueueConversion() against
+  // the real storage/queue, never a local one.
+  enqueueConversion(videoId);
+  return { ...updated.rows[0], enqueued: true };
+}
+
 // Safety guard added after a real incident: this project has one shared
 // dev/prod database (DATABASE_URL is the same everywhere, see CLAUDE.md)
 // — a stray local dev server, left running from earlier work and
@@ -433,6 +515,7 @@ module.exports = {
   retryConversion,
   recoverStrandedConversions,
   isRecoveryEnvironmentSafe,
+  repairVideo,
   MAX_AUTO_CONVERSION_SIZE_BYTES,
   // Test-only escape hatch for testConversionRecovery.js — bypasses the
   // environment guard on purpose so the decision logic itself is still
