@@ -30,6 +30,9 @@
 
 require("dotenv").config();
 
+const { requireProductionTestOptIn } = require("./lib/requireProductionTestOptIn");
+requireProductionTestOptIn("testVideoVisibility.js");
+
 const app = require("../app");
 const client = require("../db/client");
 

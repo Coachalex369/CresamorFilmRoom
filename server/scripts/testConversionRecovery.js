@@ -1,13 +1,30 @@
 /*
   testConversionRecovery.js — regression test for recoverStrandedConversions()
   (server-side conversion recovery redesign, replacing the disabled
-  boot-time requeue that caused the earlier 502 incident) AND for the
-  environment safety guard added after a follow-up incident: a stray
-  local dev server, pointed at the shared production database with the
-  local storage provider active, ran this exact recovery logic against
-  real production rows. isRecoveryEnvironmentSafe() now requires
-  NODE_ENV=production AND STORAGE_PROVIDER=r2 before recoverStrandedConversions()
-  does anything at all.
+  boot-time requeue that caused the earlier 502 incident) AND for the two
+  independent safety layers added after two follow-up incidents where this
+  exact test, run locally against the shared dev/prod database, modified
+  real production video rows:
+
+    1. isRecoveryEnvironmentSafe() (in videoProcessing.js) — requires
+       NODE_ENV=production AND STORAGE_PROVIDER=r2 before
+       recoverStrandedConversions() does anything. An ENVIRONMENT check —
+       bypassable in principle if a local process is ever misconfigured to
+       look production-like.
+    2. Hard ID scoping (in this file) — every call into recovery logic
+       below passes an explicit candidateIds array (this script's own
+       created row IDs). performStrandedConversionRecovery() turns that
+       into a SQL `id = ANY($1)` filter, which is a STRUCTURAL guarantee,
+       not an environment check: a real production row literally cannot
+       match a filter it isn't listed in, regardless of NODE_ENV,
+       STORAGE_PROVIDER, or which database DATABASE_URL points at. This is
+       what actually prevents a repeat of the incidents above — layer 1
+       alone was not enough, since this script deliberately calls the
+       *unguarded* inner function to test decision logic.
+
+  Also requires ALLOW_PRODUCTION_TESTS=true (see requireProductionTestOptIn)
+  as a third, independent layer: this script must never run silently just
+  because someone ran the wrong command.
 
   Two things are exercised here, deliberately kept separate:
     - The GUARD itself, via the real recoverStrandedConversions() export,
@@ -25,10 +42,14 @@
   production post-deploy, same convention as testAuth.js's note on signed
   R2 playback not being locally testable.
 
-  Run by hand: node server/scripts/testConversionRecovery.js
+  Run by hand: ALLOW_PRODUCTION_TESTS=true node server/scripts/testConversionRecovery.js
 */
 
 require("dotenv").config();
+
+const { requireProductionTestOptIn } = require("./lib/requireProductionTestOptIn");
+requireProductionTestOptIn("testConversionRecovery.js");
+
 const fs = require("fs");
 const path = require("path");
 const client = require("../db/client");
@@ -74,7 +95,9 @@ async function main() {
     );
     createdVideoIds.push(guardInsert.rows[0].id);
 
-    await recoverStrandedConversions();
+    // Scoped to exactly this row even though the guard is expected to
+    // reject the call outright — belt and suspenders (see file header).
+    await recoverStrandedConversions([guardInsert.rows[0].id]);
 
     const guardCheck = await client.query(
       `SELECT processing_status, processing_error FROM videos WHERE id = $1`,
@@ -242,8 +265,10 @@ async function main() {
     // Deliberately the unguarded inner implementation, not the guarded
     // recoverStrandedConversions() export — see the file header. Case 0
     // above already confirmed the guard itself works; these cases are
-    // testing the decision logic the guard wraps.
-    await performStrandedConversionRecovery();
+    // testing the decision logic the guard wraps. candidateIds is
+    // EXPLICITLY this script's own created rows only — see the file
+    // header on why this is the real safety mechanism for this call.
+    await performStrandedConversionRecovery(createdVideoIds);
 
     // Give the single-flight queue a moment to finish the fast,
     // locally-failing (no ffmpeg binary) conversion attempts.

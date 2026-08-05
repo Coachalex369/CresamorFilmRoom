@@ -278,7 +278,13 @@ const QUEUED_RECOVERY_GRACE_PERIOD_MS = 90 * 1000;
 // (HEAD itself fails) is treated as unsafe to auto-resume and marked
 // 'failed' with a concise processing_error, rather than either silently
 // skipping it forever or blindly resuming it.
-async function recoverStrandedConversions() {
+// candidateIds is a test-only scoping parameter (see
+// testConversionRecovery.js) — production's real call site (server.js)
+// always calls this with no argument. When provided, it's forwarded
+// through to performStrandedConversionRecovery() below, which turns it
+// into a hard SQL id=ANY() filter — see that function for why this is a
+// structural guarantee, not just an environment check.
+async function recoverStrandedConversions(candidateIds = null) {
   if (!isRecoveryEnvironmentSafe()) {
     console.warn(
       "\n" +
@@ -298,7 +304,7 @@ async function recoverStrandedConversions() {
     return;
   }
 
-  return performStrandedConversionRecovery();
+  return performStrandedConversionRecovery(candidateIds);
 }
 
 // Shared decision logic for one batch of stranded rows, regardless of
@@ -351,11 +357,29 @@ async function recoverRowBatch(rows) {
 // Application code must always go through the guarded
 // recoverStrandedConversions() export above — never call this one
 // directly outside of tests.
-async function performStrandedConversionRecovery() {
+//
+// candidateIds: null in every real production call (server.js never
+// passes it) — both queries below then scan the whole table, which is
+// safe there because isRecoveryEnvironmentSafe() already gated getting
+// this far. testConversionRecovery.js calls this directly WITHOUT going
+// through that guard, specifically to exercise the decision logic
+// locally — so it always passes its own created row IDs here, which adds
+// a hard `id = ANY($1)` filter to both queries. That filter is what
+// actually keeps a local test run safe, structurally, regardless of
+// NODE_ENV/STORAGE_PROVIDER or which database DATABASE_URL happens to
+// point at: a real production row can never match a filter it isn't in,
+// full stop. (A prior version of this function had no such filter and,
+// combined with a local run against the shared dev/prod database, swept
+// up and corrupted two real production rows — this parameter exists
+// specifically so that can't happen again.)
+async function performStrandedConversionRecovery(candidateIds = null) {
   let convertingRows = [];
   try {
     const result = await client.query(
-      `SELECT id, storage_key, source_size_bytes FROM videos WHERE processing_status = 'converting'`
+      `SELECT id, storage_key, source_size_bytes FROM videos
+       WHERE processing_status = 'converting'
+         AND ($1::int[] IS NULL OR id = ANY($1::int[]))`,
+      [candidateIds]
     );
     convertingRows = result.rows;
   } catch (error) {
@@ -378,8 +402,9 @@ async function performStrandedConversionRecovery() {
     const result = await client.query(
       `SELECT id, storage_key, source_size_bytes FROM videos
        WHERE processing_status = 'queued'
-         AND created_at < NOW() - ($1::double precision * INTERVAL '1 millisecond')`,
-      [QUEUED_RECOVERY_GRACE_PERIOD_MS]
+         AND created_at < NOW() - ($2::double precision * INTERVAL '1 millisecond')
+         AND ($1::int[] IS NULL OR id = ANY($1::int[]))`,
+      [candidateIds, QUEUED_RECOVERY_GRACE_PERIOD_MS]
     );
     queuedRows = result.rows;
   } catch (error) {

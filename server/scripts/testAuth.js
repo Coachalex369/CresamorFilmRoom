@@ -14,6 +14,9 @@
 
 require("dotenv").config();
 
+const { requireProductionTestOptIn } = require("./lib/requireProductionTestOptIn");
+requireProductionTestOptIn("testAuth.js");
+
 const jwt = require("jsonwebtoken");
 
 const app = require("../app");
