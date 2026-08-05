@@ -100,6 +100,21 @@ let currentVideoId = null;
 let allVideos = [];
 let myClips = [];
 
+// What selectVideo() last actually wired the player to — storage_key
+// (not the signed URL itself, which rotates its query string on every
+// fetch even when the underlying object hasn't changed) plus
+// processing_status, so a poll can tell "genuinely different object /
+// status" apart from "same video, freshly re-signed URL." Compared
+// against on every poll tick (see pollVideosQuietly) to catch a video
+// whose storage_key changed underneath the current selection — e.g. a
+// remux completing — even without the user leaving and returning to the
+// tab. Set to null initially; only meaningful once selectVideo() has run.
+let lastRenderedVideoSignature = null;
+
+function videoSignature(video) {
+  return video ? `${video.id}:${video.storage_key || video.file_url}:${video.processing_status}` : null;
+}
+
 /* ---------- DRAWING STATE ---------- */
 
 let drawingEnabled = false;
@@ -171,6 +186,7 @@ function selectVideo(video) {
   if (!video) return;
 
   currentVideoId = video.id;
+  lastRenderedVideoSignature = videoSignature(video);
 
   const reason = unavailableReason(video);
 
@@ -590,6 +606,16 @@ function renderCurrentVideoHighlights() {
 
 async function loadVideos() {
   try {
+    // Fresh from IndexedDB, not the module-level snapshot — same
+    // reasoning as pollVideosQuietly()/reconcileSyncedRecordings(): this
+    // can run concurrently with a recordingLibrary lifecycle event
+    // elsewhere, so the cached localRecordings isn't guaranteed current.
+    try {
+      localRecordings = await recordingLibrary.getAll();
+    } catch (error) {
+      console.error("Failed to refresh local recordings during loadVideos:", error);
+    }
+
     const videos = await apiFetch("/api/videos");
     allVideos = Array.isArray(videos) ? videos : [];
 
@@ -721,6 +747,8 @@ function activateApp(user) {
 function logoutLocalState() {
   currentUser = null;
   authToken = null;
+  currentVideoId = null;
+  lastRenderedVideoSignature = null;
   stopVideoPolling();
 
   localStorage.removeItem("token");
@@ -1384,11 +1412,36 @@ let filmScreenActive = false;
 let videoPollTimer = null;
 let videoPollBusy = false;
 
-async function pollVideosQuietly() {
+// forceRefreshCurrent: true only for the tab-entry poll (tab click,
+// visibility-to-visible, window focus) — never for the routine interval
+// tick. Fixes a real staleness bug: a video that was ALREADY playable
+// (playBtn not disabled) never got its signed URL refreshed on later
+// polls, since the old logic only re-wired the player for a video that
+// was previously BLOCKED. A signed URL is only valid ~20 minutes — if the
+// user leaves Film for longer than that (entirely plausible while
+// testing Messages/Teams/Profile) and returns, whatever was cached in
+// filmPlayer.src is stale. On the routine tick this stays conservative
+// (only refresh if it wasn't already playable) so an actively-playing
+// video is never interrupted; on tab-entry there's nothing to interrupt
+// (the screen was just hidden/inactive), so it's always safe to re-wire.
+async function pollVideosQuietly({ forceRefreshCurrent = false } = {}) {
   if (videoPollBusy || !currentUser) return;
   videoPollBusy = true;
 
   try {
+    // Re-read from IndexedDB fresh rather than trusting the module-level
+    // localRecordings snapshot — same reasoning as reconcileSyncedRecordings()
+    // below (which already does this): this poll can run concurrently with
+    // a recordingLibrary lifecycle event elsewhere, so the cached snapshot
+    // isn't guaranteed current. renderVideoList()'s dedup logic depends on
+    // this being accurate, or a just-synced local recording can render
+    // against a stale lifecycle and point at the wrong playback source.
+    try {
+      localRecordings = await recordingLibrary.getAll();
+    } catch (error) {
+      console.error("Failed to refresh local recordings during video poll:", error);
+    }
+
     const videos = await apiFetch("/api/videos");
     allVideos = Array.isArray(videos) ? videos : [];
     // List/badge markup only — renderVideoList() never touches filmPlayer,
@@ -1396,10 +1449,19 @@ async function pollVideosQuietly() {
     renderVideoList();
 
     const current = allVideos.find((video) => Number(video.id) === Number(currentVideoId));
-    if (current && playBtn.disabled) {
-      // The selected video wasn't playable before this poll — nothing
-      // could have been interrupted, so it's safe to wire up the player
-      // now that fresher data may have unlocked it (e.g. remux finished).
+    // Never touches a video that's genuinely mid-playback, full stop —
+    // whether this is the tab-entry poll or a routine tick.
+    const notActivelyPlaying = filmPlayer.paused || filmPlayer.ended;
+    // Catches a video whose storage_key/processing_status genuinely
+    // changed underneath the current selection (e.g. a remux completing)
+    // even on a routine tick, not just tab-entry — signature comparison
+    // (not the signed URL itself, which rotates its query string on every
+    // fetch regardless) is what makes this safe to check unconditionally
+    // without spuriously reloading an unchanged video.
+    const signatureChanged =
+      current && lastRenderedVideoSignature !== null && videoSignature(current) !== lastRenderedVideoSignature;
+
+    if (current && notActivelyPlaying && (forceRefreshCurrent || playBtn.disabled || signatureChanged)) {
       selectVideo(current);
     } else if (!currentVideoId && allVideos[0]) {
       selectVideo(allVideos[0]);
@@ -1419,7 +1481,7 @@ async function pollVideosQuietly() {
 
 function startVideoPolling() {
   if (!videoPollTimer) {
-    videoPollTimer = setInterval(pollVideosQuietly, VIDEO_POLL_INTERVAL_MS);
+    videoPollTimer = setInterval(() => pollVideosQuietly(), VIDEO_POLL_INTERVAL_MS);
   }
 }
 
@@ -1439,7 +1501,7 @@ function refreshVideoPollingState({ immediate = false } = {}) {
 
   if (shouldPoll) {
     startVideoPolling();
-    if (immediate) pollVideosQuietly();
+    if (immediate) pollVideosQuietly({ forceRefreshCurrent: true });
   } else {
     stopVideoPolling();
   }
