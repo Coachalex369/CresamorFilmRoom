@@ -1,15 +1,29 @@
 /*
   testConversionRecovery.js — regression test for recoverStrandedConversions()
   (server-side conversion recovery redesign, replacing the disabled
-  boot-time requeue that caused the earlier 502 incident).
+  boot-time requeue that caused the earlier 502 incident) AND for the
+  environment safety guard added after a follow-up incident: a stray
+  local dev server, pointed at the shared production database with the
+  local storage provider active, ran this exact recovery logic against
+  real production rows. isRecoveryEnvironmentSafe() now requires
+  NODE_ENV=production AND STORAGE_PROVIDER=r2 before recoverStrandedConversions()
+  does anything at all.
 
-  Exercises the decision logic directly against the real DB, using the
-  local storage provider (the default in this environment — R2
-  credentials only exist on Render). The R2 HeadObjectCommand fallback
-  code path itself (getObjectSize in r2Storage.js) is structurally
-  identical to localStorage.js's fs.stat-based version exercised here, and
-  is verified for real on production post-deploy, same convention as
-  testAuth.js's note on signed R2 playback not being locally testable.
+  Two things are exercised here, deliberately kept separate:
+    - The GUARD itself, via the real recoverStrandedConversions() export,
+      in this environment's actual (non-production) env — must leave a
+      'converting' row completely untouched.
+    - The DECISION LOGIC (size checks, deferred/resumed/failed outcomes),
+      via __performStrandedConversionRecoveryForTests — the guard's
+      unguarded inner implementation, exported only for this script.
+      Application code must never call that export directly; only the
+      guarded recoverStrandedConversions() is a supported entry point.
+
+  The R2 HeadObjectCommand fallback code path itself (getObjectSize in
+  r2Storage.js) is structurally identical to localStorage.js's
+  fs.stat-based version exercised here, and is verified for real on
+  production post-deploy, same convention as testAuth.js's note on signed
+  R2 playback not being locally testable.
 
   Run by hand: node server/scripts/testConversionRecovery.js
 */
@@ -20,6 +34,9 @@ const path = require("path");
 const client = require("../db/client");
 const {
   recoverStrandedConversions,
+  isRecoveryEnvironmentSafe,
+  __performStrandedConversionRecoveryForTests: performStrandedConversionRecovery,
+  retryConversion,
   MAX_AUTO_CONVERSION_SIZE_BYTES,
 } = require("../services/videoProcessing");
 
@@ -40,6 +57,34 @@ async function main() {
     const testUserId = userResult.rows[0].id;
 
     fs.mkdirSync(TEST_DIR, { recursive: true });
+
+    // Case 0: the environment guard itself. This script runs with this
+    // environment's real NODE_ENV/STORAGE_PROVIDER (not production/r2),
+    // so the GUARDED export must refuse to touch anything at all.
+    assert(
+      "sanity: this test environment is correctly NOT recognized as safe for recovery",
+      isRecoveryEnvironmentSafe() === false,
+      `NODE_ENV=${process.env.NODE_ENV || "(unset)"}, STORAGE_PROVIDER=${process.env.STORAGE_PROVIDER || "(unset)"}`
+    );
+
+    const guardInsert = await client.query(
+      `INSERT INTO videos (title, storage_key, uploaded_by, processing_status, source_size_bytes)
+       VALUES ($1, $2, $3, 'converting', $4) RETURNING id`,
+      [`${RUN_TAG}-guard-check`, `convrecovery-test/${RUN_TAG}-guard-check.mov`, testUserId, 1024]
+    );
+    createdVideoIds.push(guardInsert.rows[0].id);
+
+    await recoverStrandedConversions();
+
+    const guardCheck = await client.query(
+      `SELECT processing_status, processing_error FROM videos WHERE id = $1`,
+      [guardInsert.rows[0].id]
+    );
+    assert(
+      "guard: unsafe environment leaves a 'converting' row completely untouched",
+      guardCheck.rows[0].processing_status === "converting" && guardCheck.rows[0].processing_error === null,
+      `status=${guardCheck.rows[0].processing_status}`
+    );
 
     // Case 1: known size (source_size_bytes set), UNDER the cap — should
     // reset to 'queued' and get enqueued. The actual conversion attempt
@@ -113,7 +158,48 @@ async function main() {
     );
     createdVideoIds.push(deferredInsert.rows[0].id);
 
-    await recoverStrandedConversions();
+    // Case 6/7: retryConversion() must apply the same size cap as
+    // recovery — a manual retry of an oversized file OOM'd the 512MB
+    // production instance for real, which is the incident this fix is
+    // for. Neither case should ever spawn FFmpeg.
+    const retryBigInsert = await client.query(
+      `INSERT INTO videos (title, storage_key, uploaded_by, processing_status, source_size_bytes)
+       VALUES ($1, $2, $3, 'failed', $4) RETURNING id`,
+      [
+        `${RUN_TAG}-retry-big`,
+        `convrecovery-test/${RUN_TAG}-retry-big.mov`,
+        testUserId,
+        MAX_AUTO_CONVERSION_SIZE_BYTES + 1,
+      ]
+    );
+    createdVideoIds.push(retryBigInsert.rows[0].id);
+
+    const retryBigOutcome = await retryConversion(retryBigInsert.rows[0].id);
+    assert(
+      "retryConversion: oversized -> stays 'deferred', no FFmpeg launched",
+      retryBigOutcome.outcome === "oversized" && retryBigOutcome.processing_status === "deferred",
+      `outcome=${retryBigOutcome.outcome}`
+    );
+
+    const retryMissingInsert = await client.query(
+      `INSERT INTO videos (title, storage_key, uploaded_by, processing_status, source_size_bytes)
+       VALUES ($1, $2, $3, 'failed', NULL) RETURNING id`,
+      [`${RUN_TAG}-retry-missing`, `convrecovery-test/${RUN_TAG}-retry-missing.mov`, testUserId]
+    );
+    createdVideoIds.push(retryMissingInsert.rows[0].id);
+
+    const retryMissingOutcome = await retryConversion(retryMissingInsert.rows[0].id);
+    assert(
+      "retryConversion: size unverifiable -> 'failed', no FFmpeg launched",
+      retryMissingOutcome.outcome === "size_unverifiable" && retryMissingOutcome.processing_status === "failed",
+      `outcome=${retryMissingOutcome.outcome}`
+    );
+
+    // Deliberately the unguarded inner implementation, not the guarded
+    // recoverStrandedConversions() export — see the file header. Case 0
+    // above already confirmed the guard itself works; these cases are
+    // testing the decision logic the guard wraps.
+    await performStrandedConversionRecovery();
 
     // Give the single-flight queue a moment to finish the fast,
     // locally-failing (no ffmpeg binary) conversion attempts.

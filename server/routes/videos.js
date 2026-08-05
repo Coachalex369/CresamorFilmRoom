@@ -333,10 +333,17 @@ router.delete("/api/videos/:id", authenticate, async (req, res) => {
 
 // Beta Stabilization Sprint: the safe manual retry mechanism — what
 // unsticks a video stuck in 'converting' (e.g. from a crash the boot-time
-// auto-requeue hasn't caught yet), a genuinely 'failed' conversion, or a
-// 'deferred' one exceeding the automatic size cap (retry always attempts
-// it regardless of size). Same uploader-or-coach authority as delete —
-// reused, not reinvented.
+// recovery hasn't caught yet), a genuinely 'failed' conversion, or a
+// 'deferred' one. Same uploader-or-coach authority as delete — reused,
+// not reinvented.
+//
+// Production incident: this used to always attempt conversion regardless
+// of size. A manual retry of the ~685MB wrestling video did exactly that
+// and OOM'd the 512MB instance — the same failure mode the boot-time
+// recovery redesign exists to prevent, just triggered manually instead of
+// automatically. retryConversion() now applies the same size cap as every
+// other path; an oversized video comes back "deferred" with no
+// conversion ever started, not a 500 and not a launched FFmpeg process.
 router.post("/api/videos/:id/retry-conversion", authenticate, async (req, res) => {
   try {
     const { id } = req.params;
@@ -356,9 +363,14 @@ router.post("/api/videos/:id/retry-conversion", authenticate, async (req, res) =
       return res.status(400).json({ error: `Video is not in a retriable state (currently '${video.processing_status}')` });
     }
 
-    await retryConversion(video.id);
+    const outcome = await retryConversion(video.id);
 
-    res.json({ success: true, id: Number(id), processing_status: "queued" });
+    res.json({
+      success: outcome.outcome !== "size_unverifiable",
+      id: Number(id),
+      processing_status: outcome.processing_status,
+      ...(outcome.message ? { message: outcome.message } : {}),
+    });
   } catch (err) {
     console.error("POST /api/videos/:id/retry-conversion error:", err);
     res.status(500).json({ error: "Failed to retry conversion" });

@@ -28,12 +28,13 @@ const videoConversion = require("./videoConversion");
 const storage = require("./storage/storage");
 
 // Beta limit, not a hard technical ceiling — a very large source file on
-// Render's 0.5 shared-vCPU Starter instance could tie up the single-item
-// conversion queue for a very long time, delaying every other coach's
-// conversion behind it. Files over this size still upload and stay
-// playable-once-converted-later; they just don't enter the automatic
-// queue. A manual retry (see retryConversion below) always attempts
-// conversion regardless of size — this cap only gates the automatic path.
+// Render's 0.5 shared-vCPU/512MB Starter instance can exhaust the
+// instance outright (confirmed twice now: the original boot-time-requeue
+// incident, and a manual retry of the same ~685MB file causing a real OOM
+// outage). Files over this size still upload and stay
+// playable-once-converted-later; they just don't enter the conversion
+// queue by any path — automatic, startup recovery, or manual retry all
+// respect this same cap on this instance size.
 const MAX_AUTO_CONVERSION_SIZE_BYTES = 600 * 1024 * 1024;
 
 // Playback-fix pass: browsers (especially non-Safari) don't reliably play
@@ -159,15 +160,83 @@ async function enqueueVideoProcessingAsync(video) {
   }
 }
 
-// Called from the retry-conversion route. Always attempts conversion
-// regardless of size — the automatic cap is a one-time upload-time
-// decision, not something a deliberate manual retry should be blocked by.
+// Shared by retryConversion() and performStrandedConversionRecovery():
+// source_size_bytes when the row already has it (free, no I/O); a live
+// storage HeadObject/stat check as the fallback for legacy rows that
+// predate that column. Throws if the size can't be determined at all —
+// callers must treat "unknown size" as unsafe to launch FFmpeg for, never
+// as "assume it's fine."
+async function resolveSourceSizeBytes(video) {
+  if (video.source_size_bytes !== null && video.source_size_bytes !== undefined) {
+    return video.source_size_bytes;
+  }
+  return storage.getObjectSize(video.storage_key);
+}
+
+// Called from the retry-conversion route. Used to always attempt
+// conversion regardless of size ("a manual retry always attempts
+// conversion regardless of the automatic cap") — that was the direct
+// cause of a real OOM outage (a manual retry of the ~685MB wrestling
+// video exhausted this 512MB instance, the same failure mode as the
+// original boot-time-requeue incident). A manual retry is now capped
+// exactly like the automatic path and startup recovery: an oversized
+// video is kept safely at 'deferred' rather than ever launching FFmpeg on
+// this instance size. Returns an outcome object rather than assuming
+// success, so the route can shape its HTTP response around what actually
+// happened.
 async function retryConversion(videoId) {
+  const result = await client.query("SELECT * FROM videos WHERE id = $1", [videoId]);
+  const video = result.rows[0];
+
+  if (!video) {
+    return { outcome: "not_found" };
+  }
+
+  let sizeBytes;
+  try {
+    sizeBytes = await resolveSourceSizeBytes(video);
+  } catch (error) {
+    const message = `Retry: could not verify file size (${String(error?.message || error).slice(0, 400)})`;
+    await client.query(
+      `UPDATE videos SET processing_status = 'failed', processing_error = $1 WHERE id = $2`,
+      [message, videoId]
+    );
+    return { outcome: "size_unverifiable", processing_status: "failed", message };
+  }
+
+  if (sizeBytes > MAX_AUTO_CONVERSION_SIZE_BYTES) {
+    await client.query(
+      `UPDATE videos SET processing_status = 'deferred', processing_error = NULL WHERE id = $1`,
+      [videoId]
+    );
+    return {
+      outcome: "oversized",
+      processing_status: "deferred",
+      message: "This file exceeds the automatic conversion size limit on this instance — kept deferred, no conversion started.",
+    };
+  }
+
   await client.query(
     `UPDATE videos SET processing_status = 'queued', processing_error = NULL WHERE id = $1`,
     [videoId]
   );
   enqueueConversion(videoId);
+  return { outcome: "queued", processing_status: "queued" };
+}
+
+// Safety guard added after a real incident: this project has one shared
+// dev/prod database (DATABASE_URL is the same everywhere, see CLAUDE.md)
+// — a stray local dev server, left running from earlier work and
+// auto-restarted by nodemon on every file save, executed this exact
+// function against the live production database using the LOCAL storage
+// provider, and marked two real production videos 'failed' with a local
+// filesystem path in the error, before the real Render deployment had
+// even run. NODE_ENV + STORAGE_PROVIDER together are the only reliable
+// signal that a given process actually IS the deployed R2-backed
+// service, as opposed to a local process that merely happens to share its
+// DATABASE_URL.
+function isRecoveryEnvironmentSafe() {
+  return process.env.NODE_ENV === "production" && process.env.STORAGE_PROVIDER === "r2";
 }
 
 // Called once at server startup, from inside app.listen()'s success
@@ -196,6 +265,34 @@ async function retryConversion(videoId) {
 // 'failed' with a concise processing_error, rather than either silently
 // skipping it forever or blindly resuming it.
 async function recoverStrandedConversions() {
+  if (!isRecoveryEnvironmentSafe()) {
+    console.warn(
+      "\n" +
+        "!".repeat(70) +
+        "\nSTARTUP CONVERSION RECOVERY SKIPPED — unsafe environment.\n" +
+        `NODE_ENV=${JSON.stringify(process.env.NODE_ENV || null)}  ` +
+        `STORAGE_PROVIDER=${JSON.stringify(process.env.STORAGE_PROVIDER || null)}\n` +
+        "This process is connected to a database but is not recognized as " +
+        "the production R2-backed deployment (requires NODE_ENV=production " +
+        "AND STORAGE_PROVIDER=r2). Running recovery here could modify real " +
+        "production video state using the wrong storage provider — this is " +
+        "exactly the incident this guard exists to prevent. Skipping " +
+        "entirely; no rows were read or changed.\n" +
+        "!".repeat(70) +
+        "\n"
+    );
+    return;
+  }
+
+  return performStrandedConversionRecovery();
+}
+
+// The actual recovery logic, split out from the environment guard above
+// so testConversionRecovery.js can exercise the decision logic directly.
+// Application code must always go through the guarded
+// recoverStrandedConversions() export above — never call this one
+// directly outside of tests.
+async function performStrandedConversionRecovery() {
   let stranded;
   try {
     stranded = await client.query(
@@ -212,11 +309,7 @@ async function recoverStrandedConversions() {
 
   for (const row of stranded.rows) {
     try {
-      let sizeBytes = row.source_size_bytes;
-
-      if (sizeBytes === null || sizeBytes === undefined) {
-        sizeBytes = await storage.getObjectSize(row.storage_key);
-      }
+      const sizeBytes = await resolveSourceSizeBytes(row);
 
       if (sizeBytes > MAX_AUTO_CONVERSION_SIZE_BYTES) {
         await client.query(`UPDATE videos SET processing_status = 'deferred' WHERE id = $1`, [
@@ -259,5 +352,10 @@ module.exports = {
   needsFormatConversion,
   retryConversion,
   recoverStrandedConversions,
+  isRecoveryEnvironmentSafe,
   MAX_AUTO_CONVERSION_SIZE_BYTES,
+  // Test-only escape hatch for testConversionRecovery.js — bypasses the
+  // environment guard on purpose so the decision logic itself is still
+  // exercisable locally. Not a supported entry point for application code.
+  __performStrandedConversionRecoveryForTests: performStrandedConversionRecovery,
 };
