@@ -1,0 +1,11 @@
+-- Startup conversion recovery (server-side conversion resilience redesign)
+-- needs a cheap way to know a stranded video's original size without a
+-- network round-trip before deciding whether to auto-resume its
+-- conversion or defer it — this is exactly the check that was missing
+-- when the old boot-time requeue blindly resumed a large file's
+-- conversion and caused the 502 incident this redesign replaces.
+--
+-- Nullable: existing rows (including the two videos actually stranded in
+-- production right now) predate this column and fall back to a live R2
+-- HeadObject size check in recoverStrandedConversions() instead.
+ALTER TABLE videos ADD COLUMN IF NOT EXISTS source_size_bytes BIGINT;

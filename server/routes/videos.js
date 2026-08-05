@@ -220,13 +220,18 @@ router.post("/api/upload-video", authenticate, uploadLimiter, upload.single("vid
     // capture.js sends them directly instead of Sprint 1's workaround of
     // folding them into the title string. Both stay optional since the
     // manual coach upload path still doesn't collect either.
+    // Startup conversion recovery needs a stranded video's original size
+    // without a network round-trip (see videoProcessing.js's
+    // recoverStrandedConversions()) — multer already has it on req.file,
+    // same as the deferred-cap decision just below, so it's stored for
+    // free here rather than recomputed later.
     const inserted = await client.query(
       `
-      INSERT INTO videos (title, storage_key, uploaded_by, processing_status, team_id, film_type)
-      VALUES ($1, $2, $3, 'uploading', $4, $5)
+      INSERT INTO videos (title, storage_key, uploaded_by, processing_status, team_id, film_type, source_size_bytes)
+      VALUES ($1, $2, $3, 'uploading', $4, $5, $6)
       RETURNING *
       `,
-      [title, storageKey, req.user.id, team_id || null, film_type || null]
+      [title, storageKey, req.user.id, team_id || null, film_type || null, req.file.size]
     );
 
     // Foundation Sprint Phase 3: this route now only receives the upload —

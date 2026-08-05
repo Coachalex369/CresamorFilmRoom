@@ -25,6 +25,7 @@
 
 const client = require("../db/client");
 const videoConversion = require("./videoConversion");
+const storage = require("./storage/storage");
 
 // Beta limit, not a hard technical ceiling — a very large source file on
 // Render's 0.5 shared-vCPU Starter instance could tie up the single-item
@@ -169,25 +170,87 @@ async function retryConversion(videoId) {
   enqueueConversion(videoId);
 }
 
-// Called once at server startup, after the DB connects. The in-process
-// queue is empty by definition on a fresh boot, so any row already
-// sitting at 'queued' or 'converting' at that moment is orphaned work
-// from a prior process life (a Render redeploy mid-conversion, most
-// likely) — not something actively running now. Re-queuing it is what
-// makes the pipeline "reliable" without needing a persistent job table.
-async function requeueStuckConversions() {
-  const result = await client.query(
-    `SELECT id FROM videos WHERE processing_status IN ('queued', 'converting')`
+// Called once at server startup, from inside app.listen()'s success
+// callback (see server.js) — by the time this runs, the HTTP server is
+// already accepting requests, so nothing here can ever delay or block
+// that. Fire-and-forget from the caller's side; every failure path below
+// is caught locally so this can never become an unhandled rejection.
+//
+// The in-process queue (conversionQueue/conversionBusy) is empty by
+// definition on a fresh boot — nothing has been enqueued yet — so any row
+// already sitting at 'converting' at this exact moment cannot be work
+// this process is doing; it's unconditionally orphaned from a prior
+// process life (a Render redeploy or crash mid-conversion, most likely).
+// Deliberately narrower than the old requeueStuckConversions(): only
+// 'converting' is recovered, never 'deferred' (that's not stranded, it's
+// a deliberate non-error resting state).
+//
+// Production incident this replaces: the old version blindly re-queued
+// and immediately re-attempted conversion regardless of file size,
+// which is exactly what exhausted the 0.5vCPU/512MB instance and caused
+// sustained 502s across every route. This version re-checks size before
+// resuming anything — source_size_bytes when available (free, no I/O);
+// a live R2 HeadObject size check as a fallback for legacy rows that
+// predate that column. A row whose size can't be determined at all
+// (HEAD itself fails) is treated as unsafe to auto-resume and marked
+// 'failed' with a concise processing_error, rather than either silently
+// skipping it forever or blindly resuming it.
+async function recoverStrandedConversions() {
+  let stranded;
+  try {
+    stranded = await client.query(
+      `SELECT id, storage_key, source_size_bytes FROM videos WHERE processing_status = 'converting'`
+    );
+  } catch (error) {
+    console.error("Startup conversion recovery: failed to query stranded videos:", error);
+    return;
+  }
+
+  let resumed = 0;
+  let deferred = 0;
+  let failed = 0;
+
+  for (const row of stranded.rows) {
+    try {
+      let sizeBytes = row.source_size_bytes;
+
+      if (sizeBytes === null || sizeBytes === undefined) {
+        sizeBytes = await storage.getObjectSize(row.storage_key);
+      }
+
+      if (sizeBytes > MAX_AUTO_CONVERSION_SIZE_BYTES) {
+        await client.query(`UPDATE videos SET processing_status = 'deferred' WHERE id = $1`, [
+          row.id,
+        ]);
+        deferred++;
+        continue;
+      }
+
+      await client.query(
+        `UPDATE videos SET processing_status = 'queued', processing_error = NULL WHERE id = $1`,
+        [row.id]
+      );
+      enqueueConversion(row.id);
+      resumed++;
+    } catch (error) {
+      console.error("Startup conversion recovery: could not resolve size for video", row.id, error);
+
+      try {
+        await client.query(
+          `UPDATE videos SET processing_status = 'failed', processing_error = $1 WHERE id = $2`,
+          [`Startup recovery: could not verify file size (${String(error?.message || error).slice(0, 400)})`, row.id]
+        );
+      } catch (updateError) {
+        console.error("Startup conversion recovery: failed to mark video as failed:", row.id, updateError);
+      }
+      failed++;
+    }
+  }
+
+  console.log(
+    `Startup conversion recovery: found ${stranded.rows.length} orphaned conversion(s) in 'converting'; ` +
+      `resumed ${resumed}, deferred ${deferred} (oversized), failed ${failed} (size unverifiable).`
   );
-
-  for (const row of result.rows) {
-    await client.query(`UPDATE videos SET processing_status = 'queued' WHERE id = $1`, [row.id]);
-    enqueueConversion(row.id);
-  }
-
-  if (result.rows.length) {
-    console.log(`Re-queued ${result.rows.length} video conversion(s) orphaned by a prior process life.`);
-  }
 }
 
 module.exports = {
@@ -195,6 +258,6 @@ module.exports = {
   enqueueVideoProcessingAsync,
   needsFormatConversion,
   retryConversion,
-  requeueStuckConversions,
+  recoverStrandedConversions,
   MAX_AUTO_CONVERSION_SIZE_BYTES,
 };

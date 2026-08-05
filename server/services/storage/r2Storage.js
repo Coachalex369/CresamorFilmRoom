@@ -70,6 +70,17 @@ async function exists(key) {
   }
 }
 
+// Startup conversion recovery's fallback for legacy rows that predate
+// source_size_bytes (see videoProcessing.js's recoverStrandedConversions())
+// — a HEAD request only, never downloads the object. Throws on any
+// failure (including not-found) rather than swallowing it like exists()
+// does, since the caller needs to distinguish "confirmed size" from
+// "couldn't determine" and treat the latter as unsafe to auto-resume.
+async function getObjectSize(key) {
+  const result = await client.send(new HeadObjectCommand({ Bucket: BUCKET, Key: key }));
+  return result.ContentLength;
+}
+
 async function remove(key) {
   try {
     await client.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: key }));
@@ -87,4 +98,4 @@ async function downloadToFile(key, destPath) {
   await pipeline(response.Body, fs.createWriteStream(destPath));
 }
 
-module.exports = { upload, getSignedUrl, exists, remove, downloadToFile };
+module.exports = { upload, getSignedUrl, exists, remove, downloadToFile, getObjectSize };

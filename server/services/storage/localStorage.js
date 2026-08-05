@@ -55,4 +55,12 @@ async function downloadToFile(key, destPath) {
   await fs.promises.copyFile(resolvePath(key), destPath);
 }
 
-module.exports = { upload, getSignedUrl, exists, remove, downloadToFile };
+// Mirrors r2Storage's getObjectSize() — throws (via fs.promises.stat's
+// natural rejection) if the file is missing, same "let the caller decide
+// what unknown-size means" contract.
+async function getObjectSize(key) {
+  const stats = await fs.promises.stat(resolvePath(key));
+  return stats.size;
+}
+
+module.exports = { upload, getSignedUrl, exists, remove, downloadToFile, getObjectSize };

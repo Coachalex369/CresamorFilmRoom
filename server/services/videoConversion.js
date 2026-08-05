@@ -27,6 +27,15 @@ const TEMP_ROOT = path.join(__dirname, "../../uploads/.tmp");
 // almost always contain the actual failure reason.
 const STDERR_TAIL_LIMIT = 2000;
 
+// Conversion recovery redesign: without an upper bound, a genuinely hung
+// ffmpeg process (not crashed, not exited — just stuck) would leave
+// convertOne()'s await unresolved forever, which keeps conversionBusy
+// true forever and silently blocks every future conversion behind it —
+// recovered, manually retried, or a brand-new upload — not just the one
+// that hung. Env-driven like this project's other operational limits
+// (MAX_VIDEO_UPLOAD_MB, ALLOWED_ORIGIN).
+const CONVERSION_TIMEOUT_MS = Number(process.env.VIDEO_CONVERSION_TIMEOUT_MS) || 10 * 60 * 1000;
+
 function runFfmpeg(inputPath, outputPath) {
   return new Promise((resolve, reject) => {
     const ffmpeg = spawn("ffmpeg", [
@@ -41,17 +50,39 @@ function runFfmpeg(inputPath, outputPath) {
     ]);
 
     let stderrTail = "";
+    // Guards against the timeout and a real process event (error/close)
+    // both trying to resolve/reject this promise — same "first one wins"
+    // shape as the client-side upload stall timer in recordingPipeline.js.
+    let settled = false;
+
+    const timeoutTimer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+
+      ffmpeg.kill("SIGKILL");
+      reject(
+        new Error(`Conversion timed out after ${Math.round(CONVERSION_TIMEOUT_MS / 1000)}s`)
+      );
+    }, CONVERSION_TIMEOUT_MS);
 
     ffmpeg.stderr.on("data", (chunk) => {
       stderrTail = (stderrTail + chunk.toString()).slice(-STDERR_TAIL_LIMIT);
     });
 
     ffmpeg.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutTimer);
+
       // Covers "ffmpeg not found" (ENOENT) as well as other spawn failures.
       reject(new Error(`Failed to start ffmpeg: ${error.message}`));
     });
 
     ffmpeg.on("close", (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutTimer);
+
       if (code === 0) {
         resolve();
       } else {
