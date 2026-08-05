@@ -122,6 +122,18 @@ const capture = {
   unsubscribeRecording: null,
 };
 
+// Production bug fix: syncRecording() had no re-entrancy guard —
+// capture.blob stays set until the modal closes, so a double-tap on a
+// team-confirm button (very plausible on a real phone waiting on
+// showConfirmTeamStep()'s async team-list load) called
+// recordingLibrary.create() twice with the same blob, producing two
+// IndexedDB records and two real server uploads for one recording.
+// Confirmed via direct reproduction before fixing. Set synchronously,
+// before any await, in syncRecording() below — same check-then-set race
+// class already fixed in recordingPipelineProcessNext's busy flag,
+// applied here too.
+let syncInProgress = false;
+
 /* ---------- modal / step helpers ---------- */
 
 function showCaptureStep(stepKey) {
@@ -165,8 +177,29 @@ function teardownCapture() {
   capture.recordingId = null;
   captureRecordTimer.textContent = "00:00";
 
+  // Safe terminal path for the re-entrancy guard: a fresh capture session
+  // (new recording) is the only time it's legitimate to sync again from
+  // this modal instance. Also re-enable the team-confirmation controls in
+  // case they were left locked by an in-progress or errored sync attempt.
+  syncInProgress = false;
+  setTeamConfirmationControlsDisabled(false);
+
   if (captureReviewActions) captureReviewActions.classList.remove("hidden");
   if (captureReviewStatus) captureReviewStatus.classList.add("hidden");
+}
+
+// Locks/unlocks every control that can trigger syncRecording() — the
+// immediate, visible half of the re-entrancy guard (disabling the actual
+// button is what stops a second physical tap from even registering as a
+// second click, not just being ignored programmatically after the fact).
+function setTeamConfirmationControlsDisabled(disabled) {
+  if (captureConfirmSuggestedTeamBtn) captureConfirmSuggestedTeamBtn.disabled = disabled;
+  if (captureSkipTeamBtn) captureSkipTeamBtn.disabled = disabled;
+  captureConfirmTeamList
+    .querySelectorAll(".capture-team-btn")
+    .forEach((btn) => {
+      btn.disabled = disabled;
+    });
 }
 
 /* ---------- recording context (smart default for team suggestion) ---------- */
@@ -540,27 +573,52 @@ function renderRecordingStatus(record) {
 async function syncRecording() {
   if (!capture.blob) return;
 
-  saveRecordingContext(capture.team);
+  // Re-entrancy guard — the fix for the confirmed "one recording becomes
+  // two Film Room entries" bug: a double-tap on a team-confirm button
+  // (capture.blob stays set until the modal closes, so nothing previously
+  // stopped a second invocation) called recordingLibrary.create() twice
+  // with the same blob. Set synchronously, before any await, so a second
+  // call arriving before the first even finishes creating its IndexedDB
+  // record still sees this as true and bails immediately.
+  if (syncInProgress) return;
+  syncInProgress = true;
+  setTeamConfirmationControlsDisabled(true);
 
-  const record = await recordingLibrary.create({
-    blob: capture.blob,
-    title: buildRecordingTitle(),
-    teamId: capture.team ? capture.team.id : null,
-    uploadedBy: currentUser.id,
-  });
+  try {
+    saveRecordingContext(capture.team);
 
-  capture.recordingId = record.recordingId;
+    const record = await recordingLibrary.create({
+      blob: capture.blob,
+      title: buildRecordingTitle(),
+      teamId: capture.team ? capture.team.id : null,
+      uploadedBy: currentUser.id,
+    });
 
-  if (captureReviewActions) captureReviewActions.classList.add("hidden");
-  renderRecordingStatus(record);
+    capture.recordingId = record.recordingId;
 
-  capture.unsubscribeRecording = recordingLibrary.subscribe(({ recordingId, record: updated }) => {
-    if (recordingId !== capture.recordingId) return;
-    renderRecordingStatus(updated);
-  });
+    if (captureReviewActions) captureReviewActions.classList.add("hidden");
+    renderRecordingStatus(record);
 
-  showCaptureStep("review");
-  recordingPipeline.enqueue(record.recordingId);
+    capture.unsubscribeRecording = recordingLibrary.subscribe(({ recordingId, record: updated }) => {
+      if (recordingId !== capture.recordingId) return;
+      renderRecordingStatus(updated);
+    });
+
+    showCaptureStep("review");
+    recordingPipeline.enqueue(record.recordingId);
+
+    // Success terminal path: intentionally NOT resetting syncInProgress
+    // here. capture.blob is still set until the modal closes, so leaving
+    // the guard locked is what actually prevents a stray extra tap from
+    // creating a second recording from the same blob — teardownCapture()
+    // (a genuinely new capture session) is the real release point.
+  } catch (error) {
+    console.error("Failed to sync recording:", error);
+    // Failure terminal path: nothing was created, so it's safe — and
+    // necessary — to unlock so the user can retry instead of being stuck.
+    syncInProgress = false;
+    setTeamConfirmationControlsDisabled(false);
+  }
 }
 
 /* ---------- open/close wiring ---------- */

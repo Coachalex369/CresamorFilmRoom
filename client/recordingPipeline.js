@@ -17,6 +17,17 @@
 
 let recordingPipelineBusy = false;
 
+// Production bug fix: a real mobile upload can stall completely — zero
+// bytes moving, no error, no load — and without a bound on that, it never
+// resolves at all, permanently blocking recordingPipelineBusy and every
+// recording behind it. This is a STALL timeout, not a total-duration
+// timeout: the timer resets on every real upload.progress event, so it
+// only fires after this many ms with genuinely NO progress, not merely a
+// slow-but-moving upload of a large file. Chosen to tolerate normal
+// connection setup/slow-start on a poor sideline connection without
+// making a user wait too long for a clear "paused, will retry" signal.
+const UPLOAD_STALL_TIMEOUT_MS = 30000;
+
 function recordingPipelineUploadFilename(recording) {
   const isNativeFile = typeof File !== "undefined" && recording.blob instanceof File;
   if (isNativeFile) return recording.blob.name;
@@ -25,6 +36,13 @@ function recordingPipelineUploadFilename(recording) {
   return `recording-${recording.createdAt}.${extension}`;
 }
 
+// Resolves with a status string, not a plain boolean — "success",
+// "stalled", or "failed" — because recordingPipelineProcessNext() treats
+// a stall differently from a generic failure (see the comment there):
+// UPLOAD_STALL_TIMEOUT_MS has already elapsed by the time a stall
+// resolves, so continuing the queue immediately is safe and is what
+// actually gives a second queued recording its turn; a fast/generic
+// failure must not be retried instantly.
 async function recordingPipelineUpload(recording) {
   await recordingLibrary.markUploading(recording.recordingId);
 
@@ -50,13 +68,57 @@ async function recordingPipelineUpload(recording) {
       xhr.setRequestHeader("Authorization", `Bearer ${authToken}`);
     }
 
+    // settled guards against the stall timer and a real XHR event (load/
+    // error) both trying to resolve/mark this recording — whichever
+    // happens first wins, the other is a no-op.
+    let settled = false;
+    let stallTimer = null;
+
+    function clearStallTimer() {
+      if (stallTimer) {
+        clearTimeout(stallTimer);
+        stallTimer = null;
+      }
+    }
+
+    function armStallTimer() {
+      clearStallTimer();
+      stallTimer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+
+        console.error(
+          `Upload stalled (no progress for ${UPLOAD_STALL_TIMEOUT_MS / 1000}s), aborting:`,
+          recording.recordingId
+        );
+
+        // abort() does not fire 'error' or 'load' per the XHR spec — only
+        // 'abort' — so this is the one path that needs to do its own
+        // markFailed()/resolve(), not rely on the other listeners below.
+        xhr.abort();
+        recordingLibrary
+          .markFailed(recording.recordingId, new Error("Upload stalled — no progress, will retry"))
+          .finally(() => resolve("stalled"));
+      }, UPLOAD_STALL_TIMEOUT_MS);
+    }
+
     xhr.upload.addEventListener("progress", (event) => {
+      // Real progress is exactly what distinguishes "stalled" from
+      // "slow but genuinely moving" — reset the clock, don't just cancel
+      // it, so a large file on a slow-but-working connection is never
+      // penalized for taking a while in total.
+      armStallTimer();
+
       if (!event.lengthComputable) return;
       const percent = Math.round((event.loaded / event.total) * 100);
       recordingLibrary.updateProgress(recording.recordingId, percent);
     });
 
     xhr.addEventListener("load", async () => {
+      if (settled) return;
+      settled = true;
+      clearStallTimer();
+
       if (xhr.status >= 200 && xhr.status < 300) {
         try {
           const uploaded = JSON.parse(xhr.responseText);
@@ -77,11 +139,11 @@ async function recordingPipelineUpload(recording) {
             needsConversion: Boolean(uploaded.needs_conversion),
           });
 
-          resolve(true);
+          resolve("success");
         } catch (error) {
           console.error("Failed to parse upload response:", error);
           await recordingLibrary.markFailed(recording.recordingId, error);
-          resolve(false);
+          resolve("failed");
         }
       } else if (xhr.status === 401) {
         console.error("Upload failed: session expired");
@@ -91,23 +153,28 @@ async function recordingPipelineUpload(recording) {
         }
 
         await recordingLibrary.markFailed(recording.recordingId, new Error("Session expired"));
-        resolve(false);
+        resolve("failed");
       } else {
         console.error("Upload failed:", xhr.status, xhr.responseText);
         await recordingLibrary.markFailed(
           recording.recordingId,
           new Error(`Upload failed (${xhr.status})`)
         );
-        resolve(false);
+        resolve("failed");
       }
     });
 
     xhr.addEventListener("error", async () => {
+      if (settled) return;
+      settled = true;
+      clearStallTimer();
+
       console.error("Upload failed: network error");
       await recordingLibrary.markFailed(recording.recordingId, new Error("Network error"));
-      resolve(false);
+      resolve("failed");
     });
 
+    armStallTimer(); // start the clock before send() — covers "never starts at all" too
     xhr.send(formData);
   });
 }
@@ -124,26 +191,30 @@ async function recordingPipelineProcessNext() {
   if (recordingPipelineBusy) return;
   recordingPipelineBusy = true;
 
-  let succeeded = false;
+  let outcome = "no-op";
 
   try {
     const pending = await recordingLibrary.getPendingUpload();
     const next = pending[0];
     if (!next) return;
 
-    succeeded = await recordingPipelineUpload(next);
+    outcome = await recordingPipelineUpload(next); // "success" | "stalled" | "failed"
   } finally {
     recordingPipelineBusy = false;
   }
 
-  // Only immediately continue draining the queue on success (to pick up
-  // the *next* distinct recording, if any). A failure must NOT retry the
-  // same recording in a tight loop — recordingLibrary.markFailed() already
-  // reverted it to local+queued, so without this guard it would be picked
-  // right back up by getPendingUpload() and hammered instantly. Retries
-  // only happen via the `online` event and the load-time reconciliation
-  // pass, both of which call this function fresh.
-  if (succeeded) {
+  // A plain "failed" (bad response, network error) must NOT retry in a
+  // tight loop — recordingLibrary.markFailed() already reverted it to
+  // local+queued, and retrying instantly would hammer the same broken
+  // request. "stalled" is different: UPLOAD_STALL_TIMEOUT_MS has already
+  // elapsed by the time this runs, so an immediate continue here is not a
+  // tight loop, and it's what actually lets a second queued recording get
+  // its turn right away instead of waiting for the next `online` event or
+  // page load — combined with getPendingUpload() now deprioritizing
+  // already-retried recordings (see recordingLibrary.js), continuing here
+  // picks up a different, never-tried recording if one exists rather than
+  // re-hammering the one that just stalled.
+  if (outcome === "success" || outcome === "stalled") {
     recordingPipelineProcessNext();
   }
 }

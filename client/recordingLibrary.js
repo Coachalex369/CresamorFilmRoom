@@ -131,7 +131,18 @@ async function recordingLibraryGetPendingUpload() {
   const all = await idbRequest(store.getAll());
   return all
     .filter((record) => record.lifecycle === "local" && record.queued)
-    .sort((a, b) => a.createdAt - b.createdAt); // oldest first — FIFO
+    .sort((a, b) => {
+      // Production bug fix: a recording that has already failed at least
+      // once (e.g. a stalled upload timing out) must not permanently sit
+      // at the front of a pure createdAt-FIFO queue and block every
+      // never-yet-attempted recording behind it. Untried recordings
+      // (retryCount 0) go first as a group; within each group, oldest
+      // first as before.
+      const aRetried = (a.retryCount || 0) > 0;
+      const bRetried = (b.retryCount || 0) > 0;
+      if (aRetried !== bRetried) return aRetried ? 1 : -1;
+      return a.createdAt - b.createdAt;
+    });
 }
 
 async function recordingLibraryMarkUploading(recordingId) {
