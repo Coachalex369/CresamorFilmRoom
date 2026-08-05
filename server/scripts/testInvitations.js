@@ -235,6 +235,56 @@ async function main() {
     });
     assert("unrelated user cannot revoke a member", unrelatedRevokeRes.status === 403, `status=${unrelatedRevokeRes.status}`);
 
+    // ---- Closed Beta Readiness Sprint: an unrelated COACH (real coach
+    // account, but no team_members row on this team) must be denied too —
+    // this is the regression guard for canAccessTeam's removed blanket
+    // "any coach can access any team" shortcut. Before this sprint's
+    // permission change, every one of these would have incorrectly
+    // succeeded (200) purely because unrelatedCoach.user.role === 'coach'. ----
+    const unrelatedCoach = await registerUser(`${RUN_TAG}-unrelated-coach@test.cresamor.local`, "coach");
+    created.userIds.push(unrelatedCoach.user.id);
+
+    const unrelatedCoachDetailRes = await req(`/api/teams/${team.id}`, { token: unrelatedCoach.token });
+    assert(
+      "unrelated coach (not a member of this team) denied team detail",
+      unrelatedCoachDetailRes.status === 403,
+      `status=${unrelatedCoachDetailRes.status}`
+    );
+
+    const unrelatedCoachRosterRes = await req(`/api/teams/${team.id}/members`, { token: unrelatedCoach.token });
+    assert(
+      "unrelated coach (not a member of this team) denied team roster",
+      unrelatedCoachRosterRes.status === 403,
+      `status=${unrelatedCoachRosterRes.status}`
+    );
+
+    const unrelatedCoachInviteRes = await req(`/api/teams/${team.id}/invitations`, {
+      method: "POST",
+      token: unrelatedCoach.token,
+      body: { destinationType: "email", destination: "nobody2@test.cresamor.local", roleOnTeam: "athlete" },
+    });
+    assert(
+      "unrelated coach (not a member of this team) cannot create an invitation for it",
+      unrelatedCoachInviteRes.status === 403,
+      `status=${unrelatedCoachInviteRes.status}`
+    );
+
+    const unrelatedCoachRevokeRes = await req(`/api/teams/${team.id}/members/${athlete.user.id}`, {
+      method: "DELETE",
+      token: unrelatedCoach.token,
+    });
+    assert(
+      "unrelated coach (not a member of this team) cannot revoke a member",
+      unrelatedCoachRevokeRes.status === 403,
+      `status=${unrelatedCoachRevokeRes.status}`
+    );
+
+    // Note: "a coach WITH genuine membership still has read access" is
+    // already proven throughout this script — every `coach.token` call
+    // above (team detail, roster, invitations) succeeds precisely because
+    // that coach has a real team_members row from auto-join-on-create. No
+    // separate registration needed here (register is rate-limited).
+
     // ---- Coach revokes the athlete's access ----
     const revokeRes = await req(`/api/teams/${team.id}/members/${athlete.user.id}`, {
       method: "DELETE",

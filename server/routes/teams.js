@@ -91,9 +91,9 @@ router.post("/api/teams", authenticate, requireRole("coach"), async (req, res) =
 });
 
 // Teams MVP: team detail — name/sport/school plus an active member count.
-// Read access follows canAccessTeam (member-or-any-coach), same as the
-// roster below — management actions (invite/revoke) are gated by the
-// narrower canManageTeam instead, in routes/invitations.js.
+// Read access follows canAccessTeam (requires an active team_members
+// row), same as the roster below — management actions (invite/revoke)
+// are gated by canManageTeam instead, in routes/invitations.js.
 router.get("/api/teams/:id", authenticate, async (req, res) => {
   try {
     const { id } = req.params;

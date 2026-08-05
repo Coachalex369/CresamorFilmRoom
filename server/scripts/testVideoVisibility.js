@@ -181,6 +181,27 @@ async function main() {
     const outsiderSingle = await req(`/api/videos/${uploaded.id}`, { token: outsider.token });
     assert("unrelated user's direct GET /api/videos/:id is still 403", outsiderSingle.status === 403);
 
+    // --- Closed Beta Readiness Sprint regression guard: an unrelated
+    // COACH (real coach account, no team_members row on this team) must
+    // ALSO be blocked from this team-scoped video — canAccessTeam's
+    // former "any coach can access any team" blanket shortcut used to
+    // let this through purely on users.role === 'coach'. ---
+    const unrelatedCoach = await registerUser(`${RUN_TAG}_unrelated_coach@test.cresamor.local`, "coach");
+    created.userIds.push(unrelatedCoach.user.id);
+
+    const unrelatedCoachSingle = await req(`/api/videos/${uploaded.id}`, { token: unrelatedCoach.token });
+    assert(
+      "unrelated coach (not a member of this team) is blocked from team-scoped video",
+      unrelatedCoachSingle.status === 403
+    );
+
+    const unrelatedCoachList = await req("/api/videos", { token: unrelatedCoach.token });
+    const unrelatedCoachSeesIt = unrelatedCoachList.data.find((v) => v.id === uploaded.id);
+    assert(
+      "unrelated coach (not a member of this team) does not see it in the list either",
+      !unrelatedCoachSeesIt
+    );
+
     // --- Unassigned (team_id null) recordings: uploader-or-coach only,
     // unchanged behavior — regression guard for the other canViewVideo
     // branch this fix sits next to. ---

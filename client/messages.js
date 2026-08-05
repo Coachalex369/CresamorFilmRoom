@@ -261,6 +261,12 @@ document.querySelectorAll(".tab-btn").forEach((button) => {
   button.addEventListener("click", () => {
     messagesScreenActive = button.dataset.screen === "messages-screen";
     refreshPollingState({ immediate: true });
+    // Opening the Messages tab should land at the newest message every
+    // time, not just on login/session-restore or right after sending —
+    // scrollTop/scrollHeight only, no re-fetch, so dedup state is untouched.
+    if (messagesScreenActive && realMessageThread) {
+      realMessageThread.scrollTop = realMessageThread.scrollHeight;
+    }
   });
 });
 

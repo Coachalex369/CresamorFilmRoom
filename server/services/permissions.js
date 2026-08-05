@@ -47,37 +47,30 @@ async function canDeleteVideo(userId, videoId) {
   return role === "coach" || Number(uploaded_by) === Number(userId);
 }
 
-// Coach access is a superset everywhere in this app — a coach can access
-// any team without needing an explicit team_members row. A revoked
-// membership (revoked_at IS NOT NULL) does not count as membership for a
-// non-coach — see Teams MVP's revoke-access feature.
+// Closed Beta Readiness Sprint: team-scoped access requires a real,
+// active team_members row — the former "any coach can access any team"
+// blanket shortcut was removed. An unrelated coach must not see another
+// team's private roster or Team Film merely because their global
+// users.role is 'coach'; only a genuine (non-revoked) membership counts,
+// same rule for every role. See canManageTeam below for the (already
+// narrower, already membership-scoped) management-action check.
 async function canAccessTeam(userId, teamId) {
   if (!userId || !teamId) return false;
 
   const result = await client.query(
     `
-    SELECT users.role, team_members.team_id AS membership_team_id
-    FROM users
-    LEFT JOIN team_members
-      ON team_members.user_id = users.id
-      AND team_members.team_id = $2
-      AND team_members.revoked_at IS NULL
-    WHERE users.id = $1
+    SELECT 1
+    FROM team_members
+    WHERE user_id = $1 AND team_id = $2 AND revoked_at IS NULL
     `,
     [userId, teamId]
   );
 
-  if (!result.rows.length) return false;
-
-  const { role, membership_team_id } = result.rows[0];
-
-  return role === "coach" || membership_team_id !== null;
+  return result.rows.length > 0;
 }
 
 // Teams MVP: gates team-MANAGEMENT actions (create invitation, revoke a
-// member) — deliberately narrower than canAccessTeam's blanket
-// any-coach-sees-every-team rule above, which stays unchanged for
-// viewing. "Coaches may manage only teams assigned to them" means an
+// member). "Coaches may manage only teams assigned to them" means an
 // active team_members row on THAT team with role_on_team = 'coach', not
 // just users.role === 'coach' in general. POST /api/teams auto-inserts
 // this row for the creator, so a coach can always manage a team they
@@ -98,8 +91,8 @@ async function canManageTeam(userId, teamId) {
 }
 
 // Teams MVP: the roster/team-detail read path. Same access shape as
-// canAccessTeam (member-or-any-coach) — reused directly rather than
-// duplicated, since viewing the roster is a read, not a management
+// canAccessTeam (active membership required) — reused directly rather
+// than duplicated, since viewing the roster is a read, not a management
 // action (that's canManageTeam above).
 async function canViewTeamRoster(userId, teamId) {
   return canAccessTeam(userId, teamId);

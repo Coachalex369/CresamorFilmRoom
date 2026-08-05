@@ -116,8 +116,11 @@ function renderProfileBlock() {
     ? `Class of ${currentProfile.graduation_year}`
     : "Class of —";
 
-  profilePicturePlaceholder.textContent = displayName.charAt(0).toUpperCase();
   const photoUrl = resolveUploadUrl(currentProfile.profile_picture_url);
+  // The fallback initial and the photo share one DOM node — background-image
+  // paints behind text, it doesn't hide it, so the letter must be cleared
+  // whenever a real photo is present or it stays visibly overlaid on top.
+  profilePicturePlaceholder.textContent = photoUrl ? "" : displayName.charAt(0).toUpperCase();
   profilePicturePlaceholder.style.backgroundImage = photoUrl ? `url(${photoUrl})` : "none";
 }
 

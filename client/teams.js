@@ -23,6 +23,7 @@ const teamsScreenState = {
   currentTeamId: null,
   currentTeamDetail: null,
   currentTeamRoster: [],
+  currentTeamInvitations: [],
 };
 
 // ---------- DOM refs ----------
@@ -39,6 +40,10 @@ const teamDetailMetaEl = document.getElementById("team-detail-meta");
 const teamDetailActions = document.getElementById("team-detail-actions");
 const inviteMemberBtn = document.getElementById("invite-member-btn");
 const teamRosterList = document.getElementById("team-roster-list");
+
+const teamInvitationsSection = document.getElementById("team-invitations-section");
+const teamInvitationsEmpty = document.getElementById("team-invitations-empty");
+const teamInvitationsList = document.getElementById("team-invitations-list");
 
 const createTeamModal = document.getElementById("create-team-modal");
 const createTeamCloseBtn = document.getElementById("create-team-close-btn");
@@ -112,6 +117,20 @@ async function openTeamDetail(teamId) {
     ]);
     teamsScreenState.currentTeamDetail = detail;
     teamsScreenState.currentTeamRoster = roster;
+    teamsScreenState.currentTeamInvitations = [];
+
+    // The invitations list endpoint is canManageTeam-gated (coach-level
+    // membership on THIS team) — only fetch it for a caller who can
+    // actually manage this team, so a plain roster viewer doesn't trigger
+    // an expected-but-noisy 403.
+    if (currentUserCanManageCurrentTeam()) {
+      try {
+        teamsScreenState.currentTeamInvitations = await apiFetch(`/api/teams/${teamId}/invitations`);
+      } catch (error) {
+        console.error("Failed to load team invitations:", error);
+      }
+    }
+
     renderTeamDetail();
 
     teamsListView.classList.add("hidden");
@@ -167,6 +186,50 @@ function renderTeamDetail() {
     }
 
     teamRosterList.appendChild(item);
+  });
+
+  renderTeamInvitations();
+}
+
+const INVITATION_STATUS_LABELS = { pending: "Pending", accepted: "Accepted", expired: "Expired", revoked: "Revoked" };
+
+// The server never flips status from 'pending' to 'expired' on a timer —
+// expiry is only checked at preview/accept time (see invitations.js's
+// service layer) — so "expired" has to be derived client-side by
+// comparing expires_at to now whenever status is still 'pending'.
+function effectiveInvitationStatus(invitation) {
+  if (invitation.status === "pending" && new Date(invitation.expires_at).getTime() < Date.now()) {
+    return "expired";
+  }
+  return invitation.status;
+}
+
+function renderTeamInvitations() {
+  if (!teamInvitationsSection) return;
+
+  const canManage = currentUserCanManageCurrentTeam();
+  teamInvitationsSection.classList.toggle("hidden", !canManage);
+  if (!canManage) return;
+
+  const invitations = teamsScreenState.currentTeamInvitations;
+  teamInvitationsEmpty.classList.toggle("hidden", invitations.length > 0);
+
+  teamInvitationsList.innerHTML = "";
+  invitations.forEach((invitation) => {
+    const status = effectiveInvitationStatus(invitation);
+    const item = document.createElement("li");
+    item.className = "team-invitation-item";
+
+    const info = document.createElement("div");
+    info.className = "team-invitation-item-info";
+    info.innerHTML = `
+      <strong>${invitation.destination}</strong>
+      <span class="team-invitation-item-meta">${ROLE_LABELS[invitation.role_on_team] || invitation.role_on_team} · ${invitation.destination_type === "phone" ? "Text" : "Email"}</span>
+      <span class="invitation-status-badge invitation-status-${status}">${INVITATION_STATUS_LABELS[status] || status}</span>
+    `;
+
+    item.appendChild(info);
+    teamInvitationsList.appendChild(item);
   });
 }
 
@@ -330,8 +393,14 @@ inviteCloseBtn.addEventListener("click", closeInviteModal);
 inviteDoneBtn.addEventListener("click", async () => {
   closeInviteModal();
   if (teamsScreenState.currentTeamId) {
-    const roster = await apiFetch(`/api/teams/${teamsScreenState.currentTeamId}/members`);
+    const [roster, invitations] = await Promise.all([
+      apiFetch(`/api/teams/${teamsScreenState.currentTeamId}/members`),
+      currentUserCanManageCurrentTeam()
+        ? apiFetch(`/api/teams/${teamsScreenState.currentTeamId}/invitations`)
+        : Promise.resolve(teamsScreenState.currentTeamInvitations),
+    ]);
     teamsScreenState.currentTeamRoster = roster;
+    teamsScreenState.currentTeamInvitations = invitations;
     renderTeamDetail();
   }
 });
