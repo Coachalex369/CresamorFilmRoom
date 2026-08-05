@@ -195,6 +195,50 @@ async function main() {
       `outcome=${retryMissingOutcome.outcome}`
     );
 
+    // Case 8: a 'queued' row that predates the grace period (simulated via
+    // an old created_at) and is under the cap — must be recovered
+    // (re-enqueued), same as a stranded 'converting' row would be. This is
+    // the actual gap this round of changes closes: a video enqueued
+    // in-memory but never picked up before a restart wipes that queue.
+    const oldQueuedSmallKey = `convrecovery-test/${RUN_TAG}-old-queued-small.mov`;
+    fs.writeFileSync(path.join(__dirname, "../../uploads", oldQueuedSmallKey), Buffer.alloc(1024, 1));
+    const oldQueuedSmallInsert = await client.query(
+      `INSERT INTO videos (title, storage_key, uploaded_by, processing_status, source_size_bytes, created_at)
+       VALUES ($1, $2, $3, 'queued', $4, NOW() - INTERVAL '10 minutes') RETURNING id`,
+      [`${RUN_TAG}-old-queued-small`, oldQueuedSmallKey, testUserId, 1024]
+    );
+    createdVideoIds.push(oldQueuedSmallInsert.rows[0].id);
+
+    // Case 9: a 'queued' row that predates the grace period and is OVER
+    // the cap — must be deferred, same as a stranded 'converting' row.
+    const oldQueuedBigInsert = await client.query(
+      `INSERT INTO videos (title, storage_key, uploaded_by, processing_status, source_size_bytes, created_at)
+       VALUES ($1, $2, $3, 'queued', $4, NOW() - INTERVAL '10 minutes') RETURNING id`,
+      [
+        `${RUN_TAG}-old-queued-big`,
+        `convrecovery-test/${RUN_TAG}-old-queued-big.mov`,
+        testUserId,
+        MAX_AUTO_CONVERSION_SIZE_BYTES + 1,
+      ]
+    );
+    createdVideoIds.push(oldQueuedBigInsert.rows[0].id);
+
+    // Case 10: a 'queued' row created just now (well within the grace
+    // period) — must be left completely untouched, since it could
+    // legitimately be a fresh upload racing this exact startup pass, not
+    // an orphan. This is the race the grace period exists to prevent.
+    const freshQueuedInsert = await client.query(
+      `INSERT INTO videos (title, storage_key, uploaded_by, processing_status, source_size_bytes)
+       VALUES ($1, $2, $3, 'queued', $4) RETURNING id`,
+      [
+        `${RUN_TAG}-fresh-queued`,
+        `convrecovery-test/${RUN_TAG}-fresh-queued.mov`,
+        testUserId,
+        1024,
+      ]
+    );
+    createdVideoIds.push(freshQueuedInsert.rows[0].id);
+
     // Deliberately the unguarded inner implementation, not the guarded
     // recoverStrandedConversions() export — see the file header. Case 0
     // above already confirmed the guard itself works; these cases are
@@ -244,6 +288,27 @@ async function main() {
       "pre-existing 'deferred' row is untouched by recovery",
       deferred.processing_status === "deferred",
       `status=${deferred.processing_status}`
+    );
+
+    const oldQueuedSmall = byId[oldQueuedSmallInsert.rows[0].id];
+    assert(
+      "'queued' past grace period, under cap -> recovered (no longer stuck at 'queued')",
+      oldQueuedSmall.processing_status !== "queued",
+      `status=${oldQueuedSmall.processing_status}`
+    );
+
+    const oldQueuedBig = byId[oldQueuedBigInsert.rows[0].id];
+    assert(
+      "'queued' past grace period, over cap -> deferred",
+      oldQueuedBig.processing_status === "deferred",
+      `status=${oldQueuedBig.processing_status}`
+    );
+
+    const freshQueued = byId[freshQueuedInsert.rows[0].id];
+    assert(
+      "'queued' within grace period -> left completely untouched (no race with fresh uploads)",
+      freshQueued.processing_status === "queued" && freshQueued.processing_error === null,
+      `status=${freshQueued.processing_status}`
     );
   } finally {
     if (createdVideoIds.length) {

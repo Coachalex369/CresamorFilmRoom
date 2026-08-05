@@ -239,6 +239,18 @@ function isRecoveryEnvironmentSafe() {
   return process.env.NODE_ENV === "production" && process.env.STORAGE_PROVIDER === "r2";
 }
 
+// A 'queued' row (enqueued in-memory, not yet picked up) is just as
+// orphanable by a restart as a 'converting' one — the in-memory
+// conversionQueue is wiped either way. But unlike 'converting' (which is
+// unconditionally safe to recover — nothing legitimate is ever
+// 'converting' at the exact instant this process boots), a fresh upload
+// on the NEW process can legitimately be 'queued' seconds after startup.
+// Recovering every 'queued' row unconditionally would race a normal
+// upload against this one-time startup pass. The grace period is the
+// guard: only a 'queued' row old enough that it can't plausibly be from
+// this process's own just-started life gets swept up.
+const QUEUED_RECOVERY_GRACE_PERIOD_MS = 90 * 1000;
+
 // Called once at server startup, from inside app.listen()'s success
 // callback (see server.js) — by the time this runs, the HTTP server is
 // already accepting requests, so nothing here can ever delay or block
@@ -250,9 +262,11 @@ function isRecoveryEnvironmentSafe() {
 // already sitting at 'converting' at this exact moment cannot be work
 // this process is doing; it's unconditionally orphaned from a prior
 // process life (a Render redeploy or crash mid-conversion, most likely).
-// Deliberately narrower than the old requeueStuckConversions(): only
-// 'converting' is recovered, never 'deferred' (that's not stranded, it's
-// a deliberate non-error resting state).
+// 'queued' rows are recovered too (see QUEUED_RECOVERY_GRACE_PERIOD_MS
+// above and resolveQueuedRecoveryCandidates below) but only past the
+// grace period, to avoid racing a genuinely fresh upload. Neither case
+// ever touches 'deferred' — that's not stranded, it's a deliberate
+// non-error resting state.
 //
 // Production incident this replaces: the old version blindly re-queued
 // and immediately re-attempted conversion regardless of file size,
@@ -287,27 +301,16 @@ async function recoverStrandedConversions() {
   return performStrandedConversionRecovery();
 }
 
-// The actual recovery logic, split out from the environment guard above
-// so testConversionRecovery.js can exercise the decision logic directly.
-// Application code must always go through the guarded
-// recoverStrandedConversions() export above — never call this one
-// directly outside of tests.
-async function performStrandedConversionRecovery() {
-  let stranded;
-  try {
-    stranded = await client.query(
-      `SELECT id, storage_key, source_size_bytes FROM videos WHERE processing_status = 'converting'`
-    );
-  } catch (error) {
-    console.error("Startup conversion recovery: failed to query stranded videos:", error);
-    return;
-  }
-
+// Shared decision logic for one batch of stranded rows, regardless of
+// which status they were found in — same size check, same three
+// outcomes, used identically for 'converting' and grace-period-eligible
+// 'queued' rows below.
+async function recoverRowBatch(rows) {
   let resumed = 0;
   let deferred = 0;
   let failed = 0;
 
-  for (const row of stranded.rows) {
+  for (const row of rows) {
     try {
       const sizeBytes = await resolveSourceSizeBytes(row);
 
@@ -340,9 +343,61 @@ async function performStrandedConversionRecovery() {
     }
   }
 
+  return { found: rows.length, resumed, deferred, failed };
+}
+
+// The actual recovery logic, split out from the environment guard above
+// so testConversionRecovery.js can exercise the decision logic directly.
+// Application code must always go through the guarded
+// recoverStrandedConversions() export above — never call this one
+// directly outside of tests.
+async function performStrandedConversionRecovery() {
+  let convertingRows = [];
+  try {
+    const result = await client.query(
+      `SELECT id, storage_key, source_size_bytes FROM videos WHERE processing_status = 'converting'`
+    );
+    convertingRows = result.rows;
+  } catch (error) {
+    console.error("Startup conversion recovery: failed to query stranded 'converting' videos:", error);
+  }
+
+  let queuedRows = [];
+  try {
+    // The cutoff is computed entirely server-side (NOW() minus an
+    // interval, both evaluated in Postgres) rather than as a JS Date sent
+    // as a parameter — created_at is 'timestamp without time zone', and a
+    // JS Date round-tripped through node-postgres against a tz-less
+    // column gets reinterpreted using the connecting MACHINE's local
+    // timezone, not UTC. On a dev machine in a non-UTC zone that silently
+    // shifted the comparison by hours and made every row look too fresh
+    // to recover, caught while testing this exact change locally. Doing
+    // the whole comparison in one SQL expression avoids the round-trip
+    // entirely, so it's correct regardless of what timezone any given
+    // machine (dev laptop, Render instance) happens to be configured with.
+    const result = await client.query(
+      `SELECT id, storage_key, source_size_bytes FROM videos
+       WHERE processing_status = 'queued'
+         AND created_at < NOW() - ($1::double precision * INTERVAL '1 millisecond')`,
+      [QUEUED_RECOVERY_GRACE_PERIOD_MS]
+    );
+    queuedRows = result.rows;
+  } catch (error) {
+    console.error("Startup conversion recovery: failed to query stranded 'queued' videos:", error);
+  }
+
+  const convertingSummary = await recoverRowBatch(convertingRows);
+  const queuedSummary = await recoverRowBatch(queuedRows);
+
   console.log(
-    `Startup conversion recovery: found ${stranded.rows.length} orphaned conversion(s) in 'converting'; ` +
-      `resumed ${resumed}, deferred ${deferred} (oversized), failed ${failed} (size unverifiable).`
+    `Startup conversion recovery — 'converting': found ${convertingSummary.found}, ` +
+      `resumed ${convertingSummary.resumed}, deferred ${convertingSummary.deferred} (oversized), ` +
+      `failed ${convertingSummary.failed} (size unverifiable).`
+  );
+  console.log(
+    `Startup conversion recovery — 'queued' older than ${Math.round(QUEUED_RECOVERY_GRACE_PERIOD_MS / 1000)}s: ` +
+      `found ${queuedSummary.found}, resumed ${queuedSummary.resumed}, ` +
+      `deferred ${queuedSummary.deferred} (oversized), failed ${queuedSummary.failed} (size unverifiable).`
   );
 }
 
