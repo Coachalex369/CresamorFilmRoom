@@ -142,6 +142,17 @@ router.get("/api/videos", authenticate, async (req, res) => {
 
 // Foundation Sprint Phase 3: added so clients can poll a single video's
 // processing_status after upload instead of re-fetching the whole list.
+//
+// Diagnostic addition (post-OOM-incident): also reports live_size_bytes —
+// a real storage.getObjectSize() call against the CURRENT storage_key,
+// not a persisted column. Deliberately only on this single-video route,
+// not the list endpoint, since it's one extra HEAD request per call and
+// this route is already the low-frequency, targeted one (unlike the list
+// endpoint, which real clients poll repeatedly). Exists so a video's
+// actual size can be confirmed from the browser (no CORS/CSP issues,
+// since it's the app's own API) without needing direct R2 credentials or
+// shell access to the production instance. Best-effort: null on any
+// failure, never lets a size-check problem break the rest of the response.
 router.get("/api/videos/:id", authenticate, async (req, res) => {
   try {
     const { id } = req.params;
@@ -156,7 +167,19 @@ router.get("/api/videos/:id", authenticate, async (req, res) => {
       return res.status(403).json({ error: "Not authorized to view this video" });
     }
 
-    res.json(await withPlaybackStatus(result.rows[0]));
+    const video = result.rows[0];
+    const withStatus = await withPlaybackStatus(video);
+
+    let live_size_bytes = null;
+    if (video.storage_key) {
+      try {
+        live_size_bytes = await storage.getObjectSize(video.storage_key);
+      } catch (sizeError) {
+        console.error(`GET /api/videos/:id live size check failed for ${id}:`, sizeError.message);
+      }
+    }
+
+    res.json({ ...withStatus, live_size_bytes });
   } catch (err) {
     console.error("GET /api/videos/:id error:", err);
     res.status(500).json({ error: "Failed to fetch video" });
