@@ -416,9 +416,16 @@ recordingLibrary.subscribe(({ lifecycle }) => {
 
 refreshLocalRecordings();
 
-function renderVideoList() {
-  videoList.innerHTML = "";
-
+// Shared by renderVideoList() (what's shown) and loadVideos()/
+// pollVideosQuietly()'s fallback reselection (what's auto-selected on a
+// fresh page load or when nothing else applies) — these used to disagree:
+// the render path already deduped local-vs-server correctly, but the
+// reselection path only ever looked at allVideos (server-only), so a
+// fresh page load (currentVideoId reset to null) could auto-select the
+// not-yet-playable SERVER row for a recording whose LOCAL blob was still
+// the correct, working playback source — exactly the "plays locally,
+// breaks after refresh" bug. Both now derive from this one list.
+function getMergedVideoList() {
   // Once a recording is `processed`, the server row (in allVideos) is what
   // shows — the library still keeps its own copy underneath regardless,
   // it just doesn't need to render twice.
@@ -449,7 +456,13 @@ function renderVideoList() {
   );
   const serverEntries = allVideos.filter((video) => !pendingServerIds.has(Number(video.id)));
 
-  const mergedVideos = [...localEntries, ...serverEntries];
+  return [...localEntries, ...serverEntries];
+}
+
+function renderVideoList() {
+  videoList.innerHTML = "";
+
+  const mergedVideos = getMergedVideoList();
 
   mergedVideos.forEach((video) => {
     const li = document.createElement("li");
@@ -646,14 +659,21 @@ async function loadVideos() {
       // message below already communicates the same thing without blocking.
       videoList.innerHTML = "<li>No videos found.</li>";
     } else {
-      const stillExists = allVideos.find(
-        (video) => Number(video.id) === Number(currentVideoId)
-      );
+      // Real production bug: this used to search allVideos only (server
+      // data), never the local-preferring merged list — so on a fresh
+      // page load (currentVideoId reset to null by the reload itself),
+      // it could auto-select the not-yet-playable SERVER row for a
+      // recording whose LOCAL blob was still the correct, working
+      // playback source. Symptom: a recording plays fine right after
+      // capture, then shows "no longer available" the instant the page
+      // is refreshed — the exact bug this fixes.
+      const merged = getMergedVideoList();
+      const stillExists = merged.find((video) => String(video.id) === String(currentVideoId));
 
       if (stillExists) {
         selectVideo(stillExists);
-      } else if (allVideos[0]) {
-        selectVideo(allVideos[0]);
+      } else if (merged[0]) {
+        selectVideo(merged[0]);
       }
     }
 
@@ -1490,8 +1510,12 @@ async function pollVideosQuietly({ forceRefreshCurrent = false } = {}) {
 
     if (current && notActivelyPlaying && (forceRefreshCurrent || playBtn.disabled || signatureChanged)) {
       selectVideo(current);
-    } else if (!currentVideoId && allVideos[0]) {
-      selectVideo(allVideos[0]);
+    } else if (!currentVideoId) {
+      // Same local-preferring fallback as loadVideos() — see
+      // getMergedVideoList()'s comment for why this can't just use
+      // allVideos[0].
+      const merged = getMergedVideoList();
+      if (merged[0]) selectVideo(merged[0]);
     }
 
     await reconcileSyncedRecordings();
