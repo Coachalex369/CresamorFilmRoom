@@ -350,15 +350,32 @@ async function submitInvite() {
     } else if (destinationType === "email") {
       inviteConfirmationMessage.textContent = `Invitation created — email delivery isn't configured yet, so copy the link below and send it to ${invitation.destination} yourself.`;
       inviteShareSmsBtn.classList.add("hidden");
-    } else {
+    } else if (isMobileLikely) {
       inviteConfirmationMessage.textContent = `Invitation created for ${invitation.destination}. Send it via text or copy the link below.`;
       inviteShareSmsBtn.classList.remove("hidden");
+      inviteShareSmsBtn.disabled = false;
+      inviteShareSmsBtn.title = "";
       inviteShareSmsBtn.onclick = () => {
         window.location.href = buildSmsHref(
           invitation.destination,
           `You've been invited to join ${teamName} as ${roleLabel} on Cresamor Film Room: ${invitation.inviteUrl}`
         );
       };
+    } else {
+      // Desktop/laptop browsers have no sms: protocol handler — clicking
+      // used to silently do nothing, which read as a broken button during
+      // real production testing. isMobileLikely (capture.js's existing
+      // "pointer: coarse" check, already global by this point in the
+      // script load order) is the same heuristic this project already
+      // uses to choose native-camera vs MediaRecorder — reused here
+      // rather than inventing a second detection method. Keep the button
+      // visible but disabled with an explicit reason; Copy Link (always
+      // shown) remains the fallback regardless of device.
+      inviteConfirmationMessage.textContent = `Invitation created for ${invitation.destination}. Text Invite only works on a phone — copy the link below and send it yourself from this device.`;
+      inviteShareSmsBtn.classList.remove("hidden");
+      inviteShareSmsBtn.disabled = true;
+      inviteShareSmsBtn.title = "Text Invite requires a mobile device with SMS support.";
+      inviteShareSmsBtn.onclick = null;
     }
   } catch (error) {
     console.error("Failed to create invitation:", error);

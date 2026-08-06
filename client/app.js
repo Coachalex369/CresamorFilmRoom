@@ -174,10 +174,22 @@ function unavailableReason(video) {
   if (video.playback_state === "preparing_playback") return "Preparing this video for playback…";
   if (video.playback_state === "processing_paused") return "This video needs additional processing — check back soon.";
   if (video.playback_state === "failed") return "Processing failed for this video.";
+  // Defensive fallback: a real object should always have file_url once
+  // playback_state exists (withPlaybackStatus() sets both together). If
+  // this is ever hit, something upstream passed an unshaped/raw object
+  // straight to selectVideo() (the exact bug uploadVideo() used to have) —
+  // treat it as "still preparing," never as silently playable.
+  if (!video.file_url) return "Preparing this video for playback…";
   return null;
 }
 
 function resolveVideoSrc(fileUrl) {
+  // Defensive guard: a malformed/unshaped video object (missing
+  // file_url entirely) must never crash here — see uploadVideo()'s fix
+  // for the real bug this used to hit unguarded (a raw upload response
+  // has file_url: null, and fileUrl.startsWith() on null threw,
+  // silently corrupting the player's state instead of showing anything).
+  if (!fileUrl) return "";
   if (fileUrl.startsWith("http") || fileUrl.startsWith("blob:")) return fileUrl;
   return `${API_URL}${fileUrl}`;
 }
@@ -980,7 +992,22 @@ function uploadVideo(file) {
 
       showMessage("Video uploaded.");
       await loadVideos();
-      selectVideo(data);
+
+      // Real production bug: `data` is the raw POST /api/upload-video
+      // response (INSERT ... RETURNING *) — it was never run through
+      // withPlaybackStatus(), so it has no playback_state/available and
+      // file_url is NULL for every storage_key-based upload. Passing it
+      // straight to selectVideo() used to crash inside resolveVideoSrc()
+      // (fileUrl.startsWith() on null) partway through, after
+      // hideVideoStatusMessage() had already cleared whatever loadVideos()
+      // had JUST correctly shown — leaving the player in a broken,
+      // half-updated state immediately after a successful upload. Look up
+      // the freshly-fetched, correctly-shaped version instead —
+      // loadVideos() just populated allVideos with it.
+      const freshlyUploaded = allVideos.find((video) => Number(video.id) === Number(data.id));
+      if (freshlyUploaded) {
+        selectVideo(freshlyUploaded);
+      }
 
       if (videoUploadInput) {
         videoUploadInput.value = "";
