@@ -6,11 +6,19 @@
   would be written the same way — as its own small file reacting to
   recordingLibrary — not by extending this one.
 
-  Deliberately simple v1: one recording in flight at a time (sideline
-  connections are often poor — don't saturate them), retries triggered by
-  the browser's `online` event and a reconciliation pass on load. No
-  timer-based polling loop, no background-sync worker — those are
-  documented future work in ARCHITECTURE.md, not built here.
+  One recording in flight at a time (sideline connections are often
+  poor — don't saturate them). Retries are triggered by the browser's
+  `online` event, a reconciliation pass on load, AND a periodic timer
+  (see RETRY_CHECK_INTERVAL_MS) — added after a real production case
+  where a recording failed once (a transient network hiccup, not a true
+  offline period) and sat stuck at 'local' forever: browsers are
+  conservative about firing 'online'/'offline' events for a connection
+  that's merely spotty rather than fully disconnected, so a recording
+  that fails without ever triggering a real offline->online transition,
+  on a page the user never reloads, had no remaining path back to the
+  server. The user experience made this invisible too — local playback
+  keeps working fine regardless, so there was no visible sign anything
+  was wrong. The periodic check is the safety net for exactly that gap.
 
   Loaded after recordingLibrary.js, before capture.js.
 */
@@ -240,6 +248,25 @@ async function recordingPipelineReconcile() {
 }
 
 window.addEventListener("online", () => recordingPipelineProcessNext());
+
+// Safety-net retry — see file header. Modest interval (matches this
+// project's other periodic-refresh conventions, e.g. app.js's video
+// poll): a stuck recording waits at most this long for another attempt,
+// instead of indefinitely for an 'online' event that may never fire for
+// a merely-spotty connection, or a page reload the user has no reason to
+// trigger since local playback looks completely normal in the meantime.
+// processNext() itself is a no-op (via the busy guard, and getPendingUpload()
+// returning empty) whenever there's genuinely nothing to retry, so this
+// is safe to leave running continuously — it doesn't hammer anything.
+const RETRY_CHECK_INTERVAL_MS = 20000;
+setInterval(() => {
+  // No point attempting while logged out — every request would just
+  // 401. currentUser is app.js's global, already declared by this point
+  // in the script load order.
+  if (typeof currentUser !== "undefined" && currentUser) {
+    recordingPipelineProcessNext();
+  }
+}, RETRY_CHECK_INTERVAL_MS);
 
 recordingPipelineReconcile();
 

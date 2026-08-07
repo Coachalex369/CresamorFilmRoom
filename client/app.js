@@ -71,6 +71,7 @@ const videoUploadInput = document.querySelector("#video-upload");
 const videoList = document.querySelector("#video-list");
 const videoStatusMessage = document.querySelector("#video-status-message");
 const videoStatusText = document.querySelector("#video-status-text");
+const videoEmptyState = document.querySelector("#video-empty-state");
 
 const highlightTitleInput = document.querySelector("#highlight-title-input");
 const highlightStartBtn = document.querySelector("#highlight-start-btn");
@@ -197,6 +198,11 @@ function resolveVideoSrc(fileUrl) {
 function selectVideo(video) {
   if (!video) return;
 
+  // Any real selection means we're past the pre-selection empty state —
+  // hide it regardless of whether this video turns out playable or not
+  // (an unavailable video still gets its own status message, not this).
+  videoEmptyState.classList.add("hidden");
+
   currentVideoId = video.id;
   lastRenderedVideoSignature = videoSignature(video);
 
@@ -255,6 +261,7 @@ async function deleteLocalRecording(video) {
       if (allVideos.length) {
         selectVideo(allVideos[0]);
       } else {
+        videoEmptyState.classList.remove("hidden");
         renderCurrentVideoHighlights();
       }
     }
@@ -304,6 +311,7 @@ async function deleteVideo(video) {
       if (allVideos.length) {
         selectVideo(allVideos[0]);
       } else {
+        videoEmptyState.classList.remove("hidden");
         renderVideoList();
         renderCurrentVideoHighlights();
       }
@@ -385,6 +393,8 @@ function toLocalVideoLike(record) {
     __recordingId: record.recordingId,
     __lifecycle: record.lifecycle,
     __uploadProgress: record.uploadProgress,
+    __retryCount: record.retryCount || 0,
+    __lastError: record.lastError || null,
   };
 }
 
@@ -505,6 +515,18 @@ function renderVideoList() {
         badge.textContent = `Syncing ${video.__uploadProgress || 0}%`;
       } else if (video.__lifecycle === "synced") {
         badge.textContent = "Synced";
+      } else if (video.__retryCount > 0) {
+        // Real production gap this closes: a recording that failed to
+        // upload (network hiccup, session expiry, etc.) reverts to this
+        // same 'local' lifecycle as a never-yet-attempted recording, so
+        // it looked completely indistinguishable from normal — no visible
+        // sign anything was wrong, since local playback keeps working
+        // fine regardless. The badge now says so, and the title attribute
+        // carries the actual error for diagnosis without needing console
+        // access. Retries continue automatically (see recordingPipeline.js's
+        // periodic check) — this is informational, not an action needed.
+        badge.textContent = `Retrying (${video.__retryCount})`;
+        if (video.__lastError) badge.title = video.__lastError;
       } else {
         badge.textContent = "Local";
       }
@@ -658,6 +680,7 @@ async function loadVideos() {
       // the tab, including for browser automation. The inline empty-state
       // message below already communicates the same thing without blocking.
       videoList.innerHTML = "<li>No videos found.</li>";
+      videoEmptyState.classList.remove("hidden");
     } else {
       // Real production bug: this used to search allVideos only (server
       // data), never the local-preferring merged list — so on a fresh

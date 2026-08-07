@@ -211,7 +211,7 @@
                   <div id="reel-loading-overlay" class="hidden">
                     <div class="loading-content">
                       <div class="loading-spinner"></div>
-                      <p>Loading Match...</p>
+                      <p>Loading Film...</p>
                       <div class="video-progress-track">
                         <div id="reel-loading-progress-fill" class="video-progress-fill"></div>
                       </div>
@@ -286,7 +286,7 @@
                 <div id="video-loading-overlay" class="hidden">
                   <div class="loading-content">
                     <div class="loading-spinner"></div>
-                    <p>Loading Match...</p>
+                    <p>Loading Film...</p>
                     <div class="video-progress-track">
                       <div id="video-loading-progress-fill" class="video-progress-fill"></div>
                     </div>
@@ -299,6 +299,15 @@
                 <!-- VIDEO UNAVAILABLE / CONVERSION-NEEDED MESSAGE -->
                 <div id="video-status-message" class="hidden">
                   <p id="video-status-text"></p>
+                </div>
+
+                <!-- EMPTY STATE: shown before any film has ever been
+                     selected — never a loading spinner with nothing behind
+                     it. Hidden for the rest of the session the first time
+                     selectVideo() runs, and re-shown if the video list ever
+                     becomes genuinely empty again (e.g. every video deleted). -->
+                <div id="video-empty-state">
+                  <p>Select a film to begin watching.</p>
                 </div>
               </div>
 

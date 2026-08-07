@@ -588,6 +588,35 @@ li {
   max-width: 320px;
 }
 
+/* Same fully-opaque-and-higher-z-index approach as #video-status-message
+   above, and for the identical reason: a spurious loadstart (the browser's
+   own default handling of the player's empty <source src="">, or
+   removeAttribute("src") + load() for a blocked video) can re-show the
+   loading spinner underneath regardless of what JS thinks the visible
+   state should be — visually covering it is what actually wins that race,
+   not trying to prevent the event from firing in the first place. */
+#video-empty-state {
+  position: absolute;
+  inset: 0;
+  background: #05060a;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 22;
+  text-align: center;
+  padding: 1rem;
+}
+
+#video-empty-state.hidden {
+  display: none;
+}
+
+#video-empty-state p {
+  color: var(--muted);
+  font-size: 1rem;
+  max-width: 320px;
+}
+
 .loading-content {
   text-align: center;
   color: white;
