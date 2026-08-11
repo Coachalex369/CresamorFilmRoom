@@ -321,6 +321,12 @@
                   accept="video/*"
                 />
 
+                <!-- Non-blocking status for the moment right after the
+                     native file/Photos picker hands control back to the
+                     page — same reasoning as #capture-native-status: never
+                     rely on alert() for feedback in this exact window. -->
+                <p id="manual-upload-status" class="hidden"></p>
+
                 <div id="manual-upload-progress" class="hidden">
                   <p>Uploading...</p>
                   <div class="video-progress-track">
@@ -575,6 +581,15 @@
                 <button id="capture-native-front-btn" type="button">🤳 Front Camera</button>
               </div>
               <input type="file" id="capture-native-input" accept="video/*" capture="environment" class="hidden" />
+
+              <!-- Non-blocking status for the moment right after the native
+                   camera/Photos picker hands control back to the page —
+                   deliberately NOT an alert(): confirmed unreliable on iOS
+                   Safari immediately after an OS-level app-switch back from
+                   the picker (see capture.js). This is the only visible
+                   signal the user gets before the modal advances to Review,
+                   so it must never depend on that timing. -->
+              <p id="capture-native-status" class="hidden"></p>
 
               <div id="capture-desktop-start" class="capture-step-actions hidden">
                 <button id="capture-start-desktop-btn" type="button">Start Camera</button>

@@ -79,6 +79,7 @@ const captureNativeButtons = document.querySelector("#capture-native-buttons");
 const captureNativeBackBtn = document.querySelector("#capture-native-back-btn");
 const captureNativeFrontBtn = document.querySelector("#capture-native-front-btn");
 const captureNativeInput = document.querySelector("#capture-native-input");
+const captureNativeStatus = document.querySelector("#capture-native-status");
 const captureDesktopStart = document.querySelector("#capture-desktop-start");
 const captureStartDesktopBtn = document.querySelector("#capture-start-desktop-btn");
 
@@ -243,23 +244,59 @@ function startCaptureFlow() {
 
 /* ---------- mobile path: native camera via file input capture ---------- */
 
+function setCaptureNativeStatus(text) {
+  if (!captureNativeStatus) return;
+
+  if (text) {
+    captureNativeStatus.textContent = text;
+    captureNativeStatus.classList.remove("hidden");
+  } else {
+    captureNativeStatus.classList.add("hidden");
+    captureNativeStatus.textContent = "";
+  }
+}
+
 captureNativeBackBtn.addEventListener("click", () => {
+  setCaptureNativeStatus(null);
   captureNativeInput.setAttribute("capture", "environment");
   captureNativeInput.click();
 });
 
 captureNativeFrontBtn.addEventListener("click", () => {
+  setCaptureNativeStatus(null);
   captureNativeInput.setAttribute("capture", "user");
   captureNativeInput.click();
 });
 
+// Mobile production bug fix: this used to be `if (!file) return;` with zero
+// user-visible feedback — confirmed as the exact shape of a real report
+// ("select a video, return to the app, nothing visible happens at all").
+// This input also has no `capture`-only enforcement guaranteed across every
+// iOS version — tapping Back/Front Camera can still surface "Photo
+// Library" in the OS picker sheet depending on the device, so a video
+// picked from Photos (not freshly recorded) reaches this exact same
+// handler. Whatever the underlying cause (user backed out of the picker,
+// a genuine WebKit quirk returning an empty FileList, a large iCloud-only
+// video still downloading) the fix is the same: never fail silently.
+// Deliberately NOT alert()/showMessage() — see capture-native-status's
+// own comment in index.html for why a native dialog can't be trusted
+// here, immediately after an OS-level app-switch back from the picker.
 captureNativeInput.addEventListener("change", (event) => {
   const file = event.target.files[0];
-  if (!file) return;
+
+  if (!file) {
+    console.error("Native camera/Photos picker returned no file.");
+    setCaptureNativeStatus("No video was received from the picker. Please try again.");
+    return;
+  }
+
+  console.log(`Native picker file received: size=${file.size} type=${file.type || "(none)"} name=${file.name || "(none)"}`);
+  setCaptureNativeStatus(`Video received (${(file.size / 1024 / 1024).toFixed(1)}MB) — loading preview…`);
 
   capture.blob = file;
   captureReviewVideo.src = URL.createObjectURL(file);
   showCaptureStep("review");
+  setCaptureNativeStatus(null);
 
   captureNativeInput.value = ""; // allow picking the same file again later
 });

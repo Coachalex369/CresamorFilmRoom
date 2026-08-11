@@ -1015,19 +1015,48 @@ async function saveHighlight() {
   }
 }
 
+const manualUploadStatus = document.querySelector("#manual-upload-status");
+
+// Mobile production bug fix: this function's early-return guards used to
+// rely solely on showMessage() (alert()) for feedback. Real-device report:
+// selecting a video from Photos and returning to the app showed nothing
+// visible at all. Native alert() is well-documented as unreliable on iOS
+// Safari specifically in the moment right after an OS-level app-switch
+// back from a picker — exactly this call site. This is a second, non-
+// blocking feedback path that doesn't depend on that timing; showMessage()
+// stays too (still useful once the page has settled), this just guarantees
+// something is visible immediately regardless.
+function setManualUploadStatus(text) {
+  if (!manualUploadStatus) return;
+
+  if (text) {
+    manualUploadStatus.textContent = text;
+    manualUploadStatus.classList.remove("hidden");
+  } else {
+    manualUploadStatus.classList.add("hidden");
+    manualUploadStatus.textContent = "";
+  }
+}
+
 // Sprint 3: converted from fetch to XMLHttpRequest so this manual upload
 // path gets the same real progress/percentage/size/ETA feedback as the
 // capture.js recording flow — fetch() doesn't expose upload progress events.
 function uploadVideo(file) {
   if (!currentUser || currentUser.role !== "coach") {
+    setManualUploadStatus("Only coaches can upload videos.");
     showMessage("Only coaches can upload videos.");
     return;
   }
 
   if (!file) {
+    console.error("uploadVideo() called with no file — picker returned nothing.");
+    setManualUploadStatus("No video was received from the picker. Please try again.");
     showMessage("Please choose a video file.");
     return;
   }
+
+  console.log(`Manual upload file received: size=${file.size} type=${file.type || "(none)"} name=${file.name || "(none)"}`);
+  setManualUploadStatus(`Video received (${(file.size / 1024 / 1024).toFixed(1)}MB) — uploading…`);
 
   const progressSection = document.querySelector("#manual-upload-progress");
   const progressFill = document.querySelector("#manual-upload-progress-fill");
@@ -1049,6 +1078,10 @@ function uploadVideo(file) {
     progressSize.textContent = "";
     progressEta.textContent = "";
   }
+
+  // The progress bar above is now the visible indicator — hand off from
+  // the picker-return status line rather than showing both at once.
+  setManualUploadStatus(null);
 
   const xhr = new XMLHttpRequest();
 

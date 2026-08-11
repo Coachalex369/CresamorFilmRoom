@@ -1496,6 +1496,13 @@ li {
   background: linear-gradient(90deg, var(--gold), var(--gold-soft));
 }
 
+#capture-native-status,
+#manual-upload-status {
+  margin: 0.4rem 0 0;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
 /* Lifecycle badges — Film Room list entries still local/syncing (not yet
    the server's synced-and-processed row). */
 .video-item-badge {
