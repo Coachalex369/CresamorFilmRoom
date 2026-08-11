@@ -46,12 +46,28 @@ const allowedOrigin = process.env.ALLOWED_ORIGIN || DEFAULT_ALLOWED_ORIGIN;
 // the browser was just refusing to paint the image. Widened to match this
 // same config's existing font-src precedent ('self' https: data:), not a
 // new scoping strategy.
+//
+// media-src / R2 video domain (Production Validation Sprint Round 4
+// follow-up): the same class of bug as the blob: fix above, missed because
+// it only shows up for a server-backed video, never a local recording.
+// Every server-backed video (direct-playable OR remuxed — classification
+// doesn't matter) plays from a signed R2 https:// URL, not blob:, so it hit
+// this exact same silent CSP block. Confirmed via the browser's own Network
+// panel: zero requests were ever issued to the R2 domain when a confirmed-
+// playable, confirmed-CORS-correct video was selected — proof the block is
+// client-side (CSP), before any network/CORS behavior is even reached. The
+// R2 CORS bucket policy fixed earlier this sprint was a real, separate,
+// necessary fix — it was just never sufficient on its own, since this CSP
+// directive was blocking the request before CORS ever came into play.
+// Scoped to Cloudflare R2's endpoint domain (matches any account/bucket
+// under it) rather than widening to https: broadly like img-src — video is
+// higher-risk content to leave unscoped.
 app.use(
   helmet({
     contentSecurityPolicy: {
       directives: {
         ...helmet.contentSecurityPolicy.getDefaultDirectives(),
-        "media-src": ["'self'", "blob:"],
+        "media-src": ["'self'", "blob:", "https://*.r2.cloudflarestorage.com"],
         "img-src": ["'self'", "data:", "https:"],
       },
     },
