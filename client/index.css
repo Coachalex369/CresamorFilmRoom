@@ -231,11 +231,24 @@ li {
 .video-item {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 0.4rem;
 }
 
 .video-item .video-item-btn {
   flex: 1;
+}
+
+/* Forces the error line onto its own row below the button/badges —
+   .video-item is a flex row (button + retry/delete buttons side by
+   side); without flex-basis: 100% this would just sit inline next to
+   them instead of reading as a caption underneath. */
+.video-item-error {
+  flex: 1 0 100%;
+  font-size: 0.75rem;
+  /* Matches .video-delete-btn:hover's existing error-red precedent. */
+  color: #e05252;
+  padding-left: 0.2rem;
 }
 
 .video-delete-btn {

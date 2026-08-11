@@ -105,7 +105,7 @@ async function recordingPipelineUpload(recording) {
         // markFailed()/resolve(), not rely on the other listeners below.
         xhr.abort();
         recordingLibrary
-          .markFailed(recording.recordingId, new Error("Upload stalled — no progress, will retry"))
+          .markFailed(recording.recordingId, new Error("Upload timed out — no progress"))
           .finally(() => resolve("stalled"));
       }, UPLOAD_STALL_TIMEOUT_MS);
     }
@@ -160,7 +160,7 @@ async function recordingPipelineUpload(recording) {
           window.logoutLocalState();
         }
 
-        await recordingLibrary.markFailed(recording.recordingId, new Error("Session expired"));
+        await recordingLibrary.markFailed(recording.recordingId, new Error("401 Session expired"));
         resolve("failed");
       } else {
         console.error("Upload failed:", xhr.status, xhr.responseText);
@@ -247,7 +247,42 @@ async function recordingPipelineReconcile() {
   recordingPipelineProcessNext();
 }
 
-window.addEventListener("online", () => recordingPipelineProcessNext());
+// No point attempting while logged out — every request would just 401.
+// currentUser is app.js's global, already declared by this point in the
+// script load order.
+function recordingPipelineRetryIfLoggedIn() {
+  if (typeof currentUser !== "undefined" && currentUser) {
+    recordingPipelineProcessNext();
+  }
+}
+
+window.addEventListener("online", recordingPipelineRetryIfLoggedIn);
+
+// Mobile production bug fix: the 20s periodic timer below is NOT a
+// reliable retry path on a real phone the way it is on a desktop tab.
+// iOS Safari (and most mobile browsers) aggressively throttles or fully
+// suspends setInterval/setTimeout for a backgrounded tab — and a coach
+// recording film is very likely to background the browser within
+// seconds of finishing (locking the phone, switching to text a
+// teammate, opening another app) since local playback already looks
+// completely normal and gives no reason to keep the tab foregrounded.
+// A recording whose very first upload attempt hit a bad connection (a
+// realistic gym/field sideline condition) could then sit for minutes
+// or longer with zero retry attempts actually reaching the network,
+// despite the timer "running." visibilitychange/focus/pageshow catch
+// the moment the user comes back — pageshow specifically covers the
+// iOS bfcache case, where the page is restored from cache on tab
+// switch without re-running this file's top-level script at all, so
+// nothing else here would fire again on its own to catch up. All three
+// route through the same guarded entry point as everywhere else, so a
+// tab that regains focus with nothing pending is still a safe no-op.
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") {
+    recordingPipelineRetryIfLoggedIn();
+  }
+});
+window.addEventListener("focus", recordingPipelineRetryIfLoggedIn);
+window.addEventListener("pageshow", recordingPipelineRetryIfLoggedIn);
 
 // Safety-net retry — see file header. Modest interval (matches this
 // project's other periodic-refresh conventions, e.g. app.js's video
@@ -258,15 +293,12 @@ window.addEventListener("online", () => recordingPipelineProcessNext());
 // processNext() itself is a no-op (via the busy guard, and getPendingUpload()
 // returning empty) whenever there's genuinely nothing to retry, so this
 // is safe to leave running continuously — it doesn't hammer anything.
+// Still worth keeping alongside the visibility/focus triggers above: a
+// tab that stays foregrounded and active (no visibility/focus transition
+// at all) still needs its own path to retry a recording that failed
+// while the user kept watching.
 const RETRY_CHECK_INTERVAL_MS = 20000;
-setInterval(() => {
-  // No point attempting while logged out — every request would just
-  // 401. currentUser is app.js's global, already declared by this point
-  // in the script load order.
-  if (typeof currentUser !== "undefined" && currentUser) {
-    recordingPipelineProcessNext();
-  }
-}, RETRY_CHECK_INTERVAL_MS);
+setInterval(recordingPipelineRetryIfLoggedIn, RETRY_CHECK_INTERVAL_MS);
 
 recordingPipelineReconcile();
 

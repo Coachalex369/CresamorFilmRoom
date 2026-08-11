@@ -169,7 +169,18 @@ function hideVideoStatusMessage() {
 // reason shown here that a video can't be watched; "too large" no longer
 // exists as a user-facing state anywhere in this app.
 function unavailableReason(video) {
-  if (video.__local) return null; // local recordings are always instantly playable via their own blob
+  if (video.__local) {
+    // Defensive: normally a local recording is always instantly playable
+    // via its own blob — but toLocalVideoLike() can produce a null
+    // file_url if URL.createObjectURL() failed for this device's stored
+    // Blob (see its own comment). That must show a clear, specific
+    // reason, not fall through to a black player or the generic
+    // server-video message below.
+    if (!video.file_url) {
+      return "This recording's local copy could not be loaded — try re-recording.";
+    }
+    return null;
+  }
   if (video.available === false) return "This video file is no longer available.";
   if (video.playback_state === "uploading") return "This video is still uploading.";
   if (video.playback_state === "preparing_playback") return "Preparing this video for playback…";
@@ -369,11 +380,28 @@ async function retryVideoConversion(video) {
 let localRecordings = [];
 const localBlobUrlCache = new Map();
 
+// Defensive: URL.createObjectURL() can throw for a Blob that survived
+// IndexedDB's structured-clone round trip but is genuinely unusable (seen
+// on some mobile browsers under storage/memory pressure — the exact class
+// of bug flagged by the refresh-persistence report). Before this, that
+// exception propagated out of toLocalVideoLike() → the .map() call in
+// getMergedVideoList() → crashing the ENTIRE video list render, not just
+// this one recording, which is a far worse failure mode than one card
+// showing "unavailable." Returns null on failure so the caller can
+// exclude just that recording instead.
 function getLocalBlobUrl(record) {
-  if (!localBlobUrlCache.has(record.recordingId)) {
-    localBlobUrlCache.set(record.recordingId, URL.createObjectURL(record.blob));
+  if (localBlobUrlCache.has(record.recordingId)) {
+    return localBlobUrlCache.get(record.recordingId);
   }
-  return localBlobUrlCache.get(record.recordingId);
+
+  try {
+    const url = URL.createObjectURL(record.blob);
+    localBlobUrlCache.set(record.recordingId, url);
+    return url;
+  } catch (error) {
+    console.error("Failed to create local blob URL for recording:", record.recordingId, error);
+    return null;
+  }
 }
 
 function revokeLocalBlobUrl(recordingId) {
@@ -383,11 +411,17 @@ function revokeLocalBlobUrl(recordingId) {
 }
 
 function toLocalVideoLike(record) {
+  const blobUrl = getLocalBlobUrl(record);
+
   return {
     id: `local-${record.recordingId}`,
     title: record.title,
-    file_url: getLocalBlobUrl(record),
+    file_url: blobUrl,
     uploaded_by: record.uploadedBy,
+    // available/__local stay tied to "is this device's own recording",
+    // not to whether the blob happened to read back cleanly this time —
+    // unavailableReason() below is what actually decides playability
+    // from file_url, so this doesn't need a second, conflicting signal.
     available: true,
     __local: true,
     __recordingId: record.recordingId,
@@ -499,8 +533,11 @@ function renderVideoList() {
         processing_paused: "processing",
         failed: "failed",
       };
-      const shortLabel =
-        video.available === false ? "unavailable" : shortLabels[video.playback_state] || "preparing";
+      const shortLabel = video.__local
+        ? "unavailable"
+        : video.available === false
+          ? "unavailable"
+          : shortLabels[video.playback_state] || "preparing";
       button.textContent = `${video.title} (${shortLabel})`;
     } else {
       button.textContent = video.title;
@@ -521,12 +558,10 @@ function renderVideoList() {
         // same 'local' lifecycle as a never-yet-attempted recording, so
         // it looked completely indistinguishable from normal — no visible
         // sign anything was wrong, since local playback keeps working
-        // fine regardless. The badge now says so, and the title attribute
-        // carries the actual error for diagnosis without needing console
-        // access. Retries continue automatically (see recordingPipeline.js's
-        // periodic check) — this is informational, not an action needed.
+        // fine regardless. Retries continue automatically (see
+        // recordingPipeline.js's periodic/visibility-triggered retries) —
+        // this is informational, not an action needed.
         badge.textContent = `Retrying (${video.__retryCount})`;
-        if (video.__lastError) badge.title = video.__lastError;
       } else {
         badge.textContent = "Local";
       }
@@ -559,6 +594,20 @@ function renderVideoList() {
     });
 
     li.appendChild(button);
+
+    // Mobile production bug fix: this used to be a `title` tooltip on the
+    // retry badge — invisible on a phone, since touch has no hover and
+    // long-press doesn't reliably surface a native title tooltip either
+    // (confirmed: long-pressing the badge on a real phone revealed
+    // nothing). The actual error is real diagnostic info a beta tester
+    // needs to see without DevTools, so it's now a plain visible line
+    // under the title/badge instead of anything requiring a pointer.
+    if (video.__local && video.__retryCount > 0 && video.__lastError) {
+      const errorLine = document.createElement("div");
+      errorLine.className = "video-item-error";
+      errorLine.textContent = video.__lastError;
+      li.appendChild(errorLine);
+    }
 
     if (canDeleteVideoClientSide(video)) {
       // Play-First Pipeline: lets a coach self-serve a failed or paused
