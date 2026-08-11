@@ -95,4 +95,32 @@ app.use(require("./routes/conversations"));
 app.use(require("./routes/teams"));
 app.use(require("./routes/invitations"));
 
+// Mobile Recording Upload sprint: real bug found via direct reproduction —
+// videos.js/profile.js's multer fileFilter rejects a bad MIME type via
+// `cb(new Error(...))`, which multer forwards with next(err). That skips
+// the route handler's own try/catch entirely (fileFilter runs as
+// middleware BEFORE the handler body), and with no error-handling
+// middleware registered, Express's built-in default handler took over —
+// a raw HTML "Internal Server Error" page, not JSON. A client parsing the
+// response as JSON (or a person just reading the status) got nothing
+// useful; confirmed by reproducing a real upload with an
+// application/octet-stream video part end to end.
+// This also silently covered multer's own file-size-limit rejection
+// (MulterError with code LIMIT_FILE_SIZE) — same broken path, never
+// exercised in prior testing since fixtures were always small.
+// Express recognizes this as error-handling middleware specifically
+// because it declares all 4 parameters — must stay last.
+app.use((err, req, res, next) => {
+  if (err.name === "MulterError" && err.code === "LIMIT_FILE_SIZE") {
+    return res.status(400).json({ error: "File is too large." });
+  }
+
+  if (err.message && err.message.startsWith("Unsupported")) {
+    return res.status(400).json({ error: err.message });
+  }
+
+  console.error("Unhandled error:", err);
+  res.status(500).json({ error: "Something went wrong. Please try again." });
+});
+
 module.exports = app;
