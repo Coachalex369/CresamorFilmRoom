@@ -119,6 +119,19 @@ app.use((err, req, res, next) => {
     return res.status(400).json({ error: err.message });
   }
 
+  // TEMPORARY diagnostic, scoped to this one route (native-recording 500
+  // investigation): reaching this handler for /api/upload-video means the
+  // error occurred in middleware BEFORE the route handler body ever ran
+  // (authenticate/uploadLimiter/multer) — the route's own try/catch would
+  // have responded with a different message ("Failed to upload video")
+  // and never reached here. Logging the error's identity explicitly so
+  // it's easy to grep for. Remove once root-caused.
+  if (req.path === "/api/upload-video") {
+    console.error(
+      `[UPLOAD DIAGNOSTIC] pre-route-handler failure: name=${err.name} code=${err.code || "(none)"} message=${err.message}`
+    );
+  }
+
   console.error("Unhandled error:", err);
   res.status(500).json({ error: "Something went wrong. Please try again." });
 });

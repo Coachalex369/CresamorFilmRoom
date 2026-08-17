@@ -233,7 +233,30 @@ router.post("/api/videos", authenticate, async (req, res) => {
   }
 });
 
-router.post("/api/upload-video", authenticate, uploadLimiter, upload.single("video"), async (req, res) => {
+// TEMPORARY diagnostic wrapper (native-recording HTTP 500 investigation):
+// multer/busboy is itself a middleware — a multipart parsing failure
+// (e.g. "Unexpected end of form") calls next(err) and skips the route
+// handler function below ENTIRELY, so logging placed only inside that
+// function can never see this failure mode. This brackets multer's own
+// processing so we know it was reached, and what specifically failed,
+// even when the route handler never runs at all. Never logs file bytes,
+// tokens, or request bodies — only the error's own name/code/message.
+// Remove once the native-recording 500 is root-caused.
+function uploadDiagnosticMulter(req, res, next) {
+  console.log("[UPLOAD DIAGNOSTIC] multer started");
+  upload.single("video")(req, res, (err) => {
+    if (err) {
+      console.error(
+        `[UPLOAD DIAGNOSTIC] multer failed: name=${err.name} code=${err.code || "(none)"} message=${err.message}`
+      );
+    } else {
+      console.log("[UPLOAD DIAGNOSTIC] multer completed successfully");
+    }
+    next(err);
+  });
+}
+
+router.post("/api/upload-video", authenticate, uploadLimiter, uploadDiagnosticMulter, async (req, res) => {
   try {
     const { title, team_id, film_type } = req.body;
 
@@ -244,6 +267,13 @@ router.post("/api/upload-video", authenticate, uploadLimiter, upload.single("vid
     if (!title) {
       return res.status(400).json({ error: "Missing required upload fields" });
     }
+
+    // TEMPORARY diagnostic (native-recording 500 investigation): only
+    // req.file's own safe metadata fields — never file bytes, never
+    // req.body values, never tokens.
+    console.log(
+      `[UPLOAD DIAGNOSTIC] req.file: fieldname=${req.file.fieldname} originalname=${req.file.originalname} mimetype=${req.file.mimetype} size=${req.file.size}`
+    );
 
     // Beta Readiness Sprint 1: new uploads always go through the storage
     // abstraction (storage_key set, file_url left NULL) — local disk or
@@ -260,7 +290,10 @@ router.post("/api/upload-video", authenticate, uploadLimiter, upload.single("vid
     const year = new Date().getFullYear();
     const teamSegment = team_id || "unassigned";
     const storageKey = `videos/${teamSegment}/${year}/${crypto.randomUUID()}${extension}`;
+
+    console.log("[UPLOAD DIAGNOSTIC] storage/R2 upload started");
     await storage.upload(storageKey, req.file.path, req.file.mimetype, { category: "video" });
+    console.log("[UPLOAD DIAGNOSTIC] storage/R2 upload completed");
 
     // Foundation Sprint Phase 1: team_id/film_type are now real columns —
     // capture.js sends them directly instead of Sprint 1's workaround of
@@ -271,6 +304,7 @@ router.post("/api/upload-video", authenticate, uploadLimiter, upload.single("vid
     // recoverStrandedConversions()) — multer already has it on req.file,
     // same as the deferred-cap decision just below, so it's stored for
     // free here rather than recomputed later.
+    console.log("[UPLOAD DIAGNOSTIC] DB insert started");
     const inserted = await client.query(
       `
       INSERT INTO videos (title, storage_key, uploaded_by, processing_status, team_id, film_type, source_size_bytes)
@@ -279,6 +313,7 @@ router.post("/api/upload-video", authenticate, uploadLimiter, upload.single("vid
       `,
       [title, storageKey, req.user.id, team_id || null, film_type || null, req.file.size]
     );
+    console.log(`[UPLOAD DIAGNOSTIC] DB insert completed: video id=${inserted.rows[0].id}`);
 
     // Foundation Sprint Phase 3: this route now only receives the upload —
     // it responds immediately instead of blocking on processing. The
@@ -290,10 +325,15 @@ router.post("/api/upload-video", authenticate, uploadLimiter, upload.single("vid
     // Play-First Pipeline: every upload goes through classification now —
     // size plays no part in this decision. See classifyAndRoute() in
     // videoProcessing.js for the playable/remux/transcode_needed routing.
+    console.log("[UPLOAD DIAGNOSTIC] processing/classification enqueue started");
     classifyAndRouteAsync(inserted.rows[0]);
 
+    console.log("[UPLOAD DIAGNOSTIC] response 201 sent");
     res.status(201).json(inserted.rows[0]);
   } catch (err) {
+    console.error(
+      `[UPLOAD DIAGNOSTIC] route handler caught: name=${err.name} code=${err.code || "(none)"} message=${err.message}`
+    );
     console.error("POST /api/upload-video error:", err);
     res.status(500).json({ error: "Failed to upload video" });
   }
