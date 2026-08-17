@@ -1592,6 +1592,44 @@ if (videoUploadInput) {
   });
 }
 
+// Diagnostic-only (Photos Picker No Queue investigation): observe whether
+// videoUploadInput.files is populated when the page regains focus after
+// the OS Photos picker, even on attempts where "video-upload CHANGE
+// fired" never appeared. Deliberately does NOT call uploadVideo() — this
+// measures one specific question (file present with no change dispatched,
+// vs. genuinely empty) before committing to a focus/pageshow recovery
+// fix. sinceOpen is purely informational (helps tell a real picker return
+// apart from incidental app-switching in the panel transcript) — never
+// used to gate or suppress logging, so this can't silently miss the
+// return it's trying to observe.
+let lastManualPickerOpenAt = null;
+
+if (videoUploadInput) {
+  videoUploadInput.addEventListener("click", () => {
+    lastManualPickerOpenAt = Date.now();
+  });
+}
+
+function logManualPickerReturnFiles(source) {
+  const files = videoUploadInput ? videoUploadInput.files : null;
+  const count = files ? files.length : 0;
+  const file = files && files[0];
+  const sinceOpen = lastManualPickerOpenAt ? `${Date.now() - lastManualPickerOpenAt}ms` : "n/a";
+
+  debugLog(
+    `MANUAL PICKER RETURN ${source} files=${count} sinceOpen=${sinceOpen}`,
+    file ? `name=${file.name} size=${file.size} lastModified=${file.lastModified}` : ""
+  );
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") {
+    logManualPickerReturnFiles("visibilitychange");
+  }
+});
+window.addEventListener("focus", () => logManualPickerReturnFiles("focus"));
+window.addEventListener("pageshow", () => logManualPickerReturnFiles("pageshow"));
+
 /* ---------- TAB NAVIGATION ---------- */
 
 const tabButtons = document.querySelectorAll(".tab-btn");
