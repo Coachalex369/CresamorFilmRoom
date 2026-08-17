@@ -60,7 +60,8 @@ async function recordingPipelineUpload(recording) {
 
   await recordingLibrary.markUploading(recording.recordingId);
 
-  const pointBBytes = (await recording.blob.arrayBuffer()).byteLength;
+  const pointBBuffer = await recording.blob.arrayBuffer();
+  const pointBBytes = pointBBuffer.byteLength;
   debugLog(
     "POINT B (post-IndexedDB):",
     `reportedSize=${recording.blob.size}`,
@@ -69,10 +70,28 @@ async function recordingPipelineUpload(recording) {
     `name=${recording.blob.name || "(none)"}`
   );
 
+  // EXPERIMENT (native-recording 500 investigation): upload a brand-new,
+  // JS-memory-backed Blob built from the bytes Point B already read,
+  // instead of handing XHR the original recording.blob — a reference into
+  // IndexedDB's own Blob backing store, suspected of failing under XHR's
+  // STREAMING read even though it survives the one-shot bulk read Point
+  // A/B already prove succeeds. Reuses pointBBuffer rather than reading a
+  // third time. Does not touch recordingLibrary/IndexedDB storage itself —
+  // only what this one upload attempt sends. Controlled experiment, not a
+  // committed fix — remove alongside the rest of this investigation's
+  // diagnostics once resolved.
+  const uploadBlobType = recording.blob.type || recording.mimeType || "video/quicktime";
+  const uploadBlob = new Blob([pointBBuffer], { type: uploadBlobType });
+  debugLog(
+    "EXPERIMENT rebuilt upload Blob:",
+    `originalType=${recording.blob.type || "(none)"} originalSize=${recording.blob.size}`,
+    `rebuiltType=${uploadBlob.type} rebuiltSize=${uploadBlob.size}`
+  );
+
   return new Promise((resolve) => {
     const formData = new FormData();
 
-    formData.append("video", recording.blob, recordingPipelineUploadFilename(recording));
+    formData.append("video", uploadBlob, recordingPipelineUploadFilename(recording));
     formData.append("title", recording.title);
 
     if (recording.teamId) {
