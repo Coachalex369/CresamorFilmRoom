@@ -633,6 +633,15 @@ async function syncRecording() {
   try {
     saveRecordingContext(capture.team);
 
+    const pointABytes = (await capture.blob.arrayBuffer()).byteLength;
+    debugLog(
+      "POINT A (pre-IndexedDB):",
+      `reportedSize=${capture.blob.size}`,
+      `actualBytes=${pointABytes}`,
+      `type=${capture.blob.type || "(none)"}`,
+      `name=${capture.blob.name || "(none)"}`
+    );
+
     debugLog("syncRecording() calling recordingLibrary.create()");
     const record = await recordingLibrary.create({
       blob: capture.blob,

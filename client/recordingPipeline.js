@@ -60,6 +60,15 @@ async function recordingPipelineUpload(recording) {
 
   await recordingLibrary.markUploading(recording.recordingId);
 
+  const pointBBytes = (await recording.blob.arrayBuffer()).byteLength;
+  debugLog(
+    "POINT B (post-IndexedDB):",
+    `reportedSize=${recording.blob.size}`,
+    `actualBytes=${pointBBytes}`,
+    `type=${recording.blob.type || "(none)"}`,
+    `name=${recording.blob.name || "(none)"}`
+  );
+
   return new Promise((resolve) => {
     const formData = new FormData();
 
