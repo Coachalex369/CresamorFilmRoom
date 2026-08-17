@@ -1750,6 +1750,81 @@ body.app-active #reset-password-screen {
   margin-bottom: 0.3rem;
 }
 
+/* Temporary mobile debug panel — see index.html for why this exists.
+   Fixed, high z-index so it sits above everything including fullscreen
+   video; toggle button stays a small out-of-the-way tap target until
+   opened. Remove this block along with the panel markup once removed. */
+#debug-toggle-btn {
+  position: fixed;
+  right: 0.75rem;
+  bottom: 0.75rem;
+  z-index: 9999;
+  width: 2.25rem;
+  height: 2.25rem;
+  border-radius: 50%;
+  border: none;
+  background: var(--gold, #d4af37);
+  color: #000;
+  font-size: 1.1rem;
+  line-height: 1;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+
+#debug-panel {
+  position: fixed;
+  left: 0.5rem;
+  right: 0.5rem;
+  bottom: 3.25rem;
+  z-index: 9999;
+  max-height: 45vh;
+  display: flex;
+  flex-direction: column;
+  background: #111;
+  border: 1px solid #444;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+#debug-panel.hidden {
+  display: none;
+}
+
+#debug-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.6rem;
+  background: #1c1c1c;
+  color: #eee;
+  font-size: 0.8rem;
+}
+
+#debug-panel-header span {
+  flex: 1;
+}
+
+#debug-panel-header button {
+  background: none;
+  border: 1px solid #555;
+  color: #eee;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  padding: 0.2rem 0.5rem;
+}
+
+#debug-log-output {
+  flex: 1;
+  min-height: 8rem;
+  resize: none;
+  border: none;
+  background: #0a0a0a;
+  color: #7fffa0;
+  font-family: monospace;
+  font-size: 0.72rem;
+  padding: 0.5rem;
+  white-space: pre-wrap;
+}
+
 @media (max-width: 600px) {
   #create-team-modal-inner,
   #invite-modal-inner {

@@ -52,6 +52,12 @@ function recordingPipelineUploadFilename(recording) {
 // actually gives a second queued recording its turn; a fast/generic
 // failure must not be retried instantly.
 async function recordingPipelineUpload(recording) {
+  debugLog(
+    `recordingPipelineUpload() starting: recordingId=${recording.recordingId}`,
+    `blobSize=${recording.blob?.size} blobType=${recording.blob?.type || "(none)"}`,
+    `filename=${recordingPipelineUploadFilename(recording)}`
+  );
+
   await recordingLibrary.markUploading(recording.recordingId);
 
   return new Promise((resolve) => {
@@ -95,6 +101,7 @@ async function recordingPipelineUpload(recording) {
         if (settled) return;
         settled = true;
 
+        debugLog(`recordingPipelineUpload() stalled (no progress for ${UPLOAD_STALL_TIMEOUT_MS / 1000}s), aborting recordingId=${recording.recordingId}`);
         console.error(
           `Upload stalled (no progress for ${UPLOAD_STALL_TIMEOUT_MS / 1000}s), aborting:`,
           recording.recordingId
@@ -110,7 +117,14 @@ async function recordingPipelineUpload(recording) {
       }, UPLOAD_STALL_TIMEOUT_MS);
     }
 
+    let debugLoggedFirstProgress = false;
+
     xhr.upload.addEventListener("progress", (event) => {
+      if (!debugLoggedFirstProgress) {
+        debugLoggedFirstProgress = true;
+        debugLog(`recordingPipelineUpload() first progress event: loaded=${event.loaded} total=${event.total}`);
+      }
+
       // Real progress is exactly what distinguishes "stalled" from
       // "slow but genuinely moving" — reset the clock, don't just cancel
       // it, so a large file on a slow-but-working connection is never
@@ -123,6 +137,8 @@ async function recordingPipelineUpload(recording) {
     });
 
     xhr.addEventListener("load", async () => {
+      debugLog(`recordingPipelineUpload() xhr load: status=${xhr.status} body=${(xhr.responseText || "").slice(0, 300)}`);
+
       if (settled) return;
       settled = true;
       clearStallTimer();
@@ -173,6 +189,8 @@ async function recordingPipelineUpload(recording) {
     });
 
     xhr.addEventListener("error", async () => {
+      debugLog("recordingPipelineUpload() xhr error event (network-level failure, no HTTP status)");
+
       if (settled) return;
       settled = true;
       clearStallTimer();
@@ -183,6 +201,7 @@ async function recordingPipelineUpload(recording) {
     });
 
     armStallTimer(); // start the clock before send() — covers "never starts at all" too
+    debugLog(`recordingPipelineUpload() sending XHR for recordingId=${recording.recordingId}`);
     xhr.send(formData);
   });
 }
@@ -196,7 +215,10 @@ async function recordingPipelineProcessNext() {
   // and both start uploading the same recording concurrently. Setting the
   // flag synchronously, before any await, closes that window — the guard
   // and the flag-set are now one atomic step.
-  if (recordingPipelineBusy) return;
+  if (recordingPipelineBusy) {
+    debugLog("recordingPipelineProcessNext() skipped: already busy");
+    return;
+  }
   recordingPipelineBusy = true;
 
   let outcome = "no-op";
@@ -204,9 +226,14 @@ async function recordingPipelineProcessNext() {
   try {
     const pending = await recordingLibrary.getPendingUpload();
     const next = pending[0];
-    if (!next) return;
+    if (!next) {
+      debugLog("recordingPipelineProcessNext() found nothing pending");
+      return;
+    }
 
+    debugLog(`recordingPipelineProcessNext() starting upload for recordingId=${next.recordingId}`);
     outcome = await recordingPipelineUpload(next); // "success" | "stalled" | "failed"
+    debugLog(`recordingPipelineProcessNext() outcome=${outcome} for recordingId=${next.recordingId}`);
   } finally {
     recordingPipelineBusy = false;
   }

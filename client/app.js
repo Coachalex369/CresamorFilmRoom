@@ -73,6 +73,61 @@ const videoStatusMessage = document.querySelector("#video-status-message");
 const videoStatusText = document.querySelector("#video-status-text");
 const videoEmptyState = document.querySelector("#video-empty-state");
 
+// Temporary mobile debug panel (see index.html) — a global every later
+// script (recordingPipeline.js, capture.js) can call to surface what's
+// happening directly on a phone's screen, since Chrome iOS can't be
+// remotely inspected via Mac Safari's Develop menu the way Safari iOS can.
+// Safe to call even before the panel elements exist/if they're ever
+// removed — falls back to console.log only. Remove alongside the panel
+// markup/CSS once the mobile upload bugs are root-caused.
+const debugPanel = document.querySelector("#debug-panel");
+const debugLogOutput = document.querySelector("#debug-log-output");
+const debugToggleBtn = document.querySelector("#debug-toggle-btn");
+const debugClearBtn = document.querySelector("#debug-clear-btn");
+const debugCloseBtn = document.querySelector("#debug-close-btn");
+const DEBUG_LOG_MAX_LINES = 300;
+
+function debugLog(...args) {
+  const stamp = new Date().toISOString().split("T")[1].replace("Z", "");
+  const line = `[${stamp}] ${args
+    .map((a) => (typeof a === "object" && a !== null ? JSON.stringify(a) : String(a)))
+    .join(" ")}`;
+
+  console.log(line);
+
+  if (!debugLogOutput) return;
+
+  debugLogOutput.value += line + "\n";
+  const lines = debugLogOutput.value.split("\n");
+  if (lines.length > DEBUG_LOG_MAX_LINES) {
+    debugLogOutput.value = lines.slice(-DEBUG_LOG_MAX_LINES).join("\n");
+  }
+  debugLogOutput.scrollTop = debugLogOutput.scrollHeight;
+}
+
+if (debugToggleBtn && debugPanel) {
+  debugToggleBtn.addEventListener("click", () => debugPanel.classList.remove("hidden"));
+}
+if (debugCloseBtn && debugPanel) {
+  debugCloseBtn.addEventListener("click", () => debugPanel.classList.add("hidden"));
+}
+if (debugClearBtn && debugLogOutput) {
+  debugClearBtn.addEventListener("click", () => {
+    debugLogOutput.value = "";
+  });
+}
+
+// Catches a silent synchronous throw or rejected promise anywhere in the
+// app (uploadVideo(), capture.js, recordingPipeline.js, ...) without
+// needing a try/catch in every function — same diagnostic goal, but one
+// addition instead of restructuring existing code around it.
+window.addEventListener("error", (event) => {
+  debugLog("window error:", event.message, `at ${event.filename}:${event.lineno}`);
+});
+window.addEventListener("unhandledrejection", (event) => {
+  debugLog("unhandled promise rejection:", event.reason?.message || event.reason);
+});
+
 const highlightTitleInput = document.querySelector("#highlight-title-input");
 const highlightStartBtn = document.querySelector("#highlight-start-btn");
 const highlightEndBtn = document.querySelector("#highlight-end-btn");
@@ -1042,13 +1097,17 @@ function setManualUploadStatus(text) {
 // path gets the same real progress/percentage/size/ETA feedback as the
 // capture.js recording flow — fetch() doesn't expose upload progress events.
 function uploadVideo(file) {
+  debugLog(`uploadVideo() called, file=${file ? "present" : "MISSING"}`);
+
   if (!currentUser || currentUser.role !== "coach") {
+    debugLog("uploadVideo() blocked: role is", currentUser ? currentUser.role : "(logged out)");
     setManualUploadStatus("Only coaches can upload videos.");
     showMessage("Only coaches can upload videos.");
     return;
   }
 
   if (!file) {
+    debugLog("uploadVideo() got no file — picker returned an empty FileList.");
     console.error("uploadVideo() called with no file — picker returned nothing.");
     setManualUploadStatus("No video was received from the picker. Please try again.");
     showMessage("Please choose a video file.");
@@ -1056,6 +1115,7 @@ function uploadVideo(file) {
   }
 
   console.log(`Manual upload file received: size=${file.size} type=${file.type || "(none)"} name=${file.name || "(none)"}`);
+  debugLog(`Manual upload file received: size=${file.size} type=${file.type || "(none)"} name=${file.name || "(none)"}`);
   setManualUploadStatus(`Video received (${(file.size / 1024 / 1024).toFixed(1)}MB) — uploading…`);
 
   const progressSection = document.querySelector("#manual-upload-progress");
@@ -1091,7 +1151,14 @@ function uploadVideo(file) {
     xhr.setRequestHeader("Authorization", `Bearer ${authToken}`);
   }
 
+  let debugLoggedFirstProgress = false;
+
   xhr.upload.addEventListener("progress", (event) => {
+    if (!debugLoggedFirstProgress) {
+      debugLoggedFirstProgress = true;
+      debugLog(`uploadVideo() first progress event: loaded=${event.loaded} total=${event.total}`);
+    }
+
     if (!event.lengthComputable || !progressSection) return;
 
     const percent = Math.round((event.loaded / event.total) * 100);
@@ -1110,6 +1177,8 @@ function uploadVideo(file) {
   });
 
   xhr.addEventListener("load", async () => {
+    debugLog(`uploadVideo() xhr load: status=${xhr.status} body=${(xhr.responseText || "").slice(0, 300)}`);
+
     if (progressSection) progressSection.classList.add("hidden");
 
     if (xhr.status >= 200 && xhr.status < 300) {
@@ -1152,11 +1221,13 @@ function uploadVideo(file) {
   });
 
   xhr.addEventListener("error", () => {
+    debugLog("uploadVideo() xhr error event (network-level failure, no HTTP status)");
     if (progressSection) progressSection.classList.add("hidden");
     console.error("Upload failed: network error");
     showMessage("Could not upload video.");
   });
 
+  debugLog("uploadVideo() sending XHR to /api/upload-video");
   xhr.send(formData);
 }
 
@@ -1511,6 +1582,11 @@ if (drawCanvas) {
 
 if (videoUploadInput) {
   videoUploadInput.addEventListener("change", (event) => {
+    // First breadcrumb in the picker->upload chain — if this never appears
+    // in the debug panel, the change event itself never fired (the picker
+    // handed control back without dispatching it), which is a different
+    // bug than anything inside uploadVideo() below.
+    debugLog("video-upload CHANGE fired", `files=${event.target.files?.length ?? 0}`);
     const file = event.target.files[0];
     uploadVideo(file);
   });

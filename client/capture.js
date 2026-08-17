@@ -282,15 +282,19 @@ captureNativeFrontBtn.addEventListener("click", () => {
 // own comment in index.html for why a native dialog can't be trusted
 // here, immediately after an OS-level app-switch back from the picker.
 captureNativeInput.addEventListener("change", (event) => {
+  debugLog("capture-native-input CHANGE fired", `files=${event.target.files?.length ?? 0}`);
+
   const file = event.target.files[0];
 
   if (!file) {
+    debugLog("capture-native-input got no file — picker returned an empty FileList.");
     console.error("Native camera/Photos picker returned no file.");
     setCaptureNativeStatus("No video was received from the picker. Please try again.");
     return;
   }
 
   console.log(`Native picker file received: size=${file.size} type=${file.type || "(none)"} name=${file.name || "(none)"}`);
+  debugLog(`Native picker file received: size=${file.size} type=${file.type || "(none)"} name=${file.name || "(none)"}`);
   setCaptureNativeStatus(`Video received (${(file.size / 1024 / 1024).toFixed(1)}MB) — loading preview…`);
 
   capture.blob = file;
@@ -608,6 +612,8 @@ function renderRecordingStatus(record) {
 // Video buttons and updates itself via recordingLibrary.subscribe() as the
 // sync progresses in the background.
 async function syncRecording() {
+  debugLog(`syncRecording() called, blob=${capture.blob ? "present" : "MISSING"}`);
+
   if (!capture.blob) return;
 
   // Re-entrancy guard — the fix for the confirmed "one recording becomes
@@ -617,13 +623,17 @@ async function syncRecording() {
   // with the same blob. Set synchronously, before any await, so a second
   // call arriving before the first even finishes creating its IndexedDB
   // record still sees this as true and bails immediately.
-  if (syncInProgress) return;
+  if (syncInProgress) {
+    debugLog("syncRecording() bailed: already in progress (re-entrancy guard)");
+    return;
+  }
   syncInProgress = true;
   setTeamConfirmationControlsDisabled(true);
 
   try {
     saveRecordingContext(capture.team);
 
+    debugLog("syncRecording() calling recordingLibrary.create()");
     const record = await recordingLibrary.create({
       blob: capture.blob,
       title: buildRecordingTitle(),
@@ -631,6 +641,7 @@ async function syncRecording() {
       uploadedBy: currentUser.id,
     });
 
+    debugLog(`syncRecording() got recordingId=${record.recordingId}, lifecycle=${record.lifecycle}`);
     capture.recordingId = record.recordingId;
 
     if (captureReviewActions) captureReviewActions.classList.add("hidden");
@@ -642,6 +653,7 @@ async function syncRecording() {
     });
 
     showCaptureStep("review");
+    debugLog(`syncRecording() enqueuing recordingId=${record.recordingId} to recordingPipeline`);
     recordingPipeline.enqueue(record.recordingId);
 
     // Success terminal path: intentionally NOT resetting syncInProgress
@@ -650,6 +662,7 @@ async function syncRecording() {
     // creating a second recording from the same blob — teardownCapture()
     // (a genuinely new capture session) is the real release point.
   } catch (error) {
+    debugLog("syncRecording() threw:", error?.message || error);
     console.error("Failed to sync recording:", error);
     // Failure terminal path: nothing was created, so it's safe — and
     // necessary — to unlock so the user can retry instead of being stuck.

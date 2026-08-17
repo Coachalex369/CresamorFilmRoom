@@ -660,6 +660,22 @@
       </section>
     </main>
 
+    <!-- Temporary mobile debug panel — added to diagnose the iPhone/Chrome
+         upload bugs (recorded-video 500, Photos-selection silent failure)
+         live on-device, since Chrome iOS can't be remotely inspected via
+         Mac Safari's Develop menu the way Safari iOS can. Remove once
+         root-caused; not meant to ship long-term. debugLog() (app.js) is
+         a no-op-safe global — every file loaded after app.js can call it. -->
+    <button id="debug-toggle-btn" type="button">🐞</button>
+    <div id="debug-panel" class="hidden">
+      <div id="debug-panel-header">
+        <span>Debug Log</span>
+        <button id="debug-clear-btn" type="button">Clear</button>
+        <button id="debug-close-btn" type="button">Close</button>
+      </div>
+      <textarea id="debug-log-output" readonly></textarea>
+    </div>
+
     <script src="./recordingLibrary.js"></script>
     <script src="./app.js"></script>
     <script src="./mockData.js"></script>
