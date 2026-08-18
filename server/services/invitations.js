@@ -114,12 +114,38 @@ async function getInvitationPreview(rawToken) {
 // team/role actually granted always come from THIS row, never from the
 // request body.
 //
+// Beta permissions incident fix: this used to accept purely on token
+// possession, with no check that the AUTHENTICATED caller was actually
+// the invitation's intended recipient. A coach opening an invite link
+// meant for a different email while still logged into their own Coach
+// session got THEIR OWN team_members row silently overwritten with the
+// invitation's (necessarily lower) role via the ON CONFLICT branch below
+// — confirmed via direct reproduction and repaired in production
+// (team_members.id=105). Two fixes: (1) for email invitations, the
+// authenticated user's own email (server-derived, never client-claimed)
+// must match invitation.destination or nothing is mutated at all — phone
+// invitations have no comparable identity to check (users has no phone
+// column) and fall through to fix (2) as their only protection; (2) an
+// invitation can never grant 'coach' (invitations.role_on_team's CHECK
+// constraint excludes it), so an ACTIVE existing coach row is never
+// overwritten by accepting one — only revoked_at IS NULL counts as
+// active; a previously-revoked coach membership still reactivates at the
+// invitation's (lower) role exactly as before, since a revoked row may
+// have been intentionally revoked and silently restoring Coach authority
+// would be its own privilege bug.
+//
 // Idempotent: ON CONFLICT (team_id, user_id) DO UPDATE means accepting
 // the same (or a different, later) invitation for a team the user is
 // already active on just confirms/updates the existing row — never a
 // duplicate — and also reactivates a previously-revoked membership
 // (revoked_at/revoked_by reset to NULL) rather than erroring.
-async function acceptInvitation(rawToken, userId) {
+//
+// Wrapped in a real transaction (same BEGIN/COMMIT/ROLLBACK pattern as
+// videos.js's DELETE route) so the membership write and the invitation's
+// accepted-status write can never partially apply; FOR UPDATE closes a
+// small pre-existing race where two concurrent accepts for the same
+// team/user could interleave their reads.
+async function acceptInvitation(rawToken, authenticatedUser) {
   const tokenHash = hashToken(rawToken);
 
   const invitationResult = await client.query(
@@ -131,37 +157,63 @@ async function acceptInvitation(rawToken, userId) {
   );
 
   const invitation = invitationResult.rows[0];
-  if (!invitation) return null;
+  if (!invitation) return { outcome: "invalid_or_expired" };
 
-  const existing = await client.query(
-    `SELECT revoked_at FROM team_members WHERE team_id = $1 AND user_id = $2`,
-    [invitation.team_id, userId]
-  );
-  const alreadyMember = existing.rows.length > 0 && existing.rows[0].revoked_at === null;
+  if (invitation.destination_type === "email") {
+    const normalizedUserEmail = String(authenticatedUser.email || "").trim().toLowerCase();
+    if (normalizedUserEmail !== invitation.destination) {
+      return { outcome: "account_mismatch", invitedDestination: invitation.destination };
+    }
+  }
 
-  const teamMemberResult = await client.query(
-    `
-    INSERT INTO team_members (team_id, user_id, role_on_team, is_primary)
-    VALUES ($1, $2, $3, true)
-    ON CONFLICT (team_id, user_id) DO UPDATE
-      SET role_on_team = EXCLUDED.role_on_team, revoked_at = NULL, revoked_by = NULL
-    RETURNING *
-    `,
-    [invitation.team_id, userId, invitation.role_on_team]
-  );
+  const conn = await client.connect();
+  try {
+    await conn.query("BEGIN");
 
-  await client.query(
-    `UPDATE invitations SET status = 'accepted', accepted_at = now(), accepted_by = $1 WHERE id = $2`,
-    [userId, invitation.id]
-  );
+    const existing = await conn.query(
+      `SELECT * FROM team_members WHERE team_id = $1 AND user_id = $2 FOR UPDATE`,
+      [invitation.team_id, authenticatedUser.id]
+    );
+    const existingRow = existing.rows[0];
+    const alreadyMember = Boolean(existingRow) && existingRow.revoked_at === null;
+    const preserveCoach =
+      Boolean(existingRow) && existingRow.role_on_team === "coach" && existingRow.revoked_at === null;
 
-  const teamResult = await client.query(`SELECT * FROM teams WHERE id = $1`, [invitation.team_id]);
+    const teamMemberResult = preserveCoach
+      ? { rows: [existingRow] }
+      : await conn.query(
+          `
+          INSERT INTO team_members (team_id, user_id, role_on_team, is_primary)
+          VALUES ($1, $2, $3, true)
+          ON CONFLICT (team_id, user_id) DO UPDATE
+            SET role_on_team = EXCLUDED.role_on_team, revoked_at = NULL, revoked_by = NULL
+          RETURNING *
+          `,
+          [invitation.team_id, authenticatedUser.id, invitation.role_on_team]
+        );
 
-  return {
-    team: teamResult.rows[0],
-    teamMember: teamMemberResult.rows[0],
-    alreadyMember,
-  };
+    await conn.query(
+      `UPDATE invitations SET status = 'accepted', accepted_at = now(), accepted_by = $1 WHERE id = $2`,
+      [authenticatedUser.id, invitation.id]
+    );
+
+    await conn.query("COMMIT");
+
+    const teamResult = await client.query(`SELECT * FROM teams WHERE id = $1`, [invitation.team_id]);
+
+    return {
+      outcome: "accepted",
+      team: teamResult.rows[0],
+      teamMember: teamMemberResult.rows[0],
+      alreadyMember,
+      preservedExistingCoachRole: preserveCoach,
+    };
+  } catch (txError) {
+    await conn.query("ROLLBACK");
+    throw txError;
+  } finally {
+    conn.release();
+  }
 }
 
 module.exports = {

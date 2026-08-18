@@ -548,6 +548,40 @@
           </div>
         </div>
 
+        <!-- Beta permissions incident fix: shown when an invite link is
+             opened while ALREADY logged in — replaces the old silent
+             auto-accept, which used to accept an invitation using
+             whatever account happened to be signed in, regardless of
+             which email/phone it was actually sent to. See invitations.js. -->
+        <div id="invitation-confirm-modal" class="hidden">
+          <div id="invitation-confirm-modal-inner">
+            <div id="invitation-confirm-step-preview">
+              <h3>You're Invited!</h3>
+              <p>
+                You've been invited to join <strong id="invitation-confirm-team"></strong>
+                as <strong id="invitation-confirm-role"></strong>.
+              </p>
+              <p id="invitation-confirm-coach"></p>
+              <p id="invitation-confirm-current-account"></p>
+              <div class="capture-step-actions">
+                <button id="invitation-confirm-accept-btn" type="button">Accept Invitation</button>
+                <button id="invitation-confirm-dismiss-btn" type="button">Not now</button>
+              </div>
+            </div>
+
+            <div id="invitation-confirm-step-mismatch" class="hidden">
+              <h3>Different Account Signed In</h3>
+              <p id="invitation-confirm-mismatch-message"></p>
+              <div class="capture-step-actions">
+                <button id="invitation-confirm-switch-btn" type="button">Sign out and continue with invited account</button>
+                <button id="invitation-confirm-cancel-btn" type="button">Cancel</button>
+              </div>
+            </div>
+
+            <p id="invitation-confirm-error" class="hidden"></p>
+          </div>
+        </div>
+
         <!-- PROFILE SCREEN -->
         <section id="profile-screen" class="app-screen">
           <div class="placeholder-screen">

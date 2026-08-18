@@ -1690,7 +1690,8 @@ body.app-active #reset-password-screen {
 /* ---------- Create-team / invite modals — same skeleton as #capture-modal ---------- */
 
 #create-team-modal,
-#invite-modal {
+#invite-modal,
+#invitation-confirm-modal {
   position: fixed;
   inset: 0;
   z-index: 100;
@@ -1702,12 +1703,14 @@ body.app-active #reset-password-screen {
 }
 
 #create-team-modal.hidden,
-#invite-modal.hidden {
+#invite-modal.hidden,
+#invitation-confirm-modal.hidden {
   display: none;
 }
 
 #create-team-modal-inner,
-#invite-modal-inner {
+#invite-modal-inner,
+#invitation-confirm-modal-inner {
   position: relative;
   width: 100%;
   max-width: 480px;

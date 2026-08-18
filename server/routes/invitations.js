@@ -140,24 +140,35 @@ router.get("/api/invitations/:token", async (req, res) => {
 
 router.post("/api/invitations/:token/accept", authenticate, async (req, res) => {
   try {
-    const result = await acceptInvitation(req.params.token, req.user.id);
+    const result = await acceptInvitation(req.params.token, req.user);
 
-    if (!result) {
+    if (result.outcome === "invalid_or_expired") {
       return res.status(404).json({
         error: "This invitation link has expired or already been used. Ask your coach to send a new one.",
+      });
+    }
+
+    // Beta permissions incident fix: distinct 409 (not 404) so the client
+    // can tell "wrong account currently signed in" apart from "this link
+    // is dead" — mutates nothing (see acceptInvitation()).
+    if (result.outcome === "account_mismatch") {
+      return res.status(409).json({
+        error: "account_mismatch",
+        invitedDestination: result.invitedDestination,
       });
     }
 
     await logSecurityEvent("invitation_accepted", {
       userId: req.user.id,
       ip: req.ip,
-      metadata: { teamId: result.team.id },
+      metadata: { teamId: result.team.id, preservedExistingCoachRole: result.preservedExistingCoachRole },
     });
 
     res.json({
       team: { id: result.team.id, name: result.team.name },
       roleOnTeam: result.teamMember.role_on_team,
       alreadyMember: result.alreadyMember,
+      preservedExistingCoachRole: result.preservedExistingCoachRole,
     });
   } catch (err) {
     console.error("POST /api/invitations/:token/accept error:", err);
