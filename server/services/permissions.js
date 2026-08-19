@@ -26,14 +26,29 @@ async function canAccessConversation(userId, conversationId) {
   return result.rows.length > 0;
 }
 
-// Real rule: the original uploader, or anyone with the 'coach' role, can
-// delete a video.
+// Beta permissions audit fix: this used to be "the original uploader, or
+// ANY user with the global users.role='coach'" — which let a coach
+// managing Team A delete (or force-reprocess, via retry-conversion/
+// retry-classification, which both reuse this same check) a video
+// belonging to a completely unrelated Team B, just by knowing/guessing
+// its numeric id. Team-scoped video *visibility* (canViewVideo) already
+// doesn't work this way; management shouldn't either. Now: the uploader
+// can always manage their own video (unconditional, matching
+// canViewVideo's existing unconditional uploader check); for an
+// assigned video (team_id NOT NULL), management requires real per-team
+// authority via canManageTeam — global coach role alone is no longer
+// sufficient; for an unassigned video (team_id NULL), the rule is
+// unchanged from before (any global coach can still manage it) —
+// deliberately mirroring canViewVideo's own team_id===null branch, since
+// there's no team boundary to scope against yet and this is the exact
+// mechanism a coach already relies on to clean up / Change-Team an
+// unassigned upload today.
 async function canDeleteVideo(userId, videoId) {
   if (!userId || !videoId) return false;
 
   const result = await client.query(
     `
-    SELECT videos.uploaded_by, users.role
+    SELECT videos.uploaded_by, videos.team_id, users.role
     FROM videos, users
     WHERE videos.id = $1 AND users.id = $2
     `,
@@ -42,9 +57,13 @@ async function canDeleteVideo(userId, videoId) {
 
   if (!result.rows.length) return false;
 
-  const { uploaded_by, role } = result.rows[0];
+  const { uploaded_by, team_id, role } = result.rows[0];
 
-  return role === "coach" || Number(uploaded_by) === Number(userId);
+  if (Number(uploaded_by) === Number(userId)) return true;
+
+  if (team_id === null) return role === "coach";
+
+  return canManageTeam(userId, team_id);
 }
 
 // Closed Beta Readiness Sprint: team-scoped access requires a real,

@@ -2,6 +2,7 @@ const express = require("express");
 
 const client = require("../db/client");
 const { authenticate } = require("../middleware/authenticate");
+const { requireOwner } = require("../middleware/authorize");
 
 const router = express.Router();
 
@@ -29,7 +30,12 @@ router.post("/api/clips", authenticate, async (req, res) => {
   }
 });
 
-router.get("/api/users/:id/clips", authenticate, async (req, res) => {
+// Beta permissions audit fix: no ownership check beyond authenticate —
+// any logged-in user could enumerate another user's clip titles/video
+// ids by changing :id. Every current caller (home.js, app.js's
+// loadMyClips()) already only ever requests currentUser.id; confirmed by
+// inspection — nothing legitimate breaks.
+router.get("/api/users/:id/clips", authenticate, requireOwner("id"), async (req, res) => {
   try {
     const { id } = req.params;
 

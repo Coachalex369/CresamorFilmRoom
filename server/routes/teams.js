@@ -2,7 +2,7 @@ const express = require("express");
 
 const client = require("../db/client");
 const { authenticate } = require("../middleware/authenticate");
-const { requireRole } = require("../middleware/authorize");
+const { requireRole, requireOwner } = require("../middleware/authorize");
 const { canManageTeamMembership, canAccessTeam } = require("../services/permissions");
 const { logSecurityEvent } = require("../services/auditLog");
 
@@ -153,7 +153,15 @@ router.get("/api/teams/:id/members", authenticate, async (req, res) => {
   }
 });
 
-router.get("/api/users/:id/teams", authenticate, async (req, res) => {
+// Beta permissions audit fix: this had no ownership check at all beyond
+// authenticate — any logged-in user could enumerate another user's team
+// memberships by changing :id. requireOwner("id") is the same middleware
+// already used for PUT/POST profile.js routes; every current caller
+// (app.js's loadManageableTeams(), teams.js's own loadTeamsList(), and
+// every GET call in server/scripts/) already only ever requests its own
+// id, confirmed by inspection before this change — nothing legitimate
+// breaks.
+router.get("/api/users/:id/teams", authenticate, requireOwner("id"), async (req, res) => {
   try {
     const { id } = req.params;
 
