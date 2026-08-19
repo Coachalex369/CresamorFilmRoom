@@ -270,7 +270,8 @@ li {
   cursor: not-allowed;
 }
 
-.video-retry-btn {
+.video-retry-btn,
+.video-change-team-btn {
   flex-shrink: 0;
   background: transparent;
   border: 1px solid var(--muted);
@@ -279,12 +280,14 @@ li {
   padding: 0.3rem 0.5rem;
 }
 
-.video-retry-btn:hover {
+.video-retry-btn:hover,
+.video-change-team-btn:hover {
   border-color: var(--gold);
   color: var(--gold-soft);
 }
 
-.video-retry-btn:disabled {
+.video-retry-btn:disabled,
+.video-change-team-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
@@ -1691,7 +1694,8 @@ body.app-active #reset-password-screen {
 
 #create-team-modal,
 #invite-modal,
-#invitation-confirm-modal {
+#invitation-confirm-modal,
+#video-team-modal {
   position: fixed;
   inset: 0;
   z-index: 100;
@@ -1704,13 +1708,15 @@ body.app-active #reset-password-screen {
 
 #create-team-modal.hidden,
 #invite-modal.hidden,
-#invitation-confirm-modal.hidden {
+#invitation-confirm-modal.hidden,
+#video-team-modal.hidden {
   display: none;
 }
 
 #create-team-modal-inner,
 #invite-modal-inner,
-#invitation-confirm-modal-inner {
+#invitation-confirm-modal-inner,
+#video-team-modal-inner {
   position: relative;
   width: 100%;
   max-width: 480px;
@@ -1724,7 +1730,8 @@ body.app-active #reset-password-screen {
 }
 
 #create-team-close-btn,
-#invite-close-btn {
+#invite-close-btn,
+#video-team-close-btn {
   position: absolute;
   top: 0.75rem;
   right: 0.75rem;
@@ -1736,7 +1743,8 @@ body.app-active #reset-password-screen {
 
 #create-team-modal-inner input,
 #invite-modal-inner input,
-#invite-modal-inner select {
+#invite-modal-inner select,
+#video-team-modal-inner select {
   width: 100%;
   margin-bottom: 0.8rem;
 }
@@ -1746,7 +1754,8 @@ body.app-active #reset-password-screen {
   margin-top: -0.5rem;
 }
 
-#invite-modal-inner label {
+#invite-modal-inner label,
+#video-team-modal-inner label {
   display: block;
   color: var(--muted);
   font-size: 0.85rem;

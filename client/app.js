@@ -73,6 +73,19 @@ const videoStatusMessage = document.querySelector("#video-status-message");
 const videoStatusText = document.querySelector("#video-status-text");
 const videoEmptyState = document.querySelector("#video-empty-state");
 
+// Video team reassignment — see openVideoTeamModal()/submitVideoTeamChange()
+// below. Deliberately NOT reusing canDeleteVideoClientSide()/canDeleteVideo:
+// changing team_id is a team-scoped authorization operation (it changes
+// who can see the video), governed server-side by canManageTeam() on the
+// source and/or destination team, not the broader uploader-or-any-coach
+// rule video deletion uses.
+const videoTeamModal = document.querySelector("#video-team-modal");
+const videoTeamCloseBtn = document.querySelector("#video-team-close-btn");
+const videoTeamCurrentLabel = document.querySelector("#video-team-current-label");
+const videoTeamSelect = document.querySelector("#video-team-select");
+const videoTeamError = document.querySelector("#video-team-error");
+const videoTeamSaveBtn = document.querySelector("#video-team-save-btn");
+
 // Temporary mobile debug panel (see index.html) — a global every later
 // script (recordingPipeline.js, capture.js) can call to surface what's
 // happening directly on a phone's screen, since Chrome iOS can't be
@@ -300,6 +313,18 @@ function canDeleteVideoClientSide(video) {
   );
 }
 
+// Only gates whether the Change Team control is even shown — a coach who
+// doesn't actually manage the relevant team(s) still gets a real 403 from
+// PATCH /api/videos/:id/team, same "convenience list, not authority"
+// principle as loadManageableTeams() below. Deliberately does NOT include
+// the uploader-only branch canDeleteVideoClientSide() has: under the new
+// authorization model an uploader with no team-management role can never
+// succeed at this action (canManageTeam requires role_on_team='coach'),
+// so showing them the button would just be a guaranteed-to-fail control.
+function canChangeVideoTeamClientSide() {
+  return Boolean(currentUser) && currentUser.role === "coach";
+}
+
 // Real-Time Sideline Replay: local-only recordings (still local/uploading/
 // synced, not yet processed) live in the Recording Library, not the
 // videos table — deleting one removes it from IndexedDB and cancels its
@@ -398,6 +423,120 @@ async function deleteVideo(video) {
     }
   }
 }
+
+// ---------- video team reassignment ----------
+
+let videoTeamModalTarget = null; // the video row currently being reassigned
+
+// Display-only: resolves a team id to a name for the "currently assigned
+// to" label, even for a team the current user doesn't manage (e.g. a
+// global coach viewing a video on someone else's team). Team NAMES are
+// not sensitive in this app (already visible broadly via the Teams tab),
+// so the plain GET /api/teams list is fine here — the actual destination
+// picker below deliberately does NOT use this list, only
+// loadManageableTeams()'s narrower, authorization-scoped one.
+let cachedTeamNamesById = null;
+
+async function getTeamNameMap() {
+  if (cachedTeamNamesById) return cachedTeamNamesById;
+
+  try {
+    const teams = await apiFetch("/api/teams");
+    cachedTeamNamesById = new Map(teams.map((t) => [Number(t.id), t.name]));
+  } catch (error) {
+    console.error("Failed to load team names for display:", error);
+    cachedTeamNamesById = new Map();
+  }
+
+  return cachedTeamNamesById;
+}
+
+// Convenience list only, not authorization — PATCH /api/videos/:id/team's
+// canManageTeam() checks are the real enforcement. Reuses the existing
+// GET /api/users/:id/teams endpoint (already scoped to the caller's own
+// active memberships) rather than the broad GET /api/teams list, so a
+// coach is only ever shown teams they actually manage as reassignment
+// destinations.
+async function loadManageableTeams() {
+  try {
+    const myTeams = await apiFetch(`/api/users/${currentUser.id}/teams`);
+    return myTeams.filter((team) => team.role_on_team === "coach");
+  } catch (error) {
+    console.error("Failed to load manageable teams:", error);
+    return [];
+  }
+}
+
+async function openVideoTeamModal(video) {
+  videoTeamModalTarget = video;
+  videoTeamError.classList.add("hidden");
+  videoTeamSaveBtn.disabled = false;
+  videoTeamSaveBtn.textContent = "Save";
+
+  const nameMap = await getTeamNameMap();
+  const currentTeamName = video.team_id
+    ? nameMap.get(Number(video.team_id)) || `Team #${video.team_id}`
+    : "Unassigned";
+  videoTeamCurrentLabel.textContent = `Currently assigned to: ${currentTeamName}`;
+
+  const manageable = await loadManageableTeams();
+
+  videoTeamSelect.innerHTML = "";
+
+  const unassignedOption = document.createElement("option");
+  unassignedOption.value = "";
+  unassignedOption.textContent = "Unassigned";
+  videoTeamSelect.appendChild(unassignedOption);
+
+  manageable.forEach((team) => {
+    const option = document.createElement("option");
+    option.value = team.id;
+    option.textContent = team.sport ? `${team.name} (${team.sport})` : team.name;
+    videoTeamSelect.appendChild(option);
+  });
+
+  videoTeamSelect.value = video.team_id ? String(video.team_id) : "";
+
+  videoTeamModal.classList.remove("hidden");
+}
+
+function closeVideoTeamModal() {
+  videoTeamModal.classList.add("hidden");
+  videoTeamModalTarget = null;
+}
+
+async function submitVideoTeamChange() {
+  if (!videoTeamModalTarget) return;
+
+  const selected = videoTeamSelect.value;
+  const newTeamId = selected === "" ? null : Number(selected);
+
+  videoTeamSaveBtn.disabled = true;
+  videoTeamSaveBtn.textContent = "Saving...";
+  videoTeamError.classList.add("hidden");
+
+  try {
+    await apiFetch(`/api/videos/${videoTeamModalTarget.id}/team`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ team_id: newTeamId }),
+    });
+
+    closeVideoTeamModal();
+    await loadVideos();
+    showMessage("Video team updated.");
+  } catch (error) {
+    console.error("Failed to change video team:", error);
+    videoTeamError.textContent = error.message || "Could not change this video's team.";
+    videoTeamError.classList.remove("hidden");
+  } finally {
+    videoTeamSaveBtn.disabled = false;
+    videoTeamSaveBtn.textContent = "Save";
+  }
+}
+
+videoTeamCloseBtn.addEventListener("click", closeVideoTeamModal);
+videoTeamSaveBtn.addEventListener("click", submitVideoTeamChange);
 
 // Play-First Pipeline: the safe manual retry — lets a coach re-trigger
 // classification for a 'failed' or 'processing_paused' video without
@@ -694,6 +833,23 @@ function renderVideoList() {
       });
 
       li.appendChild(deleteBtn);
+    }
+
+    // Local (not-yet-synced) recordings have no server-side video row to
+    // PATCH yet, and no numeric id — excluded via !video.__local.
+    if (!video.__local && canChangeVideoTeamClientSide()) {
+      const changeTeamBtn = document.createElement("button");
+      changeTeamBtn.type = "button";
+      changeTeamBtn.className = "video-change-team-btn";
+      changeTeamBtn.textContent = "Change Team";
+      changeTeamBtn.dataset.changeTeamVideoId = video.id;
+
+      changeTeamBtn.addEventListener("click", (event) => {
+        event.stopPropagation();
+        openVideoTeamModal(video);
+      });
+
+      li.appendChild(changeTeamBtn);
     }
 
     videoList.appendChild(li);

@@ -582,6 +582,29 @@
           </div>
         </div>
 
+        <!-- Team-scoped video reassignment. Destination options are
+             populated client-side from GET /api/users/:id/teams (the
+             caller's own active coach memberships), never the broad
+             GET /api/teams list — see openVideoTeamModal() in app.js. -->
+        <div id="video-team-modal" class="hidden">
+          <div id="video-team-modal-inner">
+            <button id="video-team-close-btn" type="button" aria-label="Close">✕</button>
+            <h3>Change Team</h3>
+            <p id="video-team-current-label"></p>
+
+            <label for="video-team-select">Assign to</label>
+            <select id="video-team-select">
+              <option value="">Unassigned</option>
+            </select>
+
+            <p id="video-team-error" class="hidden"></p>
+
+            <div class="capture-step-actions">
+              <button id="video-team-save-btn" type="button">Save</button>
+            </div>
+          </div>
+        </div>
+
         <!-- PROFILE SCREEN -->
         <section id="profile-screen" class="app-screen">
           <div class="placeholder-screen">

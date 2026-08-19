@@ -10,7 +10,7 @@ const {
   retryClassification,
   retryConversion,
 } = require("../services/videoProcessing");
-const { canDeleteVideo, canViewVideo } = require("../services/permissions");
+const { canDeleteVideo, canViewVideo, canManageTeam } = require("../services/permissions");
 const storage = require("../services/storage/storage");
 const { authenticate } = require("../middleware/authenticate");
 const { uploadLimiter } = require("../middleware/rateLimiters");
@@ -402,6 +402,67 @@ router.delete("/api/videos/:id", authenticate, async (req, res) => {
   } catch (err) {
     console.error("DELETE /api/videos/:id error:", err);
     res.status(500).json({ error: "Failed to delete video" });
+  }
+});
+
+// Team-scoped video reassignment. Deliberately NOT reusing canDeleteVideo
+// (uploader-or-any-coach) — changing team_id changes which team members
+// can see the video, which is a team-scoped authorization operation, not
+// a general video-management one. Governed by canManageTeam() instead,
+// the same per-team-coach concept that already gates invitations:
+//   Team A -> Team B: must manage BOTH A and B (leaving A's visibility
+//     boundary AND entering B's).
+//   Team A -> Unassigned: must manage A only (nothing to check on the
+//     "Unassigned" side — it isn't a team).
+//   Unassigned -> Team B: must manage B only. An uploader with no
+//     team-management role can never assign their own upload into a
+//     team's shared library this way.
+//   No-op (same team, or Unassigned -> Unassigned): short-circuits before
+//     any authorization check at all.
+// "Team doesn't exist" and "exists but you don't manage it" deliberately
+// return the identical 403 — same "don't let a caller fingerprint why"
+// principle authenticate.js already uses for login rejections.
+router.patch("/api/videos/:id/team", authenticate, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const destinationTeamId = req.body.team_id === undefined ? null : req.body.team_id;
+
+    const videoResult = await client.query("SELECT * FROM videos WHERE id = $1", [id]);
+    const video = videoResult.rows[0];
+
+    if (!video) {
+      return res.status(404).json({ error: "Video not found" });
+    }
+
+    const currentTeamId = video.team_id;
+
+    if (currentTeamId === destinationTeamId) {
+      return res.json(await withPlaybackStatus(video));
+    }
+
+    if (currentTeamId !== null && !(await canManageTeam(req.user.id, currentTeamId))) {
+      return res.status(403).json({ error: "Not authorized to remove this video from its current team" });
+    }
+
+    if (destinationTeamId !== null && !(await canManageTeam(req.user.id, destinationTeamId))) {
+      return res.status(403).json({ error: "Not authorized to assign videos to that team" });
+    }
+
+    const updated = await client.query(
+      "UPDATE videos SET team_id = $1 WHERE id = $2 RETURNING *",
+      [destinationTeamId, id]
+    );
+
+    await logSecurityEvent("video_team_reassigned", {
+      userId: req.user.id,
+      ip: req.ip,
+      metadata: { videoId: Number(id), fromTeamId: currentTeamId, toTeamId: destinationTeamId },
+    });
+
+    res.json(await withPlaybackStatus(updated.rows[0]));
+  } catch (err) {
+    console.error("PATCH /api/videos/:id/team error:", err);
+    res.status(500).json({ error: "Failed to change video team" });
   }
 });
 
