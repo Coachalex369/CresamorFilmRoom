@@ -433,9 +433,24 @@
         <!-- MESSAGES SCREEN -->
         <section id="messages-screen" class="app-screen">
           <div id="messages-layout">
-            <h2>Team Messages</h2>
+            <!-- Team context: exactly one of these three is shown at a
+                 time (see messages.js's renderMessagesTeamContext) — a
+                 plain label for a single-team user (no selection
+                 friction), a <select> for a multi-team user, or an empty
+                 state for a user on no team at all. -->
+            <div id="messages-team-context">
+              <p id="messages-team-label" class="hidden"></p>
+              <label for="messages-team-select" id="messages-team-select-label" class="hidden">Team</label>
+              <select id="messages-team-select" class="hidden"></select>
+              <p id="messages-team-empty" class="hidden">You're not on a team yet — join or create one to start messaging.</p>
+            </div>
 
             <div id="message-thread"></div>
+
+            <!-- Persistent team identity right at the point of composing —
+                 not just at the top of the screen, per the "must remain
+                 visually obvious while composing" requirement. -->
+            <p id="messages-compose-context" class="hidden"></p>
 
             <form id="message-form">
               <input

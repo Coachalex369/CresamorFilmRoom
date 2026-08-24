@@ -192,6 +192,23 @@ async function acceptInvitation(rawToken, authenticatedUser) {
           [invitation.team_id, authenticatedUser.id, invitation.role_on_team]
         );
 
+    // Messages team-scoping: seed a read-state row for this user against
+    // their (now-active) team's conversation. Best-effort within the same
+    // transaction — access to the conversation itself never depends on
+    // this row (see permissions.js's canAccessConversation, which checks
+    // team_members directly for a team conversation), only unread/
+    // last-read bookkeeping does. Runs on every accept, including the
+    // preserveCoach branch, since an existing active coach could
+    // predate this feature and be missing the row entirely.
+    await conn.query(
+      `
+      INSERT INTO conversation_participants (conversation_id, user_id)
+      SELECT id, $1 FROM conversations WHERE team_id = $2 AND category = 'team'
+      ON CONFLICT (conversation_id, user_id) DO NOTHING
+      `,
+      [authenticatedUser.id, invitation.team_id]
+    );
+
     await conn.query(
       `UPDATE invitations SET status = 'accepted', accepted_at = now(), accepted_by = $1 WHERE id = $2`,
       [authenticatedUser.id, invitation.id]

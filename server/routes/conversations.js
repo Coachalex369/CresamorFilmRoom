@@ -15,15 +15,38 @@ const router = express.Router();
 // Beta Readiness Sprint 2 bug fix: this used to trust an OPTIONAL
 // user_id query param — omitting it returned every conversation in the
 // system. Now always scoped to the authenticated caller, no override.
+//
+// Messages team-scoping fix: a category='team' conversation is now
+// listed based on LIVE active team_members, matching
+// permissions.js's canAccessConversation — not on a static
+// conversation_participants row, which can drift out of sync with real
+// team membership. Every other category still goes through the
+// conversation_participants JOIN exactly as before, unchanged.
 router.get("/api/conversations", authenticate, async (req, res) => {
   try {
     const result = await client.query(
       `
-      SELECT conversations.*, teams.name AS team_name
+      SELECT DISTINCT conversations.*, teams.name AS team_name
       FROM conversations
-      JOIN conversation_participants ON conversation_participants.conversation_id = conversations.id
       LEFT JOIN teams ON teams.id = conversations.team_id
-      WHERE conversation_participants.user_id = $1
+      WHERE
+        (
+          conversations.category = 'team' AND conversations.team_id IS NOT NULL
+          AND EXISTS (
+            SELECT 1 FROM team_members
+            WHERE team_members.team_id = conversations.team_id
+              AND team_members.user_id = $1
+              AND team_members.revoked_at IS NULL
+          )
+        )
+        OR (
+          conversations.category IS DISTINCT FROM 'team'
+          AND EXISTS (
+            SELECT 1 FROM conversation_participants
+            WHERE conversation_participants.conversation_id = conversations.id
+              AND conversation_participants.user_id = $1
+          )
+        )
       ORDER BY conversations.id
       `,
       [req.user.id]

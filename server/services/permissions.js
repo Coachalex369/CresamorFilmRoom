@@ -11,8 +11,36 @@
 
 const client = require("../db/client");
 
+// Messages team-scoping fix: a category='team' conversation's
+// authorization is derived LIVE from active team_members, not from the
+// conversation_participants table -- that table is retained only for
+// last_read_at/unread bookkeeping now, never the access boundary for a
+// team conversation. This is what makes team revocation instantly cut
+// off message GET/POST access, the same guarantee canAccessTeam already
+// provides everywhere else in the app; a stale or missing
+// conversation_participants row can no longer leak access to a former
+// member OR incorrectly block a current one.
+//
+// Deliberately gated on category === 'team' specifically, not merely
+// "team_id is non-null" -- a future coach/parent/athlete/direct
+// conversation may carry a team_id purely for context (e.g. "this is a
+// parent thread about a player on Team X") without meaning every member
+// of Team X should see it. Only the real team-wide conversation gets the
+// broad team-membership check; every other category keeps the original,
+// narrower participant-row model regardless of what team_id it carries.
 async function canAccessConversation(userId, conversationId) {
   if (!userId || !conversationId) return false;
+
+  const conversationResult = await client.query(
+    `SELECT team_id, category FROM conversations WHERE id = $1`,
+    [conversationId]
+  );
+  const conversation = conversationResult.rows[0];
+  if (!conversation) return false;
+
+  if (conversation.category === "team" && conversation.team_id !== null) {
+    return canAccessTeam(userId, conversation.team_id);
+  }
 
   const result = await client.query(
     `

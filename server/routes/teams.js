@@ -83,6 +83,30 @@ router.post("/api/teams", authenticate, requireRole("coach"), async (req, res) =
       [team.id, req.user.id]
     );
 
+    // Messages team-scoping: every team gets its own category='team'
+    // conversation at creation time, mirroring the auto-join above. Real
+    // authorization for this conversation is derived live from
+    // team_members (see permissions.js's canAccessConversation) --
+    // this participant row is read-state bookkeeping only, not what
+    // grants access.
+    const conversationResult = await client.query(
+      `
+      INSERT INTO conversations (team_id, category, title)
+      VALUES ($1, 'team', $2)
+      RETURNING id
+      `,
+      [team.id, `${team.name} Team Chat`]
+    );
+
+    await client.query(
+      `
+      INSERT INTO conversation_participants (conversation_id, user_id)
+      VALUES ($1, $2)
+      ON CONFLICT (conversation_id, user_id) DO NOTHING
+      `,
+      [conversationResult.rows[0].id, req.user.id]
+    );
+
     res.status(201).json(team);
   } catch (err) {
     console.error("POST /api/teams error:", err);
@@ -211,6 +235,20 @@ router.post("/api/users/:id/teams", authenticate, async (req, res) => {
       RETURNING *
       `,
       [team_id, id, role_on_team || null, is_primary !== undefined ? is_primary : true]
+    );
+
+    // Messages team-scoping: seed a read-state row for this user against
+    // their new team's conversation (best-effort — a missing team
+    // conversation, e.g. a not-yet-backfilled legacy team, simply inserts
+    // nothing rather than erroring; access itself never depends on this
+    // row, only unread/last-read bookkeeping does).
+    await client.query(
+      `
+      INSERT INTO conversation_participants (conversation_id, user_id)
+      SELECT id, $1 FROM conversations WHERE team_id = $2 AND category = 'team'
+      ON CONFLICT (conversation_id, user_id) DO NOTHING
+      `,
+      [id, team_id]
     );
 
     await logSecurityEvent("team_membership_changed", {

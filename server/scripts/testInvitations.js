@@ -423,10 +423,20 @@ async function main() {
         [created.userIds]
       );
       for (const id of created.teamIds) {
+        // Messages team-scoping: POST /api/teams now auto-creates a
+        // conversation for the team, which FK-references it — must be
+        // torn down before the team row itself can be deleted.
+        const convoRows = await client.query("SELECT id FROM conversations WHERE team_id = $1", [id]);
+        for (const row of convoRows.rows) {
+          await client.query("DELETE FROM messages WHERE conversation_id = $1", [row.id]);
+          await client.query("DELETE FROM conversation_participants WHERE conversation_id = $1", [row.id]);
+        }
+        await client.query("DELETE FROM conversations WHERE team_id = $1", [id]);
         await client.query("DELETE FROM team_members WHERE team_id = $1", [id]);
         await client.query("DELETE FROM teams WHERE id = $1", [id]);
       }
       for (const id of created.userIds) {
+        await client.query("DELETE FROM messages WHERE sender_id = $1", [id]);
         await client.query("DELETE FROM conversation_participants WHERE user_id = $1", [id]);
         await client.query("DELETE FROM security_audit_log WHERE user_id = $1", [id]);
         await client.query("DELETE FROM team_members WHERE user_id = $1", [id]);

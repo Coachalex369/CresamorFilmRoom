@@ -43,8 +43,161 @@ if (staleMessageForm && realMessageForm) {
 }
 
 const realMessageBodyInput = realMessageForm?.querySelector("#message-input");
+const realMessageSubmitBtn = realMessageForm?.querySelector('button[type="submit"]');
 
-let currentConversationId = null;
+const messagesTeamLabel = document.querySelector("#messages-team-label");
+const messagesTeamSelectLabel = document.querySelector("#messages-team-select-label");
+const messagesTeamSelect = document.querySelector("#messages-team-select");
+const messagesTeamEmpty = document.querySelector("#messages-team-empty");
+const messagesComposeContext = document.querySelector("#messages-compose-context");
+
+/* ---------- team-scoped conversation state ----------
+   Local to this file, deliberately not shared with teams.js/capture.js —
+   Messages gets its own team selector, not a global "current team"
+   context (that's a separate future decision, not part of this feature).
+*/
+
+let messagesTeamState = { myTeams: [], conversations: [], selectedTeamId: null };
+let messagesTeamsLoaded = false;
+
+const MESSAGES_TEAM_STORAGE_KEY = "cresamor_messages_selected_team";
+
+function getStoredTeamPreference() {
+  const raw = localStorage.getItem(MESSAGES_TEAM_STORAGE_KEY);
+  return raw ? Number(raw) : null;
+}
+
+// The stored value is only ever a PREFERENCE, never authorization — every
+// call site that sets it also just finished validating it against the
+// server's own myTeams list (see loadMessagesTeamsAndConversations).
+// localStorage itself grants nothing; it only shapes which already-
+// authorized team is pre-selected.
+function setSelectedTeam(teamId) {
+  messagesTeamState.selectedTeamId = teamId;
+  if (teamId) {
+    localStorage.setItem(MESSAGES_TEAM_STORAGE_KEY, String(teamId));
+  } else {
+    localStorage.removeItem(MESSAGES_TEAM_STORAGE_KEY);
+  }
+}
+
+// Recomputed fresh from current state every time it's called — never
+// cached in a variable that could go stale between a team switch and a
+// message send. This is what guarantees a message can never be
+// associated with the wrong team: the server independently re-checks
+// team membership for whatever conversation_id this resolves to, but
+// this is the client-side half of "never accidentally Team B."
+function getSelectedConversationId() {
+  if (!messagesTeamState.selectedTeamId) return null;
+  const conversation = messagesTeamState.conversations.find(
+    (c) => Number(c.team_id) === Number(messagesTeamState.selectedTeamId)
+  );
+  return conversation ? conversation.id : null;
+}
+
+function teamDisplayLabel(team) {
+  // "Do not rely on names alone" — pair the name with sport (and school,
+  // if present) so two similarly-named teams are never ambiguous. Same
+  // pattern teams.js already uses for its own team meta line.
+  return [team.name, team.sport, team.school_name].filter(Boolean).join(" — ");
+}
+
+function renderMessagesTeamContext() {
+  if (!messagesTeamLabel) return;
+
+  const teams = messagesTeamState.myTeams;
+
+  messagesTeamLabel.classList.add("hidden");
+  messagesTeamSelectLabel.classList.add("hidden");
+  messagesTeamSelect.classList.add("hidden");
+  messagesTeamEmpty.classList.add("hidden");
+  messagesComposeContext.classList.add("hidden");
+
+  if (!teams.length) {
+    messagesTeamEmpty.classList.remove("hidden");
+    if (realMessageBodyInput) realMessageBodyInput.disabled = true;
+    if (realMessageSubmitBtn) realMessageSubmitBtn.disabled = true;
+    return;
+  }
+
+  if (realMessageBodyInput) realMessageBodyInput.disabled = false;
+  if (realMessageSubmitBtn) realMessageSubmitBtn.disabled = false;
+
+  const selectedTeam = teams.find((t) => Number(t.id) === Number(messagesTeamState.selectedTeamId));
+
+  // Single-team users see identity with no selection control at all — no
+  // unnecessary friction. Multi-team users get a real <select>.
+  if (teams.length === 1) {
+    messagesTeamLabel.textContent = teamDisplayLabel(teams[0]);
+    messagesTeamLabel.classList.remove("hidden");
+  } else {
+    messagesTeamSelectLabel.classList.remove("hidden");
+    messagesTeamSelect.classList.remove("hidden");
+    messagesTeamSelect.innerHTML = "";
+    teams.forEach((team) => {
+      const option = document.createElement("option");
+      option.value = team.id;
+      option.textContent = teamDisplayLabel(team);
+      option.selected = Number(team.id) === Number(messagesTeamState.selectedTeamId);
+      messagesTeamSelect.appendChild(option);
+    });
+  }
+
+  // Persistent identity right at the compose point, not just at the top
+  // of the screen — separate from the label/select above so it stays
+  // visible even if the user has scrolled through a long thread.
+  if (selectedTeam) {
+    messagesComposeContext.textContent = `Sending as: ${teamDisplayLabel(selectedTeam)}`;
+    messagesComposeContext.classList.remove("hidden");
+  }
+}
+
+// Fetches the user's real, currently-active teams AND their visible
+// conversations together, then resolves which team is selected. The
+// stored localStorage preference is validated against myTeams (the
+// server's live answer) every single time this runs — a team the user
+// no longer belongs to is silently discarded in favor of a real one,
+// never trusted as-is.
+async function loadMessagesTeamsAndConversations() {
+  if (!currentUser) return;
+
+  try {
+    const [myTeams, conversations] = await Promise.all([
+      apiFetch(`/api/users/${currentUser.id}/teams`),
+      apiFetch("/api/conversations"),
+    ]);
+
+    messagesTeamState.myTeams = myTeams || [];
+    messagesTeamState.conversations = conversations || [];
+
+    const stored = getStoredTeamPreference();
+    const storedIsValid = stored && messagesTeamState.myTeams.some((t) => Number(t.id) === Number(stored));
+
+    if (storedIsValid) {
+      setSelectedTeam(stored);
+    } else if (messagesTeamState.myTeams.length) {
+      setSelectedTeam(messagesTeamState.myTeams[0].id);
+    } else {
+      setSelectedTeam(null);
+    }
+
+    renderMessagesTeamContext();
+  } catch (error) {
+    console.error("Failed to load teams/conversations for Messages:", error);
+  }
+}
+
+if (messagesTeamSelect) {
+  messagesTeamSelect.addEventListener("change", async () => {
+    const newTeamId = Number(messagesTeamSelect.value);
+    setSelectedTeam(newTeamId);
+    renderMessagesTeamContext();
+
+    realMessageThread.innerHTML = "";
+    renderedMessageIds.clear();
+    await loadMessages();
+  });
+}
 
 /* ---------- polling state ---------- */
 
@@ -112,17 +265,24 @@ function appendNewMessages(messages) {
   return appended;
 }
 
+// Team-scoping fix: this used to cache a single currentConversationId for
+// the whole session — whichever conversation the DB happened to return
+// first, ignoring team entirely, and never re-resolved after that. There
+// is deliberately no conversation-ID cache anymore: the selected team
+// (messagesTeamState.selectedTeamId) is the only source of truth, and
+// getSelectedConversationId() re-derives the conversation from it fresh
+// on every call. This function's only remaining job is making sure
+// team/conversation data has been loaded at least once per session
+// (messagesTeamsLoaded — not once per poll tick).
 async function ensureCurrentConversation() {
-  if (currentConversationId || !currentUser) return currentConversationId;
+  if (!currentUser) return null;
 
-  try {
-    const conversations = await apiFetch("/api/conversations");
-    currentConversationId = conversations?.[0]?.id || null;
-  } catch (error) {
-    console.error("Failed to load conversations:", error);
+  if (!messagesTeamsLoaded) {
+    await loadMessagesTeamsAndConversations();
+    messagesTeamsLoaded = true;
   }
 
-  return currentConversationId;
+  return getSelectedConversationId();
 }
 
 function afterNewMessagesRendered() {
@@ -188,18 +348,31 @@ async function pollActiveConversation() {
   }
 }
 
-// Slower metadata refresh — mainly keeps Home's messages preview fresh
-// even if the active-conversation poll above hasn't ticked yet. The MVP
-// only ever has one conversation per user, so there's no list UI to
-// populate; this just re-resolves conversation metadata and re-renders
-// the preview.
+// Slower metadata refresh — keeps Home's messages preview fresh, and
+// (team-scoping fix) is also what catches a team revocation that happens
+// WHILE the user is actively viewing Messages: loadMessagesTeamsAndConversations()
+// re-validates the selected team against the server's live myTeams list
+// every time this runs, so a revoked team is silently dropped and a real
+// remaining team (or none) takes its place, same fallback logic as the
+// initial load — never trusting stale client state.
 async function pollConversationList() {
   if (conversationListPollBusy) return;
   conversationListPollBusy = true;
 
   try {
     if (!currentUser) return;
-    await apiFetch("/api/conversations");
+
+    const previousSelectedTeamId = messagesTeamState.selectedTeamId;
+    await loadMessagesTeamsAndConversations();
+
+    if (Number(messagesTeamState.selectedTeamId) !== Number(previousSelectedTeamId)) {
+      // The previously selected team is no longer valid (e.g. revoked
+      // mid-session) — reload the thread for whichever team the
+      // fallback landed on (or clear it if the user now has none).
+      realMessageThread.innerHTML = "";
+      renderedMessageIds.clear();
+      await loadMessages();
+    }
 
     if (typeof window.renderMessagesPreview === "function") {
       window.renderMessagesPreview();
@@ -305,10 +478,14 @@ if (realMessageForm) {
 
     if (!body) return;
 
+    // Always resolved fresh from the currently selected team at the
+    // moment of sending — ensureCurrentConversation() no longer caches a
+    // conversation id, so a team switch mid-compose can never result in
+    // a message landing in the wrong team's conversation.
     const conversationId = await ensureCurrentConversation();
 
     if (!conversationId) {
-      showMessage("No conversation available yet.");
+      showMessage("No team conversation available yet.");
       return;
     }
 
@@ -331,7 +508,12 @@ if (realMessageForm) {
 const __originalActivateAppForMessages = window.activateApp;
 window.activateApp = function (user) {
   __originalActivateAppForMessages(user);
-  currentConversationId = null; // reset on login so a different user re-resolves their own conversation
+  // Reset on login so a different user re-resolves their own teams and
+  // conversations from scratch, not whatever the previous session had —
+  // messagesTeamsLoaded=false is what makes ensureCurrentConversation()
+  // actually refetch instead of trusting stale state.
+  messagesTeamsLoaded = false;
+  messagesTeamState = { myTeams: [], conversations: [], selectedTeamId: null };
   loadMessages();
   refreshPollingState();
 };
@@ -345,6 +527,8 @@ const __originalLogoutLocalStateForMessages = window.logoutLocalState;
 window.logoutLocalState = function () {
   stopMessagePolling();
   messagesScreenActive = false;
+  messagesTeamsLoaded = false;
+  messagesTeamState = { myTeams: [], conversations: [], selectedTeamId: null };
   __originalLogoutLocalStateForMessages();
 };
 

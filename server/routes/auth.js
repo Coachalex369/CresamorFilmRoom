@@ -44,20 +44,13 @@ router.post("/api/auth/register", registerLimiter, async (req, res) => {
 
     const user = result.rows[0];
 
-    // Foundation Sprint Phase 2: preserve pre-conversation-model behavior
-    // (every user could read/post the one shared thread) by auto-joining
-    // new signups to the default conversation. Once real team-scoped
-    // conversations exist, this should become "join the conversation(s)
-    // for whatever team they join," not a blanket auto-join — flagged in
-    // the Phase 2 report as a placeholder, not a permanent design.
-    await client.query(
-      `
-      INSERT INTO conversation_participants (conversation_id, user_id)
-      SELECT id, $1 FROM conversations ORDER BY id LIMIT 1
-      ON CONFLICT (conversation_id, user_id) DO NOTHING
-      `,
-      [user.id]
-    );
+    // Messages team-scoping: the Phase 2 blanket auto-join-to-the-one-
+    // shared-conversation (every new signup, regardless of team) has been
+    // removed — it was the exact mechanism that let any user see any
+    // team's messages. A new user now joins a conversation only by
+    // joining a team (POST /api/teams, invitation accept, or
+    // POST /api/users/:id/teams each seed their own read-state row) — no
+    // team, no conversation, which is correct.
 
     // JWT payload carries only the id — email/role are reloaded from
     // Postgres on every authenticated request (see middleware/authenticate.js)
