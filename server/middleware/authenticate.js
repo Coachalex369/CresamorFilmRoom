@@ -7,8 +7,10 @@
   email/role are never trusted from the token itself: they're reloaded
   from Postgres on every request, so a role change or account deletion
   takes effect on the very next request instead of waiting out a 7-day
-  token expiry. req.user is intentionally narrow ({ id, email, role }) —
-  no password hash, no other profile fields.
+  token expiry. req.user is intentionally narrow ({ id, email, role,
+  is_platform_admin }) — no password hash, no other profile fields. Same
+  freshness guarantee now applies to is_platform_admin as to role: never
+  signed into the token, always a live read.
 
   Every rejection path (missing header, malformed header, bad signature,
   expired token, token id no longer in users) returns the same generic
@@ -45,7 +47,10 @@ async function authenticate(req, res, next) {
   }
 
   try {
-    const result = await client.query("SELECT id, email, role FROM users WHERE id = $1", [payload.id]);
+    const result = await client.query(
+      "SELECT id, email, role, is_platform_admin FROM users WHERE id = $1",
+      [payload.id]
+    );
     const user = result.rows[0];
 
     if (!user) {

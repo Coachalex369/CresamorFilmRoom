@@ -20,8 +20,8 @@ const { logSecurityEvent } = require("../services/auditLog");
 
 const router = express.Router();
 
-const VALID_ROLES = ["athlete", "parent", "assistant_coach"];
-const ROLE_LABELS = { athlete: "Athlete", parent: "Parent", assistant_coach: "Assistant Coach" };
+const VALID_ROLES = ["athlete", "parent", "assistant_coach", "coach"];
+const ROLE_LABELS = { athlete: "Athlete", parent: "Parent", assistant_coach: "Assistant Coach", coach: "Coach" };
 
 router.post("/api/teams/:teamId/invitations", authenticate, async (req, res) => {
   try {
@@ -40,6 +40,18 @@ router.post("/api/teams/:teamId/invitations", authenticate, async (req, res) => 
 
     if (!(await canManageTeam(req.user.id, teamId))) {
       return res.status(403).json({ error: "Not authorized to invite members to this team" });
+    }
+
+    // Platform Admin gate: canManageTeam above only proves the caller has
+    // SOME coach-level authority on this team -- it does not distinguish a
+    // platform admin from an ordinary team coach. A regular coach must not
+    // gain the ability to mint other coaches merely by being a coach
+    // themselves (that would defeat the point of a separate admin tier),
+    // so a Coach-level invitation additionally requires
+    // req.user.is_platform_admin, which authenticate.js reloads fresh from
+    // Postgres on every request -- never stale, never token-cached.
+    if (roleOnTeam === "coach" && !req.user.is_platform_admin) {
+      return res.status(403).json({ error: "Only a platform admin can invite a Coach to a team" });
     }
 
     const teamResult = await client.query("SELECT * FROM teams WHERE id = $1", [teamId]);
@@ -186,6 +198,37 @@ router.delete("/api/teams/:teamId/members/:userId", authenticate, async (req, re
 
     if (!(await canManageTeam(req.user.id, teamId))) {
       return res.status(403).json({ error: "Not authorized to manage members of this team" });
+    }
+
+    // Platform-admin hand-off safety net: a coach removing their OWN
+    // coach-level membership must never leave a team with zero active
+    // coaches -- most relevant here since it's exactly what a platform
+    // admin does after handing a beta team off to its real Coach, but
+    // written as a general guard (not admin-specific) since the failure
+    // mode it prevents (a team nobody can manage) is bad regardless of who
+    // triggers it.
+    if (Number(userId) === Number(req.user.id)) {
+      const selfRow = await client.query(
+        `SELECT role_on_team FROM team_members WHERE team_id = $1 AND user_id = $2 AND revoked_at IS NULL`,
+        [teamId, userId]
+      );
+
+      if (selfRow.rows[0]?.role_on_team === "coach") {
+        const otherActiveCoach = await client.query(
+          `
+          SELECT 1 FROM team_members
+          WHERE team_id = $1 AND user_id != $2 AND role_on_team = 'coach' AND revoked_at IS NULL
+          `,
+          [teamId, userId]
+        );
+
+        if (!otherActiveCoach.rows.length) {
+          return res.status(400).json({
+            error:
+              "Cannot remove yourself — this team would be left with no active Coach. Confirm another Coach is active on the team first.",
+          });
+        }
+      }
     }
 
     const result = await client.query(

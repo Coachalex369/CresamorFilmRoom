@@ -37,7 +37,7 @@ router.post("/api/auth/register", registerLimiter, async (req, res) => {
       `
       INSERT INTO users (email, password_hash, role)
       VALUES ($1, $2, $3)
-      RETURNING id, email, role
+      RETURNING id, email, role, is_platform_admin
       `,
       [email, hashedPassword, role]
     );
@@ -106,6 +106,7 @@ router.post("/api/auth/login", loginLimiter, async (req, res) => {
       id: user.id,
       email: user.email,
       role: user.role,
+      is_platform_admin: user.is_platform_admin,
     };
 
     // Same minimal-payload rule as register — only id is signed into the
@@ -221,7 +222,7 @@ router.post("/api/auth/reset-password", loginLimiter, async (req, res) => {
     const hashedPassword = await bcrypt.hash(newPassword, 10);
 
     const userResult = await client.query(
-      "UPDATE users SET password_hash = $1 WHERE id = $2 RETURNING id, email, role",
+      "UPDATE users SET password_hash = $1 WHERE id = $2 RETURNING id, email, role, is_platform_admin",
       [hashedPassword, resetToken.user_id]
     );
     const user = userResult.rows[0];

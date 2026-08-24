@@ -6,6 +6,58 @@ Guidance for future Claude Code sessions working in this repo.
 
 > **Note:** a second, differently-scoped `client/CLAUDE.md` also exists in this repo (broader product vision doc — different nav list, different priorities, not authored by any Claude Code session). Claude Code loads CLAUDE.md files from both the working directory and its parents, so both are in context when working under `client/`. They haven't been reconciled — check both if something seems inconsistent, and flag it to the user rather than silently picking one.
 
+## ✅ CURRENT BETA STATUS (as of 2026-08-20)
+
+**Closed Coach beta is GO.**
+
+- **Track 1 — manual picker large-file uploads**: still open, separate,
+  non-blocking. Fails for very large existing video files (reproduced
+  ~508 MiB, ~658 MiB) before the request is observable in Node/Express.
+  Root cause unresolved (client/OS-side vs. Render edge/proxy). No
+  safe-size boundary for manual iPhone uploads has been established. Was
+  already established as not being the reason beta was on hold, and
+  remains that way — communicate to beta coaches: prefer the native
+  Record flow; manual picker uploads of very large existing files remain
+  unreliable.
+- **Track 2 — native recording, realistic duration**: **RESOLVED.**
+  Validated via N1 (~60s / 6,484,951 bytes, PASS) and N2 (~5min /
+  31,758,537 bytes, full end-to-end PASS including confirmed iPhone and
+  desktop playback, raw server diagnostic block confirmed). The
+  memory-buffering pathway (Point A → IndexedDB → Point B → rebuilt
+  Blob) held byte-exact at both scales, the second a realistic
+  sideline-replay-length proxy. This was the actual condition blocking
+  beta; it's now cleared. Video 399 (~10min / 34,838,966 bytes) adds
+  further server-verified upload-endurance evidence at Cresamor's
+  largest native-recording upload to date.
+- **Native capture-duration ceiling (new, non-blocking, unresolved)**: a
+  ~10-minute native recording (video 399, 34,838,966 bytes) was cut off
+  automatically by iOS mid-recording ("maximum length for this video has
+  been reached"), while the same device's standalone Camera app does not
+  exhibit this cutoff — ruling out a general iPhone limit. Code
+  inspection found no explicit duration/size cap anywhere in Cresamor's
+  own native capture path (`capture.js`/`index.html`). Leading
+  explanation, **not yet proven**: iOS/WebKit's native picker component
+  invoked by `<input type="file" accept="video/*" capture>` itself,
+  distinct from Camera.app. Isolation test (bare HTML page, no Cresamor
+  code) proposed in RELEASE_NOTES.md, not yet run. Does not affect the
+  GO decision or Track 2's resolved status — this is a capture-stage
+  limitation separate from the already-validated upload/memory pathway.
+  Known limitation to communicate: coaches recording continuously beyond
+  ~10 minutes through the current native Record flow may hit this.
+
+A 20-minute native-recording test is **not** the next step under the
+current capture path — if the capture UI itself enforces a ~10-minute
+ceiling, that test cannot currently produce a 20-minute payload
+regardless of upload readiness. Run the bare-HTML isolation test first;
+only if that clears does a longer-recording architecture question become
+relevant, as a separate future task.
+
+`RELEASE_NOTES.md`'s 2026-08-20 "Native-recording validation: N1 PASS,
+N2 PASS — Track 2 HOLD lifted" entry (including the Video 399 capture-
+ceiling subsection) and the 2026-08-19 entry it builds on are
+authoritative for all tracks' full evidence — read them before acting,
+don't re-derive from commit messages alone.
+
 ## What this is
 
 Cresamor: not just a film platform — the product goal (per the project owner) is an athlete's permanent digital sports journey, where profile/teams/film/highlights/messages/calendar/recruiting eventually read as one connected timeline. The MVP today is a sports film-review app: coaches upload game film, athletes/parents watch it, clip highlights, and message. Tagline: "Your Film, Your Way." Deployed on Render as `CresamorFilmRoom-3` (`https://cresamorfilmroom-3.onrender.com`), backed by a free-tier Render Postgres database (`cresamor_db`). See `ARCHITECTURE.md` for the intended Organization → School → Team hierarchy this is being built toward.
@@ -15,8 +67,10 @@ Cresamor: not just a film platform — the product goal (per the project owner) 
 Plain Node/Express backend (routes organized by resource under `server/routes/`, see `ARCHITECTURE.md`) + vanilla JS/HTML/CSS frontend. **No framework, no bundler, no build step.** New frontend code is added as separate files loaded via `<script>` tags in `client/index.html`, in load order:
 
 ```
-recordingLibrary.js → app.js → mockData.js → messages.js → home.js → recordingPipeline.js → capture.js
+recordingLibrary.js → app.js → mockData.js → messages.js → home.js → recordingPipeline.js → capture.js → teams.js → invitations.js
 ```
+
+`teams.js` and `invitations.js` load last, after `capture.js` — same shared-global-scope convention applies.
 
 `recordingLibrary.js` loads *before* `app.js` deliberately — it's the one new frontend file with zero dependency on anything else, and `app.js` itself needs to reference it at its own top level (subscribing the Film Room list to recording-library changes). Every other later file still relies on globals declared by earlier ones (no module system) — e.g. `home.js` uses `apiFetch`, `currentUser`, `filmPlayer`, `selectVideo` from `app.js`, and monkey-patches `window.activateApp`/`window.logoutLocalState` to hook into the login lifecycle without editing `app.js`'s function bodies. Keep this pattern for any new frontend file: don't introduce a bundler or reformat `app.js` into modules without discussing it with the user first — it's a deliberate constraint, not an oversight. (A few narrow, explicitly-documented exceptions exist where `app.js` *was* edited directly: `uploadVideo()` converted to `XMLHttpRequest` for real progress, a blocking `alert()` removed from `loadVideos()`, and the Film Room list becoming a projection over `recordingLibrary` — all explained inline in that file.)
 
@@ -33,7 +87,7 @@ function topLevelDecls(file) {
   while ((m = re.exec(src))) names.add(m[1]);
   return names;
 }
-const files = ["recordingLibrary.js", "app.js", "mockData.js", "messages.js", "home.js", "recordingPipeline.js", "capture.js"];
+const files = ["recordingLibrary.js", "app.js", "mockData.js", "messages.js", "home.js", "recordingPipeline.js", "capture.js", "teams.js", "invitations.js"];
 const seen = new Map();
 for (const f of files) {
   for (const name of topLevelDecls(f)) {
@@ -78,6 +132,45 @@ Remember: even locally, all API calls go to the live deployed backend by default
 - **Beta Readiness Sprint 2 (server-side authentication & authorization)**: Closed the app's single biggest remaining gap — no route verified the JWT bearer token, so identity was whatever a client claimed. New `server/middleware/authenticate.js` (verifies the token, reloads the user fresh from Postgres, attaches `req.user`) and `server/middleware/authorize.js` (`requireRole`/`requireOwner`/`requireConversationParticipant`, composable and declarative) are now applied across all 21 routes; `permissions.js` gained `canAccessTeam`/`canViewVideo`/`canManageTeamMembership`. JWT payload trimmed to `{ id }` only — email/role are always a fresh DB read. Fixed two real privilege bugs found during the route audit: `GET /api/conversations` returning every conversation when `user_id` was omitted, and `POST /api/users/:id/teams` allowing unauthenticated role escalation to `coach`. Added a DB-backed security audit log (`security_audit_log`, migration `007`) for login/failed-login/deletion/membership-change/rate-limit events; `express-rate-limit` on login/register/upload routes; `helmet()` for standard security headers; environment-driven CORS (`ALLOWED_ORIGIN`) and upload-size limits (`MAX_VIDEO_UPLOAD_MB`/`MAX_PHOTO_UPLOAD_MB`, video default raised well past the old 500MB figure since streaming upload never buffers in memory). Removed the client's free-text "type any username/role" message fields (`client/index.html`) — a real identity-spoofing surface — since the server now derives message identity from the authenticated user. New `server/scripts/testAuth.js` (plain Node, no framework) drives the real app over HTTP and asserts the full acceptance list, cleaning up every row it creates. Full detail in `ARCHITECTURE.md`'s "Permission model."
 - **Conversion pipeline OOM stabilization** (2026-08-05): A real production OOM/502 incident converting a mere 10MB phone clip traced to FFmpeg's default thread auto-detection sizing itself off the *host* machine's core count rather than Render's actual 0.5vCPU allocation — reproduced locally against the real file (694MB peak RSS unmodified vs 310MB with `-threads 1`), not file size, which the existing size cap had already ruled out. Fixed with explicit thread pinning (`VIDEO_FFMPEG_THREADS`), an `ffprobe` preflight pass rejecting pathological resolution/frame-rate before FFmpeg ever starts, and explicit `-map` stream selection instead of trusting automatic mapping. Also closed a same-day gap where diagnostic/test code itself corrupted production video rows twice (`ALLOW_PRODUCTION_TESTS` opt-in gate + hard SQL `id = ANY()` scoping on every DB-writing script), and added `repairVideo()`, an admin-only script-only repair path for a stale-error row distinct from the coach-facing `retryConversion()`. Full root cause, before/after measurements, every fix, and current known limitations in `RELEASE_NOTES.md` — the reference for "why are FFmpeg threads pinned to one?"
 
+- **Invitation-accept authorization fix** (2026-08-18, `3190dfb`): opening
+  an invitation link while logged into a *different* account silently
+  accepted it — token possession alone was checked, not identity.
+  Combined with team_members' upsert-on-conflict, a lower-role invite
+  could silently overwrite an existing coach's own membership;
+  reproduced and repaired in production (`team_members.id=105`). Fixed:
+  email invitations now require the authenticated user's server-derived
+  email to match the invitation's destination (mismatch → 409, nothing
+  consumed); an *active* coach membership can never be silently
+  overwritten by a lower-role invite. Client gained an explicit
+  confirm-account modal and a distinct mismatch screen.
+- **Coach video team reassignment** (2026-08-18, `e5871d2`): new
+  `PATCH /api/videos/:id/team`, gated by `canManageTeam()` on *both*
+  source and destination team (not `canDeleteVideo()`'s uploader-or-coach
+  check) — reassignment changes who can see the video.
+- **Final pre-beta authorization audit fixes** (2026-08-18, `1bc6655`) —
+  **supersedes the "uploader or coach" `canDeleteVideo` description in
+  the Playback-fix pass entry above**: (1) `canDeleteVideo()` (also used
+  by retry-conversion/retry-classification) previously let any global
+  `role='coach'` user manage *any* video regardless of team. Now:
+  uploader always manages their own video; an **assigned** video
+  requires `canManageTeam()`; an **unassigned** video keeps the prior
+  any-global-coach rule, mirroring `canViewVideo()`'s own null-team-id
+  branch. (2) `GET /api/users/:id/teams` and `/clips` had no ownership
+  check beyond `authenticate` — fixed with `requireOwner("id")` (already
+  proven on `profile.js`).
+
 ## Remaining known debt (see `ARCHITECTURE.md`'s "Not yet built" for the full list)
 
 Real video transcoding/thumbnailing; `events`/Calendar and `watch_progress` still mock/local; parent-child linking (and the narrow parent access that results); server-side token revocation (logout is client-side-only); direct browser-to-R2 uploads (still proxied through Express); Messages preview's unread *count* still mocked (only read/unread *state* is real, since Phase 2); chunked/resumable upload during recording (documented future milestone); real background sync (the recording pipeline only retries while the app is open — no service worker); `navigator.storage.persist()` not called, so IndexedDB storage isn't guaranteed to survive disk pressure; coach-editing-an-athlete's-profile; an org-admin role tier above "coach".
+
+## Future direction (recorded, not implemented)
+
+Per the project owner: a single user may eventually hold **different
+roles on different teams** — e.g. Coach on a high-school football team,
+Athlete on an adult flag-football team, Parent for a child's soccer team,
+all on one account. `users.role` today is a single account-wide value;
+the direction is toward team/resource relationships
+(`team_members.role_on_team`, already the real unit of truth for
+`canManageTeam()`/`canAccessTeam()`) increasingly driving access instead
+of `users.role` alone. Architectural direction only — no authorization
+code should change for this today.

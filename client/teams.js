@@ -176,12 +176,26 @@ function renderTeamDetail() {
 
     item.appendChild(info);
 
-    if (canManage && member.id !== currentUser.id) {
+    // Self-removal (leaving a team you manage) is scoped to platform
+    // admins only, for the beta hand-off flow (create team -> invite the
+    // real Coach -> step down). Ordinary coaches keep the existing
+    // behavior -- no "remove yourself" control -- unless that's
+    // deliberately extended later. The server independently enforces the
+    // "never leave a team coachless" rule regardless of who's asking, so
+    // this client-side scoping is about which button appears, not the
+    // actual safety guarantee.
+    const isSelf = member.id === currentUser.id;
+    const isPlatformAdmin = Boolean(currentUser) && currentUser.is_platform_admin;
+    const canRemoveThisRow = canManage && (!isSelf || isPlatformAdmin);
+
+    if (canRemoveThisRow) {
       const revokeBtn = document.createElement("button");
       revokeBtn.type = "button";
       revokeBtn.className = "team-roster-revoke-btn";
-      revokeBtn.textContent = "Remove";
-      revokeBtn.addEventListener("click", () => revokeMember(member.id, member.display_name || member.email));
+      revokeBtn.textContent = isSelf ? "Leave Team" : "Remove";
+      revokeBtn.addEventListener("click", () =>
+        revokeMember(member.id, member.display_name || member.email, isSelf)
+      );
       item.appendChild(revokeBtn);
     }
 
@@ -233,8 +247,12 @@ function renderTeamInvitations() {
   });
 }
 
-async function revokeMember(userId, label) {
-  if (!confirm(`Remove ${label} from this team? Their Cresamor account is not affected — they can be re-invited any time.`)) {
+async function revokeMember(userId, label, isSelf) {
+  const confirmMessage = isSelf
+    ? `Leave this team? You'll lose Coach access unless you're re-invited. Make sure another Coach is already active on the team first.`
+    : `Remove ${label} from this team? Their Cresamor account is not affected — they can be re-invited any time.`;
+
+  if (!confirm(confirmMessage)) {
     return;
   }
 
@@ -285,10 +303,30 @@ async function submitCreateTeam() {
 
 // ---------- invite member ----------
 
+// Platform-admin-only "Coach" invite option. Injected/removed via JS
+// rather than toggled with a CSS class on a static <option> -- this
+// project has hit real cross-browser/iOS Safari inconsistencies with
+// hidden <option> elements before, so the option simply doesn't exist in
+// the DOM at all for a non-admin, rather than existing-but-hidden.
+function syncInviteRoleCoachOption() {
+  const existing = inviteRoleSelect.querySelector('option[value="coach"]');
+  const isPlatformAdmin = Boolean(currentUser) && currentUser.is_platform_admin;
+
+  if (isPlatformAdmin && !existing) {
+    const option = document.createElement("option");
+    option.value = "coach";
+    option.textContent = "Coach";
+    inviteRoleSelect.appendChild(option);
+  } else if (!isPlatformAdmin && existing) {
+    existing.remove();
+  }
+}
+
 function openInviteModal() {
   inviteTeamNameLabel.textContent = teamsScreenState.currentTeamDetail
     ? `Inviting to ${teamsScreenState.currentTeamDetail.name}`
     : "";
+  syncInviteRoleCoachOption();
   inviteDestinationInput.value = "";
   inviteFormError.classList.add("hidden");
   inviteStepForm.classList.remove("hidden");
