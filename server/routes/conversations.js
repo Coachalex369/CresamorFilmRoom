@@ -47,7 +47,17 @@ router.get("/api/conversations", authenticate, async (req, res) => {
                WHERE cp.conversation_id = conversations.id AND cp.user_id = $1),
               'epoch'
             )
-        ) AS unread_count
+        ) AS unread_count,
+        (
+          SELECT m.body FROM messages m
+          WHERE m.conversation_id = conversations.id
+          ORDER BY m.created_at DESC LIMIT 1
+        ) AS last_message_preview,
+        (
+          SELECT m.created_at FROM messages m
+          WHERE m.conversation_id = conversations.id
+          ORDER BY m.created_at DESC LIMIT 1
+        ) AS last_message_at
       FROM conversations
       LEFT JOIN teams ON teams.id = conversations.team_id
       WHERE
