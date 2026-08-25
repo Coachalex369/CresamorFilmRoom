@@ -108,8 +108,8 @@
             Messages
           </button>
 
-          <button class="tab-btn" data-screen="calendar-screen">
-            Calendar
+          <button class="tab-btn" data-screen="schedule-screen">
+            Schedule
           </button>
 
           <button class="tab-btn" data-screen="teams-screen">
@@ -464,14 +464,118 @@
           </div>
         </section>
 
-        <!-- CALENDAR SCREEN -->
-        <section id="calendar-screen" class="app-screen">
-          <div class="placeholder-screen">
-            <h2>Calendar</h2>
-            <p class="mock-note">Showing sample events — a real team calendar is coming in a later phase.</p>
-            <ul id="calendar-events-list"></ul>
+        <!-- SCHEDULE SCREEN — Cresamor's single source of truth for team
+             events. Calendar and Agenda below are two views over the SAME
+             fetched data (scheduleState.events in schedule.js), not
+             separate copies — see schedule.js. -->
+        <section id="schedule-screen" class="app-screen">
+          <div id="schedule-layout">
+            <h2>Schedule</h2>
+
+            <!-- Team context: exactly one of label/select/empty state is
+                 shown, mirroring messages.js's pattern, plus an "All
+                 Teams" option Messages doesn't need (Schedule can show a
+                 merged, team-labeled view; a single conversation can't).
+                 Local to this screen — not shared global "current team"
+                 state, same standing decision as Messages. -->
+            <div id="schedule-team-context">
+              <p id="schedule-team-label" class="hidden"></p>
+              <label for="schedule-team-select" id="schedule-team-select-label" class="hidden">Team</label>
+              <select id="schedule-team-select" class="hidden"></select>
+              <p id="schedule-team-empty" class="hidden">You're not on a team yet — join or create one to see a schedule.</p>
+            </div>
+
+            <div id="schedule-view-toggle">
+              <button type="button" id="schedule-view-calendar-btn" class="schedule-view-btn active">Calendar</button>
+              <button type="button" id="schedule-view-agenda-btn" class="schedule-view-btn">Agenda</button>
+              <button type="button" id="schedule-add-event-btn" class="hidden">+ Add Event</button>
+            </div>
+
+            <div id="schedule-calendar-view">
+              <div id="schedule-calendar-header">
+                <button type="button" id="schedule-calendar-prev-btn" aria-label="Previous month">‹</button>
+                <span id="schedule-calendar-month-label"></span>
+                <button type="button" id="schedule-calendar-next-btn" aria-label="Next month">›</button>
+              </div>
+              <div id="schedule-calendar-weekdays">
+                <span>Sun</span><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span>
+              </div>
+              <div id="schedule-calendar-grid"></div>
+            </div>
+
+            <div id="schedule-agenda-view" class="hidden">
+              <ul id="schedule-agenda-list"></ul>
+              <p id="schedule-agenda-empty" class="hidden">No upcoming scheduled items.</p>
+            </div>
           </div>
         </section>
+
+        <!-- Tapping a Calendar day opens this: that day's events (tap to
+             edit) plus Add Event when the current viewer has management
+             permission for at least one relevant team. No hover — this is
+             the mobile-friendly action surface Calendar taps into. -->
+        <div id="schedule-day-modal" class="hidden">
+          <div id="schedule-day-modal-inner">
+            <button id="schedule-day-close-btn" type="button" aria-label="Close">✕</button>
+            <h3 id="schedule-day-modal-title"></h3>
+            <ul id="schedule-day-events-list"></ul>
+            <p id="schedule-day-events-empty" class="hidden">Nothing scheduled for this day.</p>
+            <button type="button" id="schedule-day-add-event-btn" class="hidden">+ Add Event</button>
+          </div>
+        </div>
+
+        <!-- Add/Edit Event. Team is only shown as a real, changeable
+             <select> when the caller manages more than one team — see
+             renderScheduleEventForm() in schedule.js. Server-side
+             authorization is what actually enforces "must manage the
+             target team," same as everywhere else in this app; this
+             control is UX only. -->
+        <div id="schedule-event-modal" class="hidden">
+          <div id="schedule-event-modal-inner">
+            <button id="schedule-event-close-btn" type="button" aria-label="Close">✕</button>
+            <h3 id="schedule-event-modal-title">Add Event</h3>
+
+            <label for="schedule-event-team-select">Team</label>
+            <select id="schedule-event-team-select"></select>
+
+            <label for="schedule-event-type-select">Type</label>
+            <select id="schedule-event-type-select">
+              <option value="practice">Practice</option>
+              <option value="competition">Competition</option>
+              <option value="meeting">Meeting</option>
+              <option value="team_event">Team Event</option>
+              <option value="other">Other</option>
+            </select>
+
+            <label for="schedule-event-title-input">Title</label>
+            <input type="text" id="schedule-event-title-input" placeholder="Event title" />
+
+            <label for="schedule-event-date-input">Date</label>
+            <input type="date" id="schedule-event-date-input" />
+
+            <label for="schedule-event-start-input">Start time</label>
+            <input type="time" id="schedule-event-start-input" />
+
+            <label for="schedule-event-end-input">End time (optional)</label>
+            <input type="time" id="schedule-event-end-input" />
+
+            <label for="schedule-event-location-input">Location</label>
+            <input type="text" id="schedule-event-location-input" placeholder="Location" />
+
+            <label for="schedule-event-description-input">Description / notes</label>
+            <textarea id="schedule-event-description-input" placeholder="Optional notes" rows="3"></textarea>
+
+            <p id="schedule-event-form-error" class="hidden"></p>
+            <p id="schedule-event-canceled-badge" class="hidden">This event is canceled.</p>
+
+            <div id="schedule-event-modal-actions">
+              <button type="button" id="schedule-event-save-btn">Save</button>
+              <button type="button" id="schedule-event-cancel-event-btn" class="hidden">Cancel Event</button>
+              <button type="button" id="schedule-event-uncancel-btn" class="hidden">Restore Event</button>
+              <button type="button" id="schedule-event-delete-btn" class="hidden">Delete Event</button>
+            </div>
+          </div>
+        </div>
 
         <!-- TEAMS SCREEN -->
         <section id="teams-screen" class="app-screen">
@@ -757,5 +861,6 @@
     <script src="./capture.js"></script>
     <script src="./teams.js"></script>
     <script src="./invitations.js"></script>
+    <script src="./schedule.js"></script>
   </body>
 </html>

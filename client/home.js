@@ -16,7 +16,8 @@
       is a deliberate exception since it's inherently session/UX state).
     - Messages Preview: reads #message-thread, which messages.js now
       populates from REAL data (GET /api/messages) instead of a fake thread.
-    - Upcoming Events: MOCK (mockData.js).
+    - Upcoming Events: REAL data as of Phase 3 (Home Integration) --
+      GET /api/users/:id/upcoming-events.
     - Recent Activity: REAL videos/clips, padded with MOCK fallback entries
       only when real activity is sparse.
 */
@@ -663,68 +664,101 @@ if (viewAllMessagesBtn) {
   });
 }
 
-/* ---------- UPCOMING EVENTS (mock — see mockData.js) ---------- */
+/* ---------- UPCOMING EVENTS (Phase 3: real data) ----------
+   Backed by GET /api/users/:id/upcoming-events -- the purpose-built,
+   owner-protected endpoint that already does the global-next-3-across-
+   all-teams sort/filter/limit server-side (see testSchedule.js #25-31).
+   This file does not re-derive any of that: it renders whatever comes
+   back (0-3 rows), in the order given. Rows are built with
+   createElement/textContent, not innerHTML, since title/location/team
+   name are real user-entered strings now, not hardcoded mock text. */
 
-function renderUpcomingEvents() {
-  if (!upcomingEventsList) return;
+function formatEventTypeLabel(type) {
+  return (
+    String(type || "")
+      .split("_")
+      .filter(Boolean)
+      .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+      .join(" ") || "Event"
+  );
+}
+
+function renderUpcomingEventRow(event) {
+  const li = document.createElement("li");
+  li.className = "upcoming-event-item";
+
+  const badge = document.createElement("span");
+  badge.className = "event-type-badge";
+  badge.textContent = formatEventTypeLabel(event.event_type);
+
+  const details = document.createElement("div");
+  details.className = "event-details";
+
+  const titleEl = document.createElement("strong");
+  titleEl.textContent = event.title;
+
+  const when = new Date(event.starts_at).toLocaleString(undefined, {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+  const metaEl = document.createElement("small");
+  metaEl.textContent = [when, event.team_name, event.location].filter(Boolean).join(" • ");
+
+  details.appendChild(titleEl);
+  details.appendChild(metaEl);
+  li.appendChild(badge);
+  li.appendChild(details);
+
+  li.addEventListener("click", () => {
+    // schedule.js loads after home.js (script order), so this only
+    // exists once the app has fully loaded -- exactly like
+    // window.markCurrentConversationRead's own guarded lookup above.
+    if (typeof window.goToScheduleEvent === "function") {
+      window.goToScheduleEvent(event);
+    } else {
+      switchToScreen("schedule-screen");
+    }
+  });
+
+  return li;
+}
+
+async function renderUpcomingEvents() {
+  if (!upcomingEventsList || !currentUser) return;
+
+  upcomingEventsList.innerHTML = "";
+  const loadingLi = document.createElement("li");
+  loadingLi.className = "empty-state";
+  loadingLi.textContent = "Loading…";
+  upcomingEventsList.appendChild(loadingLi);
+
+  let events;
+  try {
+    events = await apiFetch(`/api/users/${currentUser.id}/upcoming-events`);
+  } catch (error) {
+    console.error("Failed to load upcoming events:", error);
+    upcomingEventsList.innerHTML = "";
+    const errorLi = document.createElement("li");
+    errorLi.className = "empty-state";
+    errorLi.textContent = "Could not load upcoming events.";
+    upcomingEventsList.appendChild(errorLi);
+    return;
+  }
 
   upcomingEventsList.innerHTML = "";
 
-  MOCK_EVENTS.forEach((event) => {
-    const li = document.createElement("li");
-    li.className = "upcoming-event-item";
+  if (!Array.isArray(events) || !events.length) {
+    const emptyLi = document.createElement("li");
+    emptyLi.className = "empty-state";
+    emptyLi.textContent = "No upcoming events.";
+    upcomingEventsList.appendChild(emptyLi);
+    return;
+  }
 
-    const when = new Date(event.startsAt).toLocaleString(undefined, {
-      weekday: "short",
-      month: "short",
-      day: "numeric",
-      hour: "numeric",
-      minute: "2-digit",
-    });
-
-    li.innerHTML = `
-      <span class="event-type-badge event-type-${event.type}">${EVENT_TYPE_LABELS[event.type]}</span>
-      <div class="event-details">
-        <strong>${event.title}</strong>
-        <small>${when} • ${event.location}</small>
-      </div>
-    `;
-
-    li.addEventListener("click", () => switchToScreen("calendar-screen"));
-    upcomingEventsList.appendChild(li);
-  });
-
-  renderCalendarScreen();
-}
-
-function renderCalendarScreen() {
-  const calendarEventsList = document.querySelector("#calendar-events-list");
-  if (!calendarEventsList) return;
-
-  calendarEventsList.innerHTML = "";
-
-  MOCK_EVENTS.forEach((event) => {
-    const li = document.createElement("li");
-    li.className = "upcoming-event-item";
-
-    const when = new Date(event.startsAt).toLocaleString(undefined, {
-      weekday: "long",
-      month: "short",
-      day: "numeric",
-      hour: "numeric",
-      minute: "2-digit",
-    });
-
-    li.innerHTML = `
-      <span class="event-type-badge event-type-${event.type}">${EVENT_TYPE_LABELS[event.type]}</span>
-      <div class="event-details">
-        <strong>${event.title}</strong>
-        <small>${when} • ${event.location}</small>
-      </div>
-    `;
-
-    calendarEventsList.appendChild(li);
-  });
+  events.forEach((event) => upcomingEventsList.appendChild(renderUpcomingEventRow(event)));
 }
 
 /* ---------- RECENT ACTIVITY (real data, padded with mock fallback) ---------- */

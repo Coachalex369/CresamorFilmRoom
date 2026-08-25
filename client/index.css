@@ -1695,7 +1695,9 @@ body.app-active #reset-password-screen {
 #create-team-modal,
 #invite-modal,
 #invitation-confirm-modal,
-#video-team-modal {
+#video-team-modal,
+#schedule-day-modal,
+#schedule-event-modal {
   position: fixed;
   inset: 0;
   z-index: 100;
@@ -1709,14 +1711,18 @@ body.app-active #reset-password-screen {
 #create-team-modal.hidden,
 #invite-modal.hidden,
 #invitation-confirm-modal.hidden,
-#video-team-modal.hidden {
+#video-team-modal.hidden,
+#schedule-day-modal.hidden,
+#schedule-event-modal.hidden {
   display: none;
 }
 
 #create-team-modal-inner,
 #invite-modal-inner,
 #invitation-confirm-modal-inner,
-#video-team-modal-inner {
+#video-team-modal-inner,
+#schedule-day-modal-inner,
+#schedule-event-modal-inner {
   position: relative;
   width: 100%;
   max-width: 480px;
@@ -1731,7 +1737,9 @@ body.app-active #reset-password-screen {
 
 #create-team-close-btn,
 #invite-close-btn,
-#video-team-close-btn {
+#video-team-close-btn,
+#schedule-day-close-btn,
+#schedule-event-close-btn {
   position: absolute;
   top: 0.75rem;
   right: 0.75rem;
@@ -1744,9 +1752,17 @@ body.app-active #reset-password-screen {
 #create-team-modal-inner input,
 #invite-modal-inner input,
 #invite-modal-inner select,
-#video-team-modal-inner select {
+#video-team-modal-inner select,
+#schedule-event-modal-inner input,
+#schedule-event-modal-inner select,
+#schedule-event-modal-inner textarea {
   width: 100%;
   margin-bottom: 0.8rem;
+}
+
+#schedule-event-modal-inner textarea {
+  resize: vertical;
+  font-family: inherit;
 }
 
 #invite-team-name-label {
@@ -1755,11 +1771,184 @@ body.app-active #reset-password-screen {
 }
 
 #invite-modal-inner label,
-#video-team-modal-inner label {
+#video-team-modal-inner label,
+#schedule-event-modal-inner label {
   display: block;
   color: var(--muted);
   font-size: 0.85rem;
   margin-bottom: 0.3rem;
+}
+
+/* ---------- Schedule: team context, view toggle, Calendar grid, Agenda ---------- */
+
+#schedule-team-context {
+  margin-bottom: 1rem;
+}
+
+#schedule-team-select {
+  width: 100%;
+  max-width: 320px;
+}
+
+#schedule-view-toggle {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+  flex-wrap: wrap;
+}
+
+.schedule-view-btn {
+  opacity: 0.6;
+}
+
+.schedule-view-btn.active {
+  opacity: 1;
+  border-color: var(--gold, #d4af37);
+}
+
+#schedule-add-event-btn {
+  margin-left: auto;
+}
+
+#schedule-calendar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.5rem;
+}
+
+#schedule-calendar-month-label {
+  font-weight: 600;
+}
+
+#schedule-calendar-prev-btn,
+#schedule-calendar-next-btn {
+  min-width: 44px;
+  min-height: 44px;
+}
+
+#schedule-calendar-weekdays {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.8rem;
+  margin-bottom: 0.25rem;
+}
+
+#schedule-calendar-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 4px;
+}
+
+/* Tap target sized for touch, not hover — day cells are buttons, not
+   divs with a hover-only affordance. */
+.schedule-calendar-day {
+  min-height: 56px;
+  padding: 4px;
+  border: 1px solid var(--gold-dim, rgba(212, 175, 55, 0.25));
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  cursor: pointer;
+  overflow: hidden; /* a busy day's dot row must clip, never stretch the row */
+}
+
+/* Desktop/tablet: give the 6-week grid a real height instead of shrink-wrapping
+   its rows to the dot row's content, so cells read as calendar squares instead
+   of spreadsheet rows. grid-auto-rows: 1fr splits that height evenly across
+   however many week-rows actually render (5 or 6), so every row stays equal
+   height regardless of how many events land in it. Deliberately gated behind
+   a min-width so phones/tablets keep the original content-sized rows instead
+   of inheriting a desktop-scaled height that wouldn't fit their viewport. */
+@media (min-width: 700px) {
+  #schedule-calendar-grid {
+    height: calc(100vh - 420px);
+    min-height: 420px;
+    grid-auto-rows: 1fr;
+  }
+
+  .schedule-calendar-day {
+    min-height: 0;
+  }
+}
+
+.schedule-calendar-day.schedule-day-outside-month {
+  opacity: 0.35;
+}
+
+.schedule-calendar-day.schedule-day-today {
+  border-color: var(--gold, #d4af37);
+  border-width: 2px;
+}
+
+.schedule-calendar-day-number {
+  font-size: 0.85rem;
+}
+
+.schedule-calendar-day-dot-row {
+  display: flex;
+  gap: 3px;
+  flex-wrap: wrap;
+}
+
+.schedule-calendar-day-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--gold, #d4af37);
+}
+
+.schedule-calendar-day-dot.schedule-day-dot-canceled {
+  background: var(--muted);
+}
+
+#schedule-agenda-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.schedule-agenda-item {
+  padding: 0.75rem 0;
+  border-bottom: 1px solid var(--gold-dim, rgba(212, 175, 55, 0.15));
+  cursor: pointer;
+  display: flex;
+  gap: 0.75rem;
+  align-items: flex-start;
+}
+
+.schedule-agenda-item-details {
+  min-width: 0; /* allows the long-title/location truncation below to actually engage */
+  flex: 1;
+}
+
+.schedule-agenda-item-details strong,
+.schedule-agenda-item-details small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.schedule-agenda-item.schedule-event-canceled {
+  opacity: 0.55;
+}
+
+.schedule-agenda-item.schedule-event-canceled strong {
+  text-decoration: line-through;
+}
+
+#schedule-day-events-list,
+#schedule-day-modal-inner .schedule-agenda-item {
+  list-style: none;
+  padding: 0;
+  margin: 0;
 }
 
 /* Temporary mobile debug panel — see index.html for why this exists.
