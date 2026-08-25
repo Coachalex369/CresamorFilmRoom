@@ -71,10 +71,10 @@ Cresamor: not just a film platform — the product goal (per the project owner) 
 Plain Node/Express backend (routes organized by resource under `server/routes/`, see `ARCHITECTURE.md`) + vanilla JS/HTML/CSS frontend. **No framework, no bundler, no build step.** New frontend code is added as separate files loaded via `<script>` tags in `client/index.html`, in load order:
 
 ```
-recordingLibrary.js → app.js → mockData.js → messages.js → home.js → recordingPipeline.js → capture.js → teams.js → invitations.js
+recordingLibrary.js → app.js → mockData.js → messages.js → home.js → recordingPipeline.js → capture.js → teams.js → invitations.js → schedule.js
 ```
 
-`teams.js` and `invitations.js` load last, after `capture.js` — same shared-global-scope convention applies.
+`teams.js`, `invitations.js`, and `schedule.js` load last, after `capture.js` — same shared-global-scope convention applies. (`schedule.js` bit this exact collision once already, during its own initial implementation: a top-level `teamDisplayLabel` helper collided with `messages.js`'s function of the same name — caught by this project's own collision-check command before it shipped, renamed to `scheduleTeamDisplayLabel`.)
 
 `recordingLibrary.js` loads *before* `app.js` deliberately — it's the one new frontend file with zero dependency on anything else, and `app.js` itself needs to reference it at its own top level (subscribing the Film Room list to recording-library changes). Every other later file still relies on globals declared by earlier ones (no module system) — e.g. `home.js` uses `apiFetch`, `currentUser`, `filmPlayer`, `selectVideo` from `app.js`, and monkey-patches `window.activateApp`/`window.logoutLocalState` to hook into the login lifecycle without editing `app.js`'s function bodies. Keep this pattern for any new frontend file: don't introduce a bundler or reformat `app.js` into modules without discussing it with the user first — it's a deliberate constraint, not an oversight. (A few narrow, explicitly-documented exceptions exist where `app.js` *was* edited directly: `uploadVideo()` converted to `XMLHttpRequest` for real progress, a blocking `alert()` removed from `loadVideos()`, and the Film Room list becoming a projection over `recordingLibrary` — all explained inline in that file.)
 
@@ -91,7 +91,7 @@ function topLevelDecls(file) {
   while ((m = re.exec(src))) names.add(m[1]);
   return names;
 }
-const files = ["recordingLibrary.js", "app.js", "mockData.js", "messages.js", "home.js", "recordingPipeline.js", "capture.js", "teams.js", "invitations.js"];
+const files = ["recordingLibrary.js", "app.js", "mockData.js", "messages.js", "home.js", "recordingPipeline.js", "capture.js", "teams.js", "invitations.js", "schedule.js"];
 const seen = new Map();
 for (const f of files) {
   for (const name of topLevelDecls(f)) {
