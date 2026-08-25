@@ -29,28 +29,32 @@ Guidance for future Claude Code sessions working in this repo.
   beta; it's now cleared. Video 399 (~10min / 34,838,966 bytes) adds
   further server-verified upload-endurance evidence at Cresamor's
   largest native-recording upload to date.
-- **Native capture-duration ceiling (new, non-blocking, unresolved)**: a
+- **Native capture-duration ceiling (CONFIRMED, non-blocking)**: a
   ~10-minute native recording (video 399, 34,838,966 bytes) was cut off
   automatically by iOS mid-recording ("maximum length for this video has
   been reached"), while the same device's standalone Camera app does not
   exhibit this cutoff — ruling out a general iPhone limit. Code
   inspection found no explicit duration/size cap anywhere in Cresamor's
-  own native capture path (`capture.js`/`index.html`). Leading
-  explanation, **not yet proven**: iOS/WebKit's native picker component
-  invoked by `<input type="file" accept="video/*" capture>` itself,
-  distinct from Camera.app. Isolation test (bare HTML page, no Cresamor
-  code) proposed in RELEASE_NOTES.md, not yet run. Does not affect the
-  GO decision or Track 2's resolved status — this is a capture-stage
-  limitation separate from the already-validated upload/memory pathway.
-  Known limitation to communicate: coaches recording continuously beyond
-  ~10 minutes through the current native Record flow may hit this.
+  own native capture path (`capture.js`/`index.html`). **Confirmed via a
+  bare-HTML isolation test (2026-08-24, RELEASE_NOTES.md)**: a page with
+  only `<input type="file" accept="video/*" capture="environment">` and
+  zero Cresamor code reproduced the identical ~10-minute cutoff and
+  message — this is iOS Safari/WebKit's own native picker component
+  (`UIImagePickerController`), not anything in Cresamor's code, and not
+  overridable from web content. Does not affect the GO decision or
+  Track 2's resolved status — this is a capture-stage limitation separate
+  from the already-validated upload/memory pathway. Known limitation to
+  communicate: coaches recording continuously beyond ~10 minutes through
+  the current native Record flow will hit this. Supporting longer
+  continuous recordings (chunked capture, a different invocation,
+  stitching multiple captures) is a real future architecture item, not a
+  beta blocker — not queued as near-term work.
 
-A 20-minute native-recording test is **not** the next step under the
-current capture path — if the capture UI itself enforces a ~10-minute
-ceiling, that test cannot currently produce a 20-minute payload
-regardless of upload readiness. Run the bare-HTML isolation test first;
-only if that clears does a longer-recording architecture question become
-relevant, as a separate future task.
+A 20-minute native-recording test is **not** planned as a near-term beta
+task — with the ceiling confirmed as an iOS/WebKit capture-path limit,
+that test cannot currently produce a 20-minute payload under the existing
+capture path, and there is no further beta-relevant question left for it
+to answer.
 
 `RELEASE_NOTES.md`'s 2026-08-20 "Native-recording validation: N1 PASS,
 N2 PASS — Track 2 HOLD lifted" entry (including the Video 399 capture-

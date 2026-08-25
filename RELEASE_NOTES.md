@@ -175,14 +175,16 @@ realistic-proxy threshold this gate was built around, not conditions for
 the GO decision above. If either surfaces a new issue, treat it as a new,
 separate finding — not a reopening of this entry's conclusion by default.
 
-### Video 399 — ~10-minute native recording: upload endurance PASS; capture-duration ceiling discovered (unresolved)
+### Video 399 — ~10-minute native recording: upload endurance PASS; capture-duration ceiling CONFIRMED (iOS/WebKit, not Cresamor)
 
 **Two separate findings, kept distinct.** (1) A genuine, fully
 server-verified endurance result: a ~10-minute native recording
 completed the full Cresamor upload pipeline successfully, with raw
-Render evidence matching N1/N2's rigor. (2) A new, previously
-undocumented limitation: the recording did not run for as long as the
-user intended — iOS stopped it automatically at ~10 minutes. These are
+Render evidence matching N1/N2's rigor. (2) A capture-stage limitation:
+the recording did not run for as long as the user intended — iOS
+stopped it automatically at ~10 minutes. A follow-up isolation test
+(below) confirmed this is an iOS Safari/WebKit behavior tied to the
+`capture` attribute itself, not anything in Cresamor's code. These are
 not the same finding and must not be conflated.
 
 #### Identifiers
@@ -270,26 +272,24 @@ only exists in the separate desktop branch of the same file). No
 equivalent constant, attribute, or setting was found anywhere in
 `capture.js`, `index.html`, or any related client file.
 
-#### Current classification (leading explanation, not yet proven)
+#### Current classification (CONFIRMED — 2026-08-24 isolation test)
 
-**Capture-flow-specific cutoff, likely iOS/WebKit behavior associated
-with `<input type="file" accept="video/*" capture>`, not a
-Cresamor-configured duration limit.** The `capture` attribute is
-understood to invoke a native picker component (on iOS, backed by
+**Capture-flow-specific cutoff: confirmed iOS Safari/WebKit behavior
+associated with `<input type="file" accept="video/*" capture>` itself,
+not a Cresamor-configured duration limit.** The `capture` attribute
+invokes a native picker component (on iOS, backed by
 `UIImagePickerController` in camera mode) that is architecturally
 distinct from the standalone Camera app, with its own separate default
 behavior that web content has no attribute or API to configure either
-way. This component is widely believed to carry a default video-duration
-ceiling around 10 minutes when a hosting app doesn't override it —
-Cresamor's markup has no mechanism to override it even if it wanted to,
-since no such mechanism is exposed to web content.
+way. This component carries a default video-duration ceiling around
+10 minutes when a hosting app doesn't override it — Cresamor's markup
+has no mechanism to override it, since no such mechanism is exposed to
+web content at all.
 
-**This is the leading explanation, not an established fact.** Do not
-treat `UIImagePickerController`'s `videoMaximumDuration` default as
-confirmed until the isolation test below actually reproduces the
-behavior outside Cresamor entirely.
+**No longer a leading explanation — directly confirmed.** See the
+isolation test result immediately below.
 
-#### Isolation test (proposed, not yet run)
+#### Isolation test: PASS — hypothesis confirmed (2026-08-24)
 
 A standalone HTML page containing essentially only:
 
@@ -297,16 +297,25 @@ A standalone HTML page containing essentially only:
 <input type="file" accept="video/*" capture="environment">
 ```
 
-— no Cresamor code, no other markup — opened directly in iOS Safari,
-recording continuously past 10 minutes.
+— no Cresamor `capture.js`, no recording pipeline, no IndexedDB, no
+upload logic, no `MediaRecorder`, no duration limit, no file-size limit,
+no other markup of any kind — was served over real HTTPS (a temporary
+Cloudflare quick tunnel to a local static file server, torn down once
+this test concluded) and opened directly in iOS Safari on the actual
+test device.
 
-- **If it stops at ~10 minutes with the same "maximum length" message**:
-  isolates the ceiling entirely outside Cresamor's code and strongly
-  establishes it as an iOS/WebKit capture-path behavior tied to the
-  `capture` attribute itself.
-- **If it records past 10 minutes**: the current theory is falsified or
-  incomplete, and investigation returns to Cresamor's specific
-  invocation/context.
+**Result: the exact same cutoff reproduced.** Recording continuously
+without manually stopping, the page auto-stopped at approximately 10
+minutes and displayed the identical message:
+
+> "Video Recording Stopped. The maximum length for this video has been
+> reached."
+
+This isolates the ceiling entirely outside Cresamor's code and
+confirms it as an iOS/WebKit capture-path behavior tied to the
+`capture` attribute itself — not a Cresamor-configured duration limit,
+and not something Cresamor's own code could have caused or can
+currently override.
 
 #### Effect on beta status
 
@@ -327,18 +336,17 @@ communicated the same way Track 1's manual-picker limitation already is.
 
 #### Effect on the planned 20-minute test
 
-**Do not run a 20-minute native-recording test as the next
-upload-endurance step under the current capture path** — if the capture
-UI itself enforces a ~10-minute ceiling, that test cannot currently
-produce a 20-minute payload to test against regardless of upload/pipeline
-readiness. Sequence is:
-
-1. Run the bare-HTML isolation test above first.
-2. If confirmed as an iOS/WebKit capture-path ceiling, separately
-   evaluate architectural options for supporting longer continuous
-   recordings (e.g., chunked capture, a different capture invocation,
-   stitching multiple captures) as its own future task — **not
-   undertaken as part of this documentation entry**.
+**Not run, and not planned as a near-term beta task.** With the ceiling
+now confirmed as an iOS/WebKit capture-path limitation, a 20-minute
+native-recording test cannot currently produce a 20-minute payload under
+the existing capture path regardless of upload/pipeline readiness — N1,
+N2, and video 399 already established the upload/memory pathway holds up
+to ~33.2 MiB, and there is no further beta-relevant question left for
+this specific test to answer. Supporting continuous recordings longer
+than ~10 minutes (chunked capture, a different capture invocation,
+stitching multiple captures) is a real future architecture item, not a
+beta blocker — deliberately not undertaken as part of this entry, and
+not queued as immediate follow-up work.
 
 ---
 
