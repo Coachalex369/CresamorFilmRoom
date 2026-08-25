@@ -474,7 +474,17 @@ async function pollActiveConversation() {
     const messages = await apiFetch(`/api/conversations/${conversationId}/messages`);
     const appended = appendNewMessages(messages);
 
-    if (appended > 0) {
+    // Phase 4: re-check messagesScreenActive AFTER the await, not just
+    // before it. Without this, a tick that started while Messages was
+    // the active tab but whose response arrives after the user has
+    // already navigated away (e.g. clicked Home mid-flight) would still
+    // mark the conversation read based on now-stale intent -- exactly
+    // the "background polling must never equal read" failure mode this
+    // phase is about, just triggered by a navigation race rather than a
+    // plain background tick. Appending the fetched messages into the
+    // (now hidden) pane is harmless either way; only the read-marking
+    // needs this guard.
+    if (appended > 0 && messagesScreenActive) {
       afterNewMessagesRendered();
     }
   } catch (error) {
@@ -514,41 +524,69 @@ async function pollConversationList() {
   }
 }
 
-function startMessagePolling() {
+// Phase 4: these two timers now have INDEPENDENT lifecycles, not one
+// combined start/stop pair. The active-thread poll (message bodies for
+// whatever's selected in the inline pane) only matters while that pane
+// is actually visible, so it stays gated on messagesScreenActive. The
+// conversation-list poll is what keeps unread_count fresh everywhere —
+// including the nav badge, which is visible on every screen, not just
+// Messages — so it deliberately runs app-wide, gated only on tab
+// visibility + being logged in. This is the concrete fix for "the
+// navigation badge should update without requiring a full page refresh"
+// even while the user is on Home/Teams/Film and hasn't opened Messages
+// or any DM window at all.
+function startActiveThreadPolling() {
   if (!messagePollTimer) {
     messagePollTimer = setInterval(pollActiveConversation, MESSAGE_POLL_INTERVAL_MS);
   }
+}
+
+function stopActiveThreadPolling() {
+  if (messagePollTimer) {
+    clearInterval(messagePollTimer);
+    messagePollTimer = null;
+  }
+}
+
+function startConversationListPolling() {
   if (!conversationListPollTimer) {
     conversationListPollTimer = setInterval(pollConversationList, CONVERSATION_LIST_POLL_INTERVAL_MS);
   }
 }
 
-function stopMessagePolling() {
-  if (messagePollTimer) {
-    clearInterval(messagePollTimer);
-    messagePollTimer = null;
-  }
+function stopConversationListPolling() {
   if (conversationListPollTimer) {
     clearInterval(conversationListPollTimer);
     conversationListPollTimer = null;
   }
 }
 
-// Polling should only actually run when the Messages screen is the
-// selected tab AND the tab/window is visible AND someone's logged in —
-// any other combination stops both timers. Called from the tab-click
-// listener, visibilitychange, window focus, and login/logout.
-function refreshPollingState({ immediate = false } = {}) {
-  const shouldPoll = messagesScreenActive && document.visibilityState === "visible" && Boolean(currentUser);
+// Still stops BOTH — used by logout and the 401 paths, where "stop
+// everything" is unambiguously correct regardless of which screen was
+// active.
+function stopMessagePolling() {
+  stopActiveThreadPolling();
+  stopConversationListPolling();
+}
 
-  if (shouldPoll) {
-    startMessagePolling();
-    if (immediate) {
-      pollActiveConversation();
-      pollConversationList();
-    }
+// Called from the tab-click listener, visibilitychange, window focus,
+// and login/logout/session-restore.
+function refreshPollingState({ immediate = false } = {}) {
+  const loggedInAndVisible = document.visibilityState === "visible" && Boolean(currentUser);
+  const shouldPollActiveThread = messagesScreenActive && loggedInAndVisible;
+
+  if (shouldPollActiveThread) {
+    startActiveThreadPolling();
+    if (immediate) pollActiveConversation();
   } else {
-    stopMessagePolling();
+    stopActiveThreadPolling();
+  }
+
+  if (loggedInAndVisible) {
+    startConversationListPolling();
+    if (immediate) pollConversationList();
+  } else {
+    stopConversationListPolling();
   }
 }
 
@@ -556,8 +594,9 @@ function refreshPollingState({ immediate = false } = {}) {
 // this doesn't touch app.js's own click handler, just observes the same
 // clicks (multiple listeners on one element is fine). Entering Messages
 // re-validates the inbox (team/relationship changes since last visit,
-// same discipline as Schedule's initScheduleScreen) and starts polling;
-// leaving it stops both timers.
+// same discipline as Schedule's initScheduleScreen) and starts/stops the
+// active-thread poll; the conversation-list poll (nav badge) keeps
+// running either way, per refreshPollingState's own app-wide gating.
 document.querySelectorAll(".tab-btn").forEach((button) => {
   button.addEventListener("click", () => {
     messagesScreenActive = button.dataset.screen === "messages-screen";
@@ -677,7 +716,12 @@ window.logoutLocalState = function () {
 };
 
 // Covers the case where a session was already restored by app.js's own
-// restoreSession() call before this script finished loading.
+// restoreSession() call before this script finished loading. Also starts
+// the app-wide conversation-list poll immediately on this cold load —
+// without this, a page refresh with an already-valid session wouldn't
+// start keeping the nav badge live until the user clicked a tab or the
+// window regained focus.
 if (currentUser) {
   initMessagesScreen();
+  refreshPollingState();
 }

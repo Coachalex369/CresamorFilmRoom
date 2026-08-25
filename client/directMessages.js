@@ -179,6 +179,7 @@ function appendMessagesToThread(threadEl, renderedIds, messages, forceScrollToBo
 /* ---------- shared polling (drives every open window + the mobile overlay) ---------- */
 
 let dmPollTimer = null;
+let dmPollBusy = false; // overlap guard — same check-then-set pattern as messages.js's own poll flags
 
 function ensureDmPolling() {
   if (!dmPollTimer) {
@@ -193,17 +194,35 @@ function stopDmPollingIfNothingOpen() {
   }
 }
 
+// Phase 4: guarded against overlap the same way messages.js's own polls
+// already were — if one tick is still in flight (a slow response) when
+// the next setInterval fires, the second tick skips entirely rather than
+// running a second concurrent pass over the same windows. Message-level
+// double-counting was already structurally impossible even without this
+// (loadWindowMessages/appendMessagesToThread dedupe by message id
+// against each window's own renderedMessageIds Set before incrementing
+// unreadWhileMinimized, and JS's single-threaded execution means one
+// tick's synchronous append-and-increment always finishes before another
+// tick's dedupe check can run) -- this guard exists to avoid redundant
+// duplicate network requests piling up under a slow connection, not to
+// fix a counting bug.
 async function pollAllOpenDirectMessages() {
+  if (dmPollBusy) return;
   if (document.visibilityState !== "visible" || !currentUser) return;
 
-  for (const state of dmWindows.values()) {
-    if (state.disabled) continue;
-    // eslint-disable-next-line no-await-in-loop -- small N, sequential is fine and simpler than Promise.all error-handling here
-    await loadWindowMessages(state, { scrollToBottom: false });
-  }
+  dmPollBusy = true;
+  try {
+    for (const state of dmWindows.values()) {
+      if (state.disabled) continue;
+      // eslint-disable-next-line no-await-in-loop -- small N, sequential is fine and simpler than Promise.all error-handling here
+      await loadWindowMessages(state, { scrollToBottom: false });
+    }
 
-  if (mobileOverlayState.conversationId && !mobileOverlayState.disabled) {
-    await loadMobileMessages({ scrollToBottom: false });
+    if (mobileOverlayState.conversationId && !mobileOverlayState.disabled) {
+      await loadMobileMessages({ scrollToBottom: false });
+    }
+  } finally {
+    dmPollBusy = false;
   }
 }
 

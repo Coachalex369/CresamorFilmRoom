@@ -87,6 +87,14 @@ function unreadFor(conversations, conversationId) {
   return row ? Number(row.unread_count) : undefined;
 }
 
+// The nav badge is exactly this sum over whatever GET /api/conversations
+// currently returns — see messages.js's renderNavBadge(). Computing it
+// the same way here (rather than re-deriving it some other way) is what
+// makes these Phase 4 assertions a faithful proxy for the actual badge.
+function totalUnread(conversations) {
+  return conversations.reduce((sum, c) => sum + Number(c.unread_count || 0), 0);
+}
+
 async function main() {
   const created = { userIds: [], teamIds: [], linkIds: [], conversationIds: [] };
   const server = app.listen(PORT);
@@ -575,6 +583,202 @@ async function main() {
       "G3. eligible-recipients never includes a fully unrelated outsider",
       !noRecipientsLeakOutsider.data.some((r) => r.id === outsider.id),
       `ids=${noRecipientsLeakOutsider.data.map((r) => r.id).join(",")}`
+    );
+
+    // ==================================================================
+    // H. PHASE 4: UNREAD/READ-STATE HARDENING
+    // Deliberately isolated setup (own team/users) rather than reusing
+    // A-G's already-messaged threads -- keeps every expected count exact
+    // and easy to verify rather than needing to track deltas against
+    // whatever earlier sections happened to send.
+    // ==================================================================
+
+    const coachP4 = await createTestUser(`${RUN_TAG}-coachP4@test.cresamor.local`, "coach");
+    created.userIds.push(coachP4.id);
+    const teamP4Res = await req("/api/teams", {
+      method: "POST",
+      token: coachP4.token,
+      body: { name: `${RUN_TAG} Team P4`, sport: "Wrestling" },
+    });
+    const teamP4 = teamP4Res.data;
+    created.teamIds.push(teamP4.id);
+
+    const athleteP4a = await createTestUser(`${RUN_TAG}-athleteP4a@test.cresamor.local`, "athlete");
+    created.userIds.push(athleteP4a.id);
+    await req(`/api/users/${athleteP4a.id}/teams`, {
+      method: "POST",
+      token: coachP4.token,
+      body: { team_id: teamP4.id, role_on_team: "athlete" },
+    });
+
+    const athleteP4b = await createTestUser(`${RUN_TAG}-athleteP4b@test.cresamor.local`, "athlete");
+    created.userIds.push(athleteP4b.id);
+    await req(`/api/users/${athleteP4b.id}/teams`, {
+      method: "POST",
+      token: coachP4.token,
+      body: { team_id: teamP4.id, role_on_team: "athlete" },
+    });
+
+    const teamP4ConvRes = await req("/api/conversations", { token: coachP4.token });
+    const teamP4Conversation = teamP4ConvRes.data.find((c) => c.team_id === teamP4.id && c.category === "team");
+
+    const dmA = (await openDM(coachP4.token, athleteP4a.id)).data;
+    created.conversationIds.push(dmA.id);
+    const dmB = (await openDM(coachP4.token, athleteP4b.id)).data;
+    created.conversationIds.push(dmB.id);
+
+    // H1/H2: two separate unread DM threads both register, independently
+    // and correctly, not one clobbering the other.
+    await req(`/api/conversations/${dmA.id}/messages`, {
+      method: "POST",
+      token: athleteP4a.token,
+      body: { body: `${RUN_TAG} p4 from athleteA` },
+    });
+    await req(`/api/conversations/${dmB.id}/messages`, {
+      method: "POST",
+      token: athleteP4b.token,
+      body: { body: `${RUN_TAG} p4 from athleteB` },
+    });
+
+    const afterTwoUnread = await req("/api/conversations", { token: coachP4.token });
+    assert(
+      "H1. two separate unread DM threads each register their own unread count",
+      unreadFor(afterTwoUnread.data, dmA.id) === 1 && unreadFor(afterTwoUnread.data, dmB.id) === 1,
+      `dmA=${unreadFor(afterTwoUnread.data, dmA.id)} dmB=${unreadFor(afterTwoUnread.data, dmB.id)}`
+    );
+    assert(
+      "H2. the aggregate (nav badge) total correctly sums both unread DM threads",
+      totalUnread(afterTwoUnread.data) === 2,
+      `total=${totalUnread(afterTwoUnread.data)}`
+    );
+
+    // H3: reading one thread clears only that thread, not the other.
+    await req(`/api/conversations/${dmA.id}/read`, { method: "PUT", token: coachP4.token });
+    const afterReadOne = await req("/api/conversations", { token: coachP4.token });
+    assert(
+      "H3. reading one DM thread clears its count without affecting the other",
+      unreadFor(afterReadOne.data, dmA.id) === 0 && unreadFor(afterReadOne.data, dmB.id) === 1,
+      `dmA=${unreadFor(afterReadOne.data, dmA.id)} dmB=${unreadFor(afterReadOne.data, dmB.id)}`
+    );
+
+    // H4: Team Chat and Direct Messages aggregate together in one total.
+    await req(`/api/conversations/${teamP4Conversation.id}/messages`, {
+      method: "POST",
+      token: athleteP4a.token,
+      body: { body: `${RUN_TAG} p4 team message` },
+    });
+    const afterTeamMessage = await req("/api/conversations", { token: coachP4.token });
+    assert(
+      "H4. Team Chat and Direct Message unread counts aggregate together in the nav total",
+      unreadFor(afterTeamMessage.data, teamP4Conversation.id) === 1 &&
+        unreadFor(afterTeamMessage.data, dmB.id) === 1 &&
+        totalUnread(afterTeamMessage.data) === 2,
+      `team=${unreadFor(afterTeamMessage.data, teamP4Conversation.id)} dmB=${unreadFor(afterTeamMessage.data, dmB.id)} total=${totalUnread(afterTeamMessage.data)}`
+    );
+
+    // H5: repeated polling (GET .../messages, the exact call a client poll
+    // makes) never inflates the count -- it's a fresh server-side COUNT
+    // each time, not a client-incrementable value.
+    await req(`/api/conversations/${dmB.id}/messages`, { token: coachP4.token });
+    await req(`/api/conversations/${dmB.id}/messages`, { token: coachP4.token });
+    await req(`/api/conversations/${dmB.id}/messages`, { token: coachP4.token });
+    const afterRepeatedPolls = await req("/api/conversations", { token: coachP4.token });
+    assert(
+      "H5. repeated polling (no read) does not double- or triple-count an unread thread",
+      unreadFor(afterRepeatedPolls.data, dmB.id) === 1,
+      `unread=${unreadFor(afterRepeatedPolls.data, dmB.id)}`
+    );
+
+    // H6: repeatedly listing conversations (the metadata/list endpoint
+    // itself, as opposed to H5's message-fetch endpoint) never marks
+    // anything read either -- "background polling" covers both surfaces
+    // a client poll actually calls.
+    await req("/api/conversations", { token: coachP4.token });
+    await req("/api/conversations", { token: coachP4.token });
+    const afterRepeatedListPolls = await req("/api/conversations", { token: coachP4.token });
+    assert(
+      "H6. repeatedly polling the conversation list itself never marks a thread read",
+      unreadFor(afterRepeatedListPolls.data, dmB.id) === 1,
+      `unread=${unreadFor(afterRepeatedListPolls.data, dmB.id)}`
+    );
+
+    // H7: the sender's own repeated messages never create unread state
+    // for themselves, no matter how many they send.
+    await req(`/api/conversations/${dmA.id}/messages`, {
+      method: "POST",
+      token: coachP4.token,
+      body: { body: `${RUN_TAG} p4 coach msg 1` },
+    });
+    await req(`/api/conversations/${dmA.id}/messages`, {
+      method: "POST",
+      token: coachP4.token,
+      body: { body: `${RUN_TAG} p4 coach msg 2` },
+    });
+    const afterOwnMessages = await req("/api/conversations", { token: coachP4.token });
+    assert(
+      "H7. sending multiple of your own messages never creates unread state for yourself",
+      unreadFor(afterOwnMessages.data, dmA.id) === 0,
+      `unread=${unreadFor(afterOwnMessages.data, dmA.id)}`
+    );
+
+    // H8: cross-device/session sync -- a second token for the SAME user
+    // (a different device/session, not a different person) sees read
+    // state change made by the first, since last_read_at is
+    // server-persisted per user/conversation, not per token/session.
+    const coachP4SecondSession = { id: coachP4.id, token: jwt.sign({ id: coachP4.id }, process.env.JWT_SECRET, { expiresIn: "1h" }) };
+
+    await req(`/api/conversations/${dmB.id}/messages`, {
+      method: "POST",
+      token: athleteP4b.token,
+      body: { body: `${RUN_TAG} p4 cross-session trigger` },
+    });
+    const deviceAView = await req("/api/conversations", { token: coachP4.token });
+    assert(
+      "H8a. device/session A sees the new unread message",
+      unreadFor(deviceAView.data, dmB.id) === 2, // the H5 message was never read, plus this new one
+      `unread=${unreadFor(deviceAView.data, dmB.id)}`
+    );
+
+    await req(`/api/conversations/${dmB.id}/read`, { method: "PUT", token: coachP4SecondSession.token });
+    const deviceAViewAfterDeviceBRead = await req("/api/conversations", { token: coachP4.token });
+    assert(
+      "H8b. device/session A's next refresh reflects device/session B's read action, with no logout/reload",
+      unreadFor(deviceAViewAfterDeviceBRead.data, dmB.id) === 0,
+      `unread=${unreadFor(deviceAViewAfterDeviceBRead.data, dmB.id)}`
+    );
+
+    // H9: revocation removes the conversation's contribution to the
+    // aggregate total, not just its own row (E8 already proves the row
+    // disappears; this proves the SUM a nav badge would show is correct
+    // afterward, not merely "one less row").
+    await req(`/api/conversations/${dmA.id}/messages`, {
+      method: "POST",
+      token: coachP4.token,
+      body: { body: `${RUN_TAG} p4 pre-revocation` },
+    });
+    // (coach's own message, so still zero unread for the coach on dmA --
+    // add one FROM the athlete so there's something real to lose.)
+    await req(`/api/conversations/${dmA.id}/messages`, {
+      method: "POST",
+      token: athleteP4a.token,
+      body: { body: `${RUN_TAG} p4 unread before revocation` },
+    });
+    const beforeRevocationTotal = await req("/api/conversations", { token: coachP4.token });
+    const expectedDrop = unreadFor(beforeRevocationTotal.data, dmA.id);
+
+    await req(`/api/teams/${teamP4.id}/members/${athleteP4a.id}`, { method: "DELETE", token: coachP4.token });
+    const afterRevocationTotal = await req("/api/conversations", { token: coachP4.token });
+    assert(
+      "H9. revoking the underlying relationship drops that thread's unread contribution from the aggregate total",
+      totalUnread(afterRevocationTotal.data) === totalUnread(beforeRevocationTotal.data) - expectedDrop,
+      `before=${totalUnread(beforeRevocationTotal.data)} after=${totalUnread(afterRevocationTotal.data)} expectedDrop=${expectedDrop}`
+    );
+
+    const historyAfterRevocation = await client.query("SELECT COUNT(*) FROM messages WHERE conversation_id = $1", [dmA.id]);
+    assert(
+      "H9b. revocation never deletes message history",
+      Number(historyAfterRevocation.rows[0].count) > 0,
+      `count=${historyAfterRevocation.rows[0].count}`
     );
   } finally {
     try {
