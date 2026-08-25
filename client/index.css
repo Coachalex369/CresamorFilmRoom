@@ -656,6 +656,273 @@ li {
   vertical-align: middle;
 }
 
+/* ---------- Direct Messaging Phase 3: floating AIM-style windows ----------
+   Deliberately outside every .app-screen (see index.html) so they stay
+   visible across tab navigation. New windows accumulate from the
+   bottom-right corner outward (flex-end + normal DOM order), wrapping
+   upward (wrap-reverse) if there isn't room for another row, rather than
+   ever covering the composer bar. */
+
+#dm-windows-container {
+  position: fixed;
+  right: 1rem;
+  bottom: 1rem;
+  z-index: 200;
+  display: flex;
+  flex-direction: row;
+  justify-content: flex-end;
+  align-items: flex-end;
+  flex-wrap: wrap-reverse;
+  gap: 0.75rem;
+  max-width: calc(100vw - 2rem);
+}
+
+.dm-window {
+  width: 300px;
+  height: 380px;
+  display: flex;
+  flex-direction: column;
+  background: linear-gradient(180deg, var(--panel), var(--panel-2));
+  border: 1px solid var(--gold-dim, rgba(212, 175, 55, 0.35));
+  border-radius: 12px 12px 4px 4px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+}
+
+.dm-window.dm-window-focused {
+  border-color: var(--gold, #d4af37);
+}
+
+.dm-window.dm-window-disabled {
+  opacity: 0.75;
+}
+
+.dm-window-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.5rem 0.6rem;
+  background: var(--gold-dim, rgba(212, 175, 55, 0.14));
+  border-bottom: 1px solid var(--gold-dim, rgba(212, 175, 55, 0.25));
+}
+
+.dm-window-header-text {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.dm-window-title {
+  font-weight: 600;
+  font-size: 0.85rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dm-window-context {
+  font-size: 0.68rem;
+  color: var(--muted);
+}
+
+.dm-window-controls {
+  display: flex;
+  gap: 0.3rem;
+  flex-shrink: 0;
+}
+
+/* Real controls, sized for a fingertip even though this surface is
+   desktop-only today — cheap to get right, never assume mouse-only. */
+.dm-window-controls button {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border-radius: 50%;
+  line-height: 1;
+}
+
+.dm-window-thread {
+  flex: 1;
+  overflow-x: hidden;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.6rem;
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.dm-window-thread .message-row {
+  max-width: 82%;
+}
+
+.dm-window-disabled-banner {
+  margin: 0;
+  padding: 0.45rem 0.6rem;
+  font-size: 0.72rem;
+  color: var(--muted);
+  text-align: center;
+  background: rgba(0, 0, 0, 0.3);
+  border-top: 1px solid var(--border);
+}
+
+.dm-window-form {
+  display: flex;
+  gap: 0.4rem;
+  padding: 0.5rem;
+  border-top: 1px solid var(--border);
+}
+
+.dm-window-form input {
+  flex: 1;
+  min-width: 0;
+}
+
+.dm-minimized-tab {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.4rem 0.5rem;
+  border-radius: 999px;
+  background: linear-gradient(180deg, var(--panel), var(--panel-2));
+  border: 1px solid var(--gold-dim, rgba(212, 175, 55, 0.35));
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+  cursor: pointer;
+  max-width: 200px;
+}
+
+.dm-minimized-tab-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.8rem;
+  color: var(--text);
+}
+
+.dm-minimized-tab-badge {
+  flex-shrink: 0;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--gold, #d4af37);
+  color: #000;
+  font-size: 0.68rem;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.dm-minimized-tab-close-btn {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border-radius: 50%;
+  line-height: 1;
+  font-size: 0.7rem;
+}
+
+@media (max-width: 700px) {
+  /* Never squeeze desktop floating windows onto a phone -- opening a DM
+     on a narrow viewport uses #dm-mobile-overlay instead (see
+     directMessages.js's isMobileViewport() gate at open time). This is
+     also a defensive fallback if a window somehow stayed open across a
+     live resize past the breakpoint: it disappears rather than
+     overlapping the mobile layout, even though nothing in this app
+     currently migrates an open window's presentation live. */
+  #dm-windows-container {
+    display: none;
+  }
+}
+
+/* ---------- Direct Messaging Phase 3: mobile full-screen DM overlay ---------- */
+
+#dm-mobile-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 250;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg, #0b0f14);
+}
+
+#dm-mobile-header {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--border);
+  background: rgba(11, 15, 20, 0.95);
+}
+
+#dm-mobile-back-btn {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  font-size: 1.3rem;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+#dm-mobile-header-text {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+#dm-mobile-title {
+  margin: 0;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#dm-mobile-context {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+#dm-mobile-thread {
+  flex: 1;
+  overflow-x: hidden;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 1rem;
+}
+
+#dm-mobile-thread .message-row {
+  max-width: 88%;
+}
+
+#dm-mobile-disabled-banner {
+  margin: 0;
+  padding: 0.6rem 1rem;
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.82rem;
+  background: rgba(0, 0, 0, 0.25);
+}
+
+#dm-mobile-form {
+  display: flex;
+  gap: 0.5rem;
+  padding: 0.75rem 1rem calc(0.75rem + env(safe-area-inset-bottom, 0px));
+  border-top: 1px solid var(--border);
+  background: rgba(11, 15, 20, 0.95);
+}
+
+#dm-mobile-input {
+  flex: 1;
+  min-width: 0;
+}
+
 #message-thread {
   min-height: 360px;
   max-height: 55vh;

@@ -883,6 +883,38 @@
       </section>
     </main>
 
+    <!-- Direct Messaging Phase 3: floating AIM-style windows, deliberately
+         OUTSIDE every .app-screen so they survive tab navigation (a
+         .app-screen gets display:none the instant it's not the active
+         tab -- anything inside one would vanish exactly when the whole
+         point is "stay open while the user moves around Cresamor"). See
+         directMessages.js. Desktop: #dm-windows-container holds expanded
+         windows + minimized tabs, built dynamically per open
+         conversation. Narrow/mobile viewport: #dm-mobile-overlay is used
+         instead, one full-screen conversation at a time. Both render the
+         SAME underlying canonical conversation/messages -- two
+         presentations of one system, chosen at open-time by viewport
+         width, never both at once. -->
+    <div id="dm-windows-container"></div>
+
+    <div id="dm-mobile-overlay" class="hidden">
+      <div id="dm-mobile-header">
+        <button type="button" id="dm-mobile-back-btn" aria-label="Back">‹</button>
+        <div id="dm-mobile-header-text">
+          <p id="dm-mobile-title"></p>
+          <p id="dm-mobile-context"></p>
+        </div>
+      </div>
+      <div id="dm-mobile-thread"></div>
+      <p id="dm-mobile-disabled-banner" class="hidden">
+        You can no longer access this conversation.
+      </p>
+      <form id="dm-mobile-form">
+        <input type="text" id="dm-mobile-input" placeholder="Type a message..." />
+        <button type="submit">Send</button>
+      </form>
+    </div>
+
     <!-- Temporary mobile debug panel — added to diagnose the iPhone/Chrome
          upload bugs (recorded-video 500, Photos-selection silent failure)
          live on-device, since Chrome iOS can't be remotely inspected via

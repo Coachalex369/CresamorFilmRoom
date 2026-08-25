@@ -166,7 +166,13 @@ function renderInboxRow(conversation) {
     li.appendChild(badge);
   }
 
-  li.addEventListener("click", () => selectConversation(conversation.id));
+  // Team Chat keeps opening in the shared inline pane below; a Direct
+  // Message now opens/focuses its own floating window (desktop) or the
+  // mobile overlay instead — see window.selectMessagesConversation's own
+  // category branch, which both this row click and openDirectMessage()
+  // funnel through, so the two entry points can never disagree about
+  // where a given conversation opens.
+  li.addEventListener("click", () => window.selectMessagesConversation(conversation.id));
   return li;
 }
 
@@ -301,17 +307,40 @@ async function selectConversation(conversationId) {
   await loadMessages();
 }
 
-// directMessages.js's reusable entry point hands off here once it has a
-// real conversation id from POST /api/direct-messages. A brand-new
-// canonical thread won't be in messagesInboxState yet (it was just
-// created), so this refreshes the list first when needed rather than
-// assuming selectConversation() already knows about it.
+// The one shared "open/show this conversation" entry point — used by
+// inbox row clicks AND by directMessages.js's openDirectMessage() once
+// it has a real conversation id from POST /api/direct-messages. A
+// brand-new canonical thread won't be in messagesInboxState yet (it was
+// just created), so this refreshes the list first when needed. Branches
+// by category so the two call sites can never disagree about WHERE a
+// conversation opens: Team Chat -> the shared inline pane (unchanged
+// since Phase 2); Direct Message -> a floating window (desktop) or the
+// full-screen mobile overlay, owned by directMessages.js — this file
+// never renders DM content itself as of Phase 3.
 window.selectMessagesConversation = async function (conversationId) {
   if (!messagesInboxState.conversations.some((c) => c.id === conversationId)) {
     await loadConversations();
   }
+
+  const conversation = messagesInboxState.conversations.find((c) => c.id === conversationId);
+  if (!conversation) return;
+
+  if (conversation.category === "direct") {
+    if (typeof window.openDirectMessageWindow === "function") {
+      window.openDirectMessageWindow(conversation);
+    }
+    return;
+  }
+
   await selectConversation(conversationId);
 };
+
+// directMessages.js calls this after marking a DM read (or seeing new
+// messages) so the inbox rows and nav badge reflect it promptly instead
+// of waiting for the next CONVERSATION_LIST_POLL_INTERVAL_MS tick — same
+// reasoning as the send-handler's own immediate loadConversations() call
+// above.
+window.refreshMessagesConversations = loadConversations;
 
 /* ---------- polling state ---------- */
 
