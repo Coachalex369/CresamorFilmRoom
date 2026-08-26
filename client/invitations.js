@@ -29,6 +29,7 @@ const invitationPreviewTeamEl = document.getElementById("invitation-preview-team
 const invitationPreviewRoleEl = document.getElementById("invitation-preview-role");
 const invitationPreviewCoachEl = document.getElementById("invitation-preview-coach");
 const invitationLoginButtons = document.getElementById("invitation-login-buttons");
+const invitationLoginHint = document.getElementById("invitation-login-hint");
 const invitationAuthBtn = document.getElementById("invitation-auth-btn");
 const loginButtonsBlock = document.getElementById("login-buttons");
 
@@ -114,16 +115,77 @@ async function showInvitationPreviewIfPending() {
     // Replaces the generic 3-role-button choice with a single button
     // locked to the invited role — the invitation already decided the
     // role, so asking the person to pick one themselves would be
-    // confusing (and could register them with the wrong role). This
-    // button still tries LOGIN first (handleAuth doesn't send a role for
-    // login), so an existing account works exactly the same as it always
-    // has; only a brand-new account gets the invited role.
+    // confusing (and could register them with the wrong role).
+    //
+    // Existing-user multi-team invitation correction: this used to
+    // always call handleAuth(), which tries login and silently falls
+    // back to register() on ANY login failure -- including an existing
+    // user simply not having typed their correct password yet. Since
+    // users.email is UNIQUE, that fallback then threw on the duplicate
+    // email and surfaced an opaque "Registration failed" with no path
+    // forward for someone genuinely trying to accept a second-team
+    // invitation. data.accountExists (server-computed, see
+    // getInvitationPreview) now decides which single flow this button
+    // takes, instead of guessing via try/catch — see
+    // handleInvitedAuth() below.
     loginButtonsBlock.classList.add("hidden");
     invitationLoginButtons.classList.remove("hidden");
-    invitationAuthBtn.textContent = `Continue as ${INVITATION_ROLE_LABELS[data.roleOnTeam] || data.roleOnTeam}`;
-    invitationAuthBtn.onclick = () => handleAuth(data.roleOnTeam);
+
+    if (data.accountExists) {
+      invitationAuthBtn.textContent = "Log In to Accept";
+      invitationLoginHint.textContent = "You already have a Cresamor account for this invitation — enter your existing password.";
+    } else {
+      invitationAuthBtn.textContent = `Continue as ${INVITATION_ROLE_LABELS[data.roleOnTeam] || data.roleOnTeam}`;
+      invitationLoginHint.textContent = "";
+    }
+    invitationAuthBtn.onclick = () => handleInvitedAuth(data.roleOnTeam, data.accountExists);
   } catch (error) {
     console.error("Failed to load invitation preview:", error);
+  }
+}
+
+// Existing-user multi-team invitation correction: the single-flow
+// replacement for handleAuth() on the invitation screen specifically.
+// accountExists === true takes a real login-only path with a clear
+// error on failure (pointing at the existing Forgot Password flow);
+// accountExists === false (or null, for a phone invitation, where the
+// server has no comparable identity to check) keeps the original
+// register-with-invited-role behavior. Never both in sequence — no
+// guessing which one the person needs.
+async function handleInvitedAuth(role, accountExists) {
+  const email = emailInput.value.trim();
+  const password = passwordInput.value.trim();
+
+  if (!email || !password) {
+    showMessage("Please enter both email and password.");
+    return;
+  }
+
+  try {
+    let data;
+
+    if (accountExists) {
+      try {
+        data = await loginUser(email, password);
+      } catch (loginError) {
+        showMessage(
+          'Incorrect email or password for this existing account. Use "Forgot password?" below if you don\'t remember it.'
+        );
+        return;
+      }
+    } else {
+      data = await registerUser(email, password, role);
+    }
+
+    authToken = data.token;
+    currentUser = data.user;
+    localStorage.setItem("token", authToken);
+    localStorage.setItem("user", JSON.stringify(currentUser));
+
+    activateApp(currentUser);
+  } catch (error) {
+    console.error(error);
+    showMessage(error.message || "Authentication failed.");
   }
 }
 

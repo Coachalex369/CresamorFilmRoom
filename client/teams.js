@@ -67,6 +67,9 @@ const inviteCopyLinkBtn = document.getElementById("invite-copy-link-btn");
 const inviteShareSmsBtn = document.getElementById("invite-share-sms-btn");
 const inviteDoneBtn = document.getElementById("invite-done-btn");
 
+const myPendingInvitationsSection = document.getElementById("my-pending-invitations-section");
+const myPendingInvitationsList = document.getElementById("my-pending-invitations-list");
+
 const ROLE_LABELS = { athlete: "Athlete", parent: "Parent", assistant_coach: "Assistant Coach", coach: "Coach" };
 
 // ---------- team list ----------
@@ -79,6 +82,75 @@ async function loadTeamsList() {
     renderTeamsList();
   } catch (error) {
     console.error("Failed to load teams:", error);
+  }
+}
+
+// Existing-user multi-team invitation correction: in-app visibility for
+// a pending invitation addressed to the current user's own email —
+// previously only discoverable via the emailed link. Accept here reuses
+// the exact same server-side outcome handling as the emailed-link flow
+// (POST /api/invitations/by-id/:id/accept -> respondToAcceptOutcome ->
+// applyInvitation), just addressed by numeric id instead of raw token.
+async function loadMyPendingInvitations() {
+  if (!currentUser) return;
+
+  try {
+    const invitations = await apiFetch("/api/invitations/mine");
+    renderMyPendingInvitations(invitations);
+  } catch (error) {
+    console.error("Failed to load pending invitations:", error);
+  }
+}
+
+function renderMyPendingInvitations(invitations) {
+  myPendingInvitationsSection.classList.toggle("hidden", invitations.length === 0);
+  myPendingInvitationsList.innerHTML = "";
+
+  invitations.forEach((invitation) => {
+    const item = document.createElement("li");
+    item.className = "my-pending-invitation-item";
+
+    // teamName and coachName come from invitation-controlled data
+    // (teams.name, users.display_name) -- built with createElement +
+    // textContent, never innerHTML, so a malicious team/display name
+    // can never inject markup into another user's Teams screen.
+    const info = document.createElement("div");
+    info.className = "my-pending-invitation-item-info";
+
+    const teamNameEl = document.createElement("strong");
+    teamNameEl.textContent = invitation.teamName;
+
+    const metaEl = document.createElement("span");
+    metaEl.className = "my-pending-invitation-item-meta";
+    metaEl.textContent = `as ${invitation.roleLabel || ROLE_LABELS[invitation.roleOnTeam] || invitation.roleOnTeam} · invited by ${invitation.coachName}`;
+
+    info.appendChild(teamNameEl);
+    info.appendChild(metaEl);
+
+    const acceptBtn = document.createElement("button");
+    acceptBtn.type = "button";
+    acceptBtn.textContent = "Accept";
+    acceptBtn.addEventListener("click", () => acceptMyPendingInvitation(invitation.id, invitation.teamName, acceptBtn));
+
+    item.appendChild(info);
+    item.appendChild(acceptBtn);
+    myPendingInvitationsList.appendChild(item);
+  });
+}
+
+async function acceptMyPendingInvitation(invitationId, teamName, acceptBtn) {
+  acceptBtn.disabled = true;
+  acceptBtn.textContent = "Joining...";
+
+  try {
+    await apiFetch(`/api/invitations/by-id/${invitationId}/accept`, { method: "POST" });
+    showMessage(`You've joined ${teamName}!`);
+    await Promise.all([loadTeamsList(), loadMyPendingInvitations()]);
+  } catch (error) {
+    console.error("Failed to accept pending invitation:", error);
+    showMessage(error.message || "Could not accept this invitation. Please try again.");
+    acceptBtn.disabled = false;
+    acceptBtn.textContent = "Accept";
   }
 }
 
@@ -471,6 +543,7 @@ window.activateApp = function (user) {
   teamDetailView.classList.add("hidden");
   teamsListView.classList.remove("hidden");
   loadTeamsList();
+  loadMyPendingInvitations();
 };
 
 const __originalLogoutLocalStateForTeams = window.logoutLocalState;
@@ -487,6 +560,7 @@ window.logoutLocalState = function () {
 // invitations itself.
 window.refreshTeamsAfterInviteAccept = function () {
   loadTeamsList();
+  loadMyPendingInvitations();
 };
 
 // Covers the case where a session was already restored by app.js's own
@@ -497,4 +571,5 @@ window.refreshTeamsAfterInviteAccept = function () {
 // too, not just the wrap above).
 if (currentUser) {
   loadTeamsList();
+  loadMyPendingInvitations();
 }
