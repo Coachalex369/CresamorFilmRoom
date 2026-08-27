@@ -55,8 +55,13 @@
           </div>
 
           <!-- Teams MVP: replaces the 3-button role choice above when a
-               pending invitation already specifies the role. -->
+               pending invitation already specifies the role. Existing-user
+               multi-team invitation correction: invitation-login-hint
+               makes explicit which of the two flows (log in vs. create
+               account) this button will take, driven by the invitation
+               preview's accountExists — see invitations.js. -->
           <div id="invitation-login-buttons" class="hidden">
+            <p id="invitation-login-hint"></p>
             <button id="invitation-auth-btn" type="button"></button>
           </div>
 
@@ -627,6 +632,20 @@
         <!-- TEAMS SCREEN -->
         <section id="teams-screen" class="app-screen">
           <div id="teams-list-view">
+            <!-- Existing-user multi-team invitation correction: in-app
+                 visibility for a pending invitation addressed to the
+                 CURRENT user's own email (GET /api/invitations/mine) --
+                 previously only discoverable by clicking the emailed
+                 link. Accept here goes through the same
+                 respondToAcceptOutcome()/applyInvitation() path as the
+                 emailed-link flow, just by numeric id instead of raw
+                 token (POST /api/invitations/by-id/:id/accept) -- no
+                 second acceptance implementation. -->
+            <div id="my-pending-invitations-section" class="hidden">
+              <h3>Pending Invitations</h3>
+              <ul id="my-pending-invitations-list"></ul>
+            </div>
+
             <div id="teams-header">
               <h2>Teams</h2>
               <button id="create-team-btn" type="button">+ Create Team</button>

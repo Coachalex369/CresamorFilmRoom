@@ -163,6 +163,53 @@ Remember: even locally, all API calls go to the live deployed backend by default
   check beyond `authenticate` — fixed with `requireOwner("id")` (already
   proven on `profile.js`).
 
+- **Existing-user multi-team invitation correction** (on `feature/invitation-multiteam-fix`,
+  branched from this exact checkpoint — not merged): `team_members`
+  (`UNIQUE(team_id, user_id)`, by original Foundation-Sprint design) and
+  `acceptInvitation()`'s `ON CONFLICT(team_id, user_id)` logic already
+  correctly supported one account on multiple teams, idempotent accepts,
+  and revoked-membership reactivation — that layer needed no changes.
+  The actual bug: `handleAuth(role)` (the invitation screen's auth
+  button) always tried login first and silently fell back to
+  `POST /api/auth/register` on ANY login failure, including an existing
+  user simply not having typed their correct password yet. Since
+  `users.email` is `UNIQUE`, that fallback threw a Postgres
+  unique-violation, got swallowed by a generic `catch`, and surfaced an
+  opaque `500 "Registration failed"` — an existing Parent invited to a
+  second team could get permanently stuck. Fixed: `getInvitationPreview()`
+  now returns `account_exists` (email invitations only, computed from a
+  valid unexpired invitation token someone already holds — not a public
+  "does this email exist" lookup); the client uses it to pick ONE flow
+  up front (`handleInvitedAuth()` in `invitations.js`) — real login-only
+  with a clear error for an existing account, or the original
+  register-with-invited-role flow for a new one — instead of guessing via
+  try/catch. `POST /api/auth/register` also now returns a clear `409`
+  (not `500`) for a duplicate email regardless of call site, as a
+  backstop. `acceptInvitation()` was split into a shared transactional
+  core (`applyInvitation`) plus token-based and new id-based lookups
+  (`acceptInvitationById`), so a new `GET /api/invitations/mine` +
+  `POST /api/invitations/by-id/:id/accept` (in-app "Pending Invitations"
+  list on the Teams screen, for a user who never clicks the emailed
+  link) reuses the exact same acceptance/authorization logic as the
+  emailed-link path — not a second implementation. `/by-id/:id/accept`
+  is deliberately NOT `/:id/accept`: that shape is structurally identical
+  to the existing `/:token/accept` (one param segment then `/accept`)
+  and a registration-order mistake would silently route one into the
+  other — caught and fixed before commit, with a dedicated route-level
+  test proving the numeric id is rejected by the token route and
+  correctly reaches `acceptInvitationById` via the real path. 28 new
+  checks in `testInvitations.js` (68/68 total, up from 40/40), including the exact
+  required regression case (existing Parent already on Team A, invited
+  with the same email to Team B, joins Team B via login-not-registration,
+  Team A membership completely untouched). Full regression clean: Auth
+  30/30, Platform Admin 23/23, Messages Team Scoping 25/25, Schedule
+  40/40. Manually verified end-to-end in the browser against a throwaway
+  production fixture (created/cleaned up with exact-id verification):
+  the real emailed-link flow showing "Log In to Accept" with an
+  explanatory hint, successful login-based acceptance leaving both team
+  memberships intact, and the in-app Pending Invitations list showing
+  and accepting a never-clicked invitation.
+
 ## Remaining known debt (see `ARCHITECTURE.md`'s "Not yet built" for the full list)
 
 Real video transcoding/thumbnailing; `events`/Calendar and `watch_progress` still mock/local; parent-child linking (and the narrow parent access that results); server-side token revocation (logout is client-side-only); direct browser-to-R2 uploads (still proxied through Express); Messages preview's unread *count* still mocked (only read/unread *state* is real, since Phase 2); chunked/resumable upload during recording (documented future milestone); real background sync (the recording pipeline only retries while the app is open — no service worker); `navigator.storage.persist()` not called, so IndexedDB storage isn't guaranteed to survive disk pressure; coach-editing-an-athlete's-profile; an org-admin role tier above "coach".

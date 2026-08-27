@@ -63,6 +63,24 @@ router.post("/api/auth/register", registerLimiter, async (req, res) => {
 
     res.status(201).json({ token, user });
   } catch (err) {
+    // Existing-user multi-team invitation correction: users.email is
+    // UNIQUE (schema.sql) -- registering an email that already has an
+    // account throws Postgres error 23505 (unique_violation), which used
+    // to fall through to the generic 500 below with no indication of
+    // what actually went wrong. Most commonly hit via the invitation
+    // accept screen: an existing Parent invited to a second team who
+    // doesn't realize they should log in with their existing password
+    // instead. A distinct, actionable 409 here is also what makes that
+    // screen's own accountExists-driven branch (see
+    // client/invitations.js) safe to fall back on if it's ever wrong
+    // about a given email -- this response is the backstop, not the
+    // primary fix, so email enumeration risk here is accepted the same
+    // way registration already inherently has one (the whole point of
+    // registering is claiming a specific email).
+    if (err.code === "23505") {
+      return res.status(409).json({ error: "An account with that email already exists. Please log in instead." });
+    }
+
     console.error("POST /api/auth/register error:", err);
     res.status(500).json({ error: "Registration failed" });
   }

@@ -2127,7 +2127,8 @@ body.app-active #reset-password-screen {
 
 .team-list-item,
 .team-roster-item,
-.team-invitation-item {
+.team-invitation-item,
+.my-pending-invitation-item {
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -2141,7 +2142,8 @@ body.app-active #reset-password-screen {
 
 .team-list-item-info,
 .team-roster-item-info,
-.team-invitation-item-info {
+.team-invitation-item-info,
+.my-pending-invitation-item-info {
   display: flex;
   flex-direction: column;
   gap: 0.25rem;
@@ -2149,9 +2151,16 @@ body.app-active #reset-password-screen {
 
 .team-list-item-meta,
 .team-roster-item-meta,
-.team-invitation-item-meta {
+.team-invitation-item-meta,
+.my-pending-invitation-item-meta {
   color: var(--muted);
   font-size: 0.85rem;
+}
+
+#my-pending-invitations-section {
+  margin-bottom: 1.5rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--gold-dim);
 }
 
 .invitation-status-badge {
