@@ -71,7 +71,7 @@ Cresamor: not just a film platform — the product goal (per the project owner) 
 Plain Node/Express backend (routes organized by resource under `server/routes/`, see `ARCHITECTURE.md`) + vanilla JS/HTML/CSS frontend. **No framework, no bundler, no build step.** New frontend code is added as separate files loaded via `<script>` tags in `client/index.html`, in load order:
 
 ```
-recordingLibrary.js → app.js → mockData.js → messages.js → home.js → recordingPipeline.js → capture.js → teams.js → invitations.js → schedule.js
+recordingLibrary.js → app.js → mockData.js → messages.js → home.js → recordingPipeline.js → capture.js → teams.js → invitations.js → schedule.js → directMessages.js
 ```
 
 `teams.js`, `invitations.js`, and `schedule.js` load last, after `capture.js` — same shared-global-scope convention applies. (`schedule.js` bit this exact collision once already, during its own initial implementation: a top-level `teamDisplayLabel` helper collided with `messages.js`'s function of the same name — caught by this project's own collision-check command before it shipped, renamed to `scheduleTeamDisplayLabel`.)
@@ -91,7 +91,7 @@ function topLevelDecls(file) {
   while ((m = re.exec(src))) names.add(m[1]);
   return names;
 }
-const files = ["recordingLibrary.js", "app.js", "mockData.js", "messages.js", "home.js", "recordingPipeline.js", "capture.js", "teams.js", "invitations.js", "schedule.js"];
+const files = ["recordingLibrary.js", "app.js", "mockData.js", "messages.js", "home.js", "recordingPipeline.js", "capture.js", "teams.js", "invitations.js", "schedule.js", "directMessages.js"];
 const seen = new Map();
 for (const f of files) {
   for (const name of topLevelDecls(f)) {

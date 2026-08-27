@@ -106,6 +106,7 @@
 
           <button class="tab-btn" data-screen="messages-screen">
             Messages
+            <span id="messages-nav-badge" class="nav-unread-badge hidden"></span>
           </button>
 
           <button class="tab-btn" data-screen="schedule-screen">
@@ -431,36 +432,82 @@
         </section>
 
         <!-- MESSAGES SCREEN -->
+        <!-- MESSAGES SCREEN — a real inbox (Direct Messaging Phase 2):
+             Team Chats and Direct Messages listed separately in
+             #messages-inbox (see directMessages.js/messages.js), each
+             row showing identity/context, latest-message preview,
+             timestamp, and unread state. Selecting ANY row shows it in
+             the one shared #messages-active-pane below/beside the list —
+             both categories render through the exact same
+             fetch/send/mark-read plumbing, since the server already
+             treats them uniformly once authorized (see Phase 1). Phase 3
+             will replace ONLY how a category='direct' selection is
+             displayed (a floating AIM-style window instead of this
+             inline pane) without changing this inbox or the reusable
+             openDirectMessage() entry point Roster Profiles will later
+             call — Team Chat keeps using this inline pane always. -->
         <section id="messages-screen" class="app-screen">
           <div id="messages-layout">
-            <!-- Team context: exactly one of these three is shown at a
-                 time (see messages.js's renderMessagesTeamContext) — a
-                 plain label for a single-team user (no selection
-                 friction), a <select> for a multi-team user, or an empty
-                 state for a user on no team at all. -->
-            <div id="messages-team-context">
-              <p id="messages-team-label" class="hidden"></p>
-              <label for="messages-team-select" id="messages-team-select-label" class="hidden">Team</label>
-              <select id="messages-team-select" class="hidden"></select>
-              <p id="messages-team-empty" class="hidden">You're not on a team yet — join or create one to start messaging.</p>
+            <div id="messages-inbox">
+              <div id="messages-inbox-header">
+                <h2>Messages</h2>
+                <button type="button" id="new-message-btn">+ New Message</button>
+              </div>
+
+              <div id="messages-inbox-body">
+                <div class="messages-inbox-section">
+                  <h3 class="messages-inbox-section-label">Team Chats</h3>
+                  <ul id="messages-inbox-team-list" class="messages-inbox-list"></ul>
+                  <p id="messages-inbox-team-empty" class="messages-inbox-empty hidden">
+                    You're not on a team yet — join or create one to start messaging.
+                  </p>
+                </div>
+
+                <div class="messages-inbox-section">
+                  <h3 class="messages-inbox-section-label">Direct Messages</h3>
+                  <ul id="messages-inbox-direct-list" class="messages-inbox-list"></ul>
+                  <p id="messages-inbox-direct-empty" class="messages-inbox-empty hidden">
+                    No direct messages yet — start one with "+ New Message".
+                  </p>
+                </div>
+              </div>
             </div>
 
-            <div id="message-thread"></div>
+            <div id="messages-active-pane">
+              <div id="messages-active-header">
+                <p id="messages-active-title" class="hidden"></p>
+                <p id="messages-active-context" class="hidden"></p>
+              </div>
 
-            <!-- Persistent team identity right at the point of composing —
-                 not just at the top of the screen, per the "must remain
-                 visually obvious while composing" requirement. -->
-            <p id="messages-compose-context" class="hidden"></p>
+              <p id="messages-active-placeholder">Select a conversation to start reading.</p>
 
-            <form id="message-form">
-              <input
-                type="text"
-                id="message-input"
-                placeholder="Type a message..."
-              />
+              <div id="message-thread"></div>
 
-              <button type="submit">Send</button>
-            </form>
+              <form id="message-form" class="hidden">
+                <input
+                  type="text"
+                  id="message-input"
+                  placeholder="Type a message..."
+                />
+
+                <button type="submit">Send</button>
+              </form>
+            </div>
+          </div>
+
+          <!-- New Message: server-enforced eligible-recipients only (see
+               GET /api/messages/eligible-recipients) — never a free-text
+               global search. Selecting a person calls the same
+               openDirectMessage() Roster Profiles will later reuse. -->
+          <div id="new-message-modal" class="hidden">
+            <div id="new-message-modal-inner">
+              <button type="button" id="new-message-close-btn" aria-label="Close">×</button>
+              <h2>New Message</h2>
+              <ul id="new-message-recipient-list"></ul>
+              <p id="new-message-empty" class="hidden">
+                No one you're currently able to message.
+              </p>
+            </div>
           </div>
         </section>
 
@@ -836,6 +883,38 @@
       </section>
     </main>
 
+    <!-- Direct Messaging Phase 3: floating AIM-style windows, deliberately
+         OUTSIDE every .app-screen so they survive tab navigation (a
+         .app-screen gets display:none the instant it's not the active
+         tab -- anything inside one would vanish exactly when the whole
+         point is "stay open while the user moves around Cresamor"). See
+         directMessages.js. Desktop: #dm-windows-container holds expanded
+         windows + minimized tabs, built dynamically per open
+         conversation. Narrow/mobile viewport: #dm-mobile-overlay is used
+         instead, one full-screen conversation at a time. Both render the
+         SAME underlying canonical conversation/messages -- two
+         presentations of one system, chosen at open-time by viewport
+         width, never both at once. -->
+    <div id="dm-windows-container"></div>
+
+    <div id="dm-mobile-overlay" class="hidden">
+      <div id="dm-mobile-header">
+        <button type="button" id="dm-mobile-back-btn" aria-label="Back">‹</button>
+        <div id="dm-mobile-header-text">
+          <p id="dm-mobile-title"></p>
+          <p id="dm-mobile-context"></p>
+        </div>
+      </div>
+      <div id="dm-mobile-thread"></div>
+      <p id="dm-mobile-disabled-banner" class="hidden">
+        You can no longer access this conversation.
+      </p>
+      <form id="dm-mobile-form">
+        <input type="text" id="dm-mobile-input" placeholder="Type a message..." />
+        <button type="submit">Send</button>
+      </form>
+    </div>
+
     <!-- Temporary mobile debug panel — added to diagnose the iPhone/Chrome
          upload bugs (recorded-video 500, Photos-selection silent failure)
          live on-device, since Chrome iOS can't be remotely inspected via
@@ -862,5 +941,6 @@
     <script src="./teams.js"></script>
     <script src="./invitations.js"></script>
     <script src="./schedule.js"></script>
+    <script src="./directMessages.js"></script>
   </body>
 </html>

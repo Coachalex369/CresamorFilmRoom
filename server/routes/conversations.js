@@ -3,6 +3,7 @@ const express = require("express");
 const client = require("../db/client");
 const { authenticate } = require("../middleware/authenticate");
 const { requireConversationParticipant } = require("../middleware/authorize");
+const { isEligibleRecipientPair } = require("../services/permissions");
 
 const router = express.Router();
 
@@ -22,11 +23,41 @@ const router = express.Router();
 // conversation_participants row, which can drift out of sync with real
 // team membership. Every other category still goes through the
 // conversation_participants JOIN exactly as before, unchanged.
+// Direct Messaging: this now also returns unread_count per conversation
+// (reusing conversation_participants.last_read_at, unchanged schema) and,
+// for category='direct' rows, an other_participant {id, display_name,
+// role} -- never email/phone. A direct conversation whose relationship
+// has since lapsed (team membership revoked, etc.) is filtered back out
+// here -- same live-reevaluation rule canAccessDirectMessage enforces on
+// the read/send side, so the inbox and unread badge never surface or
+// count something the user could not actually open right now. History
+// isn't deleted anywhere by this -- it just stops appearing in the list
+// until/unless the relationship becomes valid again.
 router.get("/api/conversations", authenticate, async (req, res) => {
   try {
     const result = await client.query(
       `
-      SELECT DISTINCT conversations.*, teams.name AS team_name
+      SELECT DISTINCT conversations.*, teams.name AS team_name,
+        (
+          SELECT COUNT(*)::int FROM messages m
+          WHERE m.conversation_id = conversations.id
+            AND m.sender_id IS DISTINCT FROM $1
+            AND m.created_at > COALESCE(
+              (SELECT cp.last_read_at FROM conversation_participants cp
+               WHERE cp.conversation_id = conversations.id AND cp.user_id = $1),
+              'epoch'
+            )
+        ) AS unread_count,
+        (
+          SELECT m.body FROM messages m
+          WHERE m.conversation_id = conversations.id
+          ORDER BY m.created_at DESC LIMIT 1
+        ) AS last_message_preview,
+        (
+          SELECT m.created_at FROM messages m
+          WHERE m.conversation_id = conversations.id
+          ORDER BY m.created_at DESC LIMIT 1
+        ) AS last_message_at
       FROM conversations
       LEFT JOIN teams ON teams.id = conversations.team_id
       WHERE
@@ -52,7 +83,45 @@ router.get("/api/conversations", authenticate, async (req, res) => {
       [req.user.id]
     );
 
-    res.json(result.rows);
+    const conversations = result.rows;
+    const directConversations = conversations.filter((c) => c.category === "direct");
+
+    if (directConversations.length) {
+      const conversationIds = directConversations.map((c) => c.id);
+
+      const participantRows = await client.query(
+        `
+        SELECT cp.conversation_id, u.id, u.display_name, u.email, u.role
+        FROM conversation_participants cp
+        JOIN users u ON u.id = cp.user_id
+        WHERE cp.conversation_id = ANY($1::int[]) AND cp.user_id != $2
+        `,
+        [conversationIds, req.user.id]
+      );
+
+      const otherByConversation = new Map(
+        participantRows.rows.map((row) => [
+          row.conversation_id,
+          { id: row.id, display_name: row.display_name || row.email.split("@")[0], role: row.role },
+        ])
+      );
+
+      const eligibility = await Promise.all(
+        directConversations.map((c) => {
+          const other = otherByConversation.get(c.id);
+          return other ? isEligibleRecipientPair(req.user.id, other.id) : Promise.resolve(false);
+        })
+      );
+
+      directConversations.forEach((c, i) => {
+        c.other_participant = otherByConversation.get(c.id) || null;
+        c.currently_eligible = eligibility[i];
+      });
+    }
+
+    const visible = conversations.filter((c) => c.category !== "direct" || c.currently_eligible);
+
+    res.json(visible);
   } catch (err) {
     console.error("GET /api/conversations error:", err);
     res.status(500).json({ error: "Failed to fetch conversations" });

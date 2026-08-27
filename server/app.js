@@ -92,6 +92,7 @@ app.use(require("./routes/videos"));
 app.use(require("./routes/clips"));
 app.use(require("./routes/profile"));
 app.use(require("./routes/conversations"));
+app.use(require("./routes/directMessages"));
 app.use(require("./routes/teams"));
 app.use(require("./routes/invitations"));
 app.use(require("./routes/schedule"));
