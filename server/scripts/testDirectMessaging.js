@@ -780,6 +780,101 @@ async function main() {
       Number(historyAfterRevocation.rows[0].count) > 0,
       `count=${historyAfterRevocation.rows[0].count}`
     );
+
+    // ==================================================================
+    // I. SAFE SENDER LABELS (production privacy fix)
+    // Own isolated setup, same reasoning as Phase 4's own section H --
+    // exact expected labels are easiest to verify against a fresh,
+    // untouched pair. Never references or stores a real email anywhere in
+    // this section; the "email-like" string used in I3 is a synthetic
+    // RUN_TAG-scoped test value, not a real address.
+    // ==================================================================
+
+    const coachNoName = await createTestUser(`${RUN_TAG}-coachNoName@test.cresamor.local`, "coach");
+    created.userIds.push(coachNoName.id);
+    const teamI = await req("/api/teams", {
+      method: "POST",
+      token: coachNoName.token,
+      body: { name: `${RUN_TAG} Team I`, sport: "Wrestling" },
+    });
+    created.teamIds.push(teamI.data.id);
+
+    const athleteWithName = await createTestUser(`${RUN_TAG}-athleteWithName@test.cresamor.local`, "athlete");
+    created.userIds.push(athleteWithName.id);
+    await req(`/api/users/${athleteWithName.id}/teams`, {
+      method: "POST",
+      token: coachNoName.token,
+      body: { team_id: teamI.data.id, role_on_team: "athlete" },
+    });
+    // Only this one test user gets a display_name -- isolates "has a name"
+    // vs "no name set" (every other test user in this script has none) to
+    // exactly one variable per assertion below.
+    await client.query("UPDATE users SET display_name = $1 WHERE id = $2", [`${RUN_TAG} Display Name`, athleteWithName.id]);
+
+    const dmI = (await openDM(coachNoName.token, athleteWithName.id)).data;
+    created.conversationIds.push(dmI.id);
+
+    const fromNoName = await req(`/api/conversations/${dmI.id}/messages`, {
+      method: "POST",
+      token: coachNoName.token,
+      body: { body: `${RUN_TAG} from coach with no display_name` },
+    });
+    assert(
+      "I1. a sender with no display_name gets a role-based username, never their email",
+      fromNoName.data.username === "Coach" && !fromNoName.data.username.includes("@"),
+      `username=${fromNoName.data.username}`
+    );
+
+    const fromWithName = await req(`/api/conversations/${dmI.id}/messages`, {
+      method: "POST",
+      token: athleteWithName.token,
+      body: { body: `${RUN_TAG} from athlete with display_name` },
+    });
+    assert(
+      "I2. a sender WITH display_name gets their display_name as username",
+      fromWithName.data.username === `${RUN_TAG} Display Name`,
+      `username=${fromWithName.data.username}`
+    );
+
+    // I3: defensive read-time sanitizer -- directly plant a synthetic
+    // (never real) email-shaped username on an existing test message,
+    // exactly simulating a pre-fix historical row, and confirm
+    // GET .../messages never returns that raw value.
+    const plantedFakeEmail = `${RUN_TAG}-fake-planted@test.cresamor.local`;
+    await client.query("UPDATE messages SET username = $1 WHERE id = $2", [plantedFakeEmail, fromNoName.data.id]);
+
+    const sanitizedRead = await req(`/api/conversations/${dmI.id}/messages`, { token: coachNoName.token });
+    const plantedRow = sanitizedRead.data.find((m) => m.id === fromNoName.data.id);
+    assert(
+      "I3. the defensive read-time sanitizer never returns a stored email-valued username",
+      plantedRow && plantedRow.username === "Coach" && plantedRow.username !== plantedFakeEmail,
+      `username=${plantedRow?.username}`
+    );
+
+    // Restore the deliberately-planted value -- I3 only needs the API
+    // response checked (above); leaving the raw row planted would make
+    // I4 below fail against its own fixture instead of testing anything
+    // real. "Coach" is exactly what the write path actually produced for
+    // this message before I3 overwrote it -- restoring it, not guessing.
+    await client.query("UPDATE messages SET username = $1 WHERE id = $2", ["Coach", fromNoName.data.id]);
+
+    // I4: broad safety net across everything this whole script created --
+    // no message username anywhere should ever contain "@". COUNT(DISTINCT
+    // m.id): a direct conversation has 2 participants, so an unqualified
+    // COUNT(*) here would double-count every matching message via the
+    // conversation_participants join, one row per participant.
+    const anyEmailUsernames = await client.query(
+      `SELECT COUNT(DISTINCT m.id) FROM messages m
+       JOIN conversation_participants cp ON cp.conversation_id = m.conversation_id
+       JOIN users u ON u.id = cp.user_id
+       WHERE u.email LIKE $1 AND m.username LIKE '%@%'`,
+      [`${RUN_TAG}%`]
+    );
+    assert(
+      "I4. no message created by this run has an '@' anywhere in its stored username",
+      Number(anyEmailUsernames.rows[0].count) === 0,
+      `count=${anyEmailUsernames.rows[0].count}`
+    );
   } finally {
     try {
       const conversationIds = [...new Set(created.conversationIds)];
