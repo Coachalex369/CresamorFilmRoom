@@ -698,7 +698,16 @@ window.activateApp = function (user) {
   // actually refetch instead of trusting stale state.
   messagesConversationsLoaded = false;
   messagesInboxState = { conversations: [], selectedConversationId: null, selectedConversation: null };
-  refreshPollingState();
+  // immediate: true -- production bug fix: without this, a fresh login
+  // started the poll TIMER right away but the first real pollConversationList()
+  // call still waited a full CONVERSATION_LIST_POLL_INTERVAL_MS, so an
+  // already-existing unread DM/Team Chat message left the nav badge at
+  // 0/hidden for up to that long after login, self-correcting only once
+  // the timer's first tick fired or the user clicked a tab/refocused the
+  // window (both of which already passed immediate: true). Every other
+  // call site already did this; login/cold-restore were the two that
+  // didn't.
+  refreshPollingState({ immediate: true });
 };
 
 // Stops polling on both an explicit user logout AND the 401-triggered
@@ -716,12 +725,12 @@ window.logoutLocalState = function () {
 };
 
 // Covers the case where a session was already restored by app.js's own
-// restoreSession() call before this script finished loading. Also starts
-// the app-wide conversation-list poll immediately on this cold load —
-// without this, a page refresh with an already-valid session wouldn't
-// start keeping the nav badge live until the user clicked a tab or the
-// window regained focus.
+// restoreSession() call before this script finished loading. immediate:
+// true is what actually makes the nav badge reflect any already-existing
+// unread state on this very first render, not just eventually once the
+// poll timer's first tick fires — see the matching fix in
+// window.activateApp above for the fresh-login half of the same bug.
 if (currentUser) {
   initMessagesScreen();
-  refreshPollingState();
+  refreshPollingState({ immediate: true });
 }
