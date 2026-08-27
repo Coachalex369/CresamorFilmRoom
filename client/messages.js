@@ -118,6 +118,39 @@ function formatInboxTimestamp(iso) {
 
 /* ---------- inbox rendering ---------- */
 
+// Production bug fix: the inbox previously rendered conversations in
+// whatever order the server returned (conversation id / creation order),
+// so a new unread message could sit below several older, already-read
+// conversations -- a coach with a busy Team Chat plus several DMs had to
+// hunt for what was actually new. Sort order: unread first (any
+// unread_count > 0), then by most recent activity within each group.
+// Applied independently within the Team Chats and Direct Messages
+// sections (not merged into one list) -- keeps the existing two-section
+// layout, and every regression scenario ("unread Team Chat above newer
+// read conversations", "unread DM above newer read conversations") is a
+// within-section comparison in real usage (a multi-team coach can easily
+// have several Team Chats, or several DMs, to sort among).
+// Array.prototype.sort is spec-guaranteed stable (ES2019+), so ties on
+// both keys keep their prior relative order rather than shuffling.
+// Purely a render-time computation over already-fetched data (unread_count,
+// last_message_at) -- no separate sort state to cache, invalidate, or lose
+// sync with, so a mark-read (which zeroes unread_count locally and calls
+// renderInbox() again -- see window.markCurrentConversationRead) or a
+// fresh renderInbox() after any loadConversations() call (including a
+// cold page-load restore) always re-sorts from scratch against current
+// data. Never touches messagesInboxState.selectedConversationId, so the
+// currently-open conversation is never disturbed by a re-sort -- only
+// its position in the list can move.
+function compareConversationsForInbox(a, b) {
+  const aUnread = Number(a.unread_count) > 0 ? 0 : 1;
+  const bUnread = Number(b.unread_count) > 0 ? 0 : 1;
+  if (aUnread !== bUnread) return aUnread - bUnread;
+
+  const aTime = a.last_message_at ? new Date(a.last_message_at).getTime() : 0;
+  const bTime = b.last_message_at ? new Date(b.last_message_at).getTime() : 0;
+  return bTime - aTime;
+}
+
 function renderInboxRow(conversation) {
   const li = document.createElement("li");
   li.className = "messages-inbox-item";
@@ -179,8 +212,12 @@ function renderInboxRow(conversation) {
 function renderInbox() {
   if (!messagesInboxTeamList || !messagesInboxDirectList) return;
 
-  const teamConversations = messagesInboxState.conversations.filter((c) => c.category === "team");
-  const directConversations = messagesInboxState.conversations.filter((c) => c.category === "direct");
+  const teamConversations = messagesInboxState.conversations
+    .filter((c) => c.category === "team")
+    .sort(compareConversationsForInbox);
+  const directConversations = messagesInboxState.conversations
+    .filter((c) => c.category === "direct")
+    .sort(compareConversationsForInbox);
 
   messagesInboxTeamList.innerHTML = "";
   teamConversations.forEach((c) => messagesInboxTeamList.appendChild(renderInboxRow(c)));

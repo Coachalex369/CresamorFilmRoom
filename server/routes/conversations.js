@@ -4,6 +4,7 @@ const client = require("../db/client");
 const { authenticate } = require("../middleware/authenticate");
 const { requireConversationParticipant } = require("../middleware/authorize");
 const { isEligibleRecipientPair } = require("../services/permissions");
+const { safeSenderLabel, sanitizeMessageRows } = require("../services/messageLabels");
 
 const router = express.Router();
 
@@ -146,7 +147,7 @@ router.get(
         [id]
       );
 
-      res.json(result.rows);
+      res.json(await sanitizeMessageRows(result.rows));
     } catch (err) {
       console.error("GET /api/conversations/:id/messages error:", err);
       res.status(500).json({ error: "Failed to fetch messages" });
@@ -172,11 +173,18 @@ router.post(
       // in this sprint, see client/index.html) — now looked up server-side
       // from the authenticated user's real row so a caller can't post a
       // message under a fabricated name/role.
+      //
+      // Production privacy fix: this used to store display_name || email
+      // -- most real accounts have no display_name set, so a real user's
+      // real email was being permanently stored here and shown to every
+      // other participant in the conversation. safeSenderLabel() never
+      // falls back to email/phone -- see server/services/messageLabels.js.
       const userResult = await client.query(
-        "SELECT display_name, email, role FROM users WHERE id = $1",
+        "SELECT display_name, role FROM users WHERE id = $1",
         [req.user.id]
       );
-      const { display_name, email, role } = userResult.rows[0];
+      const { display_name, role } = userResult.rows[0];
+      const username = safeSenderLabel({ display_name, role });
 
       const result = await client.query(
         `
@@ -184,7 +192,7 @@ router.post(
         VALUES ($1, $2, $3, $4, $5)
         RETURNING *
         `,
-        [id, req.user.id, display_name || email, role, body]
+        [id, req.user.id, username, role, body]
       );
 
       res.status(201).json(result.rows[0]);
