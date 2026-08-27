@@ -89,12 +89,22 @@ app.get("/api/health", (req, res) => {
 
 app.use(require("./routes/auth"));
 app.use(require("./routes/videos"));
+app.use(require("./routes/videoUploads"));
 app.use(require("./routes/clips"));
 app.use(require("./routes/profile"));
 app.use(require("./routes/conversations"));
 app.use(require("./routes/teams"));
 app.use(require("./routes/invitations"));
 app.use(require("./routes/schedule"));
+
+// Resumable-uploads sprint: abandoned/never-finished multipart sessions
+// otherwise sit in R2 forever incurring storage cost. Beta-appropriate,
+// not production-hardened -- an in-process timer, same "no new infra"
+// stance already used by rateLimiters.js, not a real cron job. Doesn't run
+// while Render's free-tier dyno is spun down; that only delays cleanup, it
+// doesn't lose correctness (see uploadSweep.js). Also exposed as
+// server/scripts/sweepAbandonedUploads.js for a manual/on-demand run.
+require("./services/uploadSweep").startPeriodicSweep();
 
 // Mobile Recording Upload sprint: real bug found via direct reproduction —
 // videos.js/profile.js's multer fileFilter rejects a bad MIME type via

@@ -169,6 +169,36 @@ async function canViewVideo(userId, video) {
   return canAccessTeam(userId, video.team_id);
 }
 
+// Resumable-uploads sprint: gates POST /api/video-uploads/initiate when a
+// team_id is supplied. Deliberately its own function, not canManageTeam --
+// canManageTeam is coach-only (event/roster management), but Assistant
+// Coach is meant to be able to add Film Room content too, just not manage
+// the team itself. Explicitly excludes 'parent' and 'athlete'
+// role_on_team: an unrelated user can't target another team's Film Room
+// just by knowing/guessing its numeric id (the vulnerability this
+// replaces -- the legacy POST /api/upload-video route still accepts any
+// team_id with no check at all, preserved there for parity, not fixed as
+// a side effect of this feature), and a parent's relationship to a team is
+// deliberately not upload authority here -- a parent-facing "Team
+// Highlights" upload destination is a real future product surface, not
+// something this authorization fix builds out.
+async function canUploadToTeam(userId, teamId) {
+  if (!userId || !teamId) return false;
+
+  const result = await client.query(
+    `
+    SELECT 1
+    FROM team_members
+    WHERE user_id = $1 AND team_id = $2
+      AND role_on_team IN ('coach', 'assistant_coach')
+      AND revoked_at IS NULL
+    `,
+    [userId, teamId]
+  );
+
+  return result.rows.length > 0;
+}
+
 // The role-escalation fix for POST /api/users/:id/teams: a coach may set
 // any membership, including a coach-level role_on_team, for anyone. A
 // non-coach may only add THEMSELVES, and only with a non-coach role.
@@ -191,4 +221,5 @@ module.exports = {
   canViewTeamRoster,
   canViewVideo,
   canManageTeamMembership,
+  canUploadToTeam,
 };

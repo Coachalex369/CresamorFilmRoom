@@ -18,6 +18,11 @@ const {
   HeadObjectCommand,
   DeleteObjectCommand,
   GetObjectCommand,
+  CreateMultipartUploadCommand,
+  UploadPartCommand,
+  CompleteMultipartUploadCommand,
+  AbortMultipartUploadCommand,
+  ListPartsCommand,
 } = require("@aws-sdk/client-s3");
 const { Upload } = require("@aws-sdk/lib-storage");
 const { getSignedUrl: presign } = require("@aws-sdk/s3-request-presigner");
@@ -98,4 +103,109 @@ async function downloadToFile(key, destPath) {
   await pipeline(response.Body, fs.createWriteStream(destPath));
 }
 
-module.exports = { upload, getSignedUrl, exists, remove, downloadToFile, getObjectSize };
+// Resumable direct-to-R2 uploads (server/routes/videoUploads.js). Deliberately
+// R2-only — unlike getObjectSize/downloadToFile above (trivial file
+// operations with an obvious local-disk equivalent), a real "browser PUTs a
+// chunk directly to storage via a short-lived signed URL" has no meaningful
+// local-disk analogue without inventing a fake local signing server. The
+// route checks STORAGE_PROVIDER === 'r2' itself and returns a clear error
+// otherwise, rather than this module or storage.js pretending to be
+// symmetric here.
+
+async function createMultipartUpload(key, contentType) {
+  const result = await client.send(
+    new CreateMultipartUploadCommand({ Bucket: BUCKET, Key: key, ContentType: contentType })
+  );
+  return result.UploadId;
+}
+
+// Minted on demand, one call per part, right before that part is actually
+// attempted — never batch-minted up front. A mobile resume can happen hours
+// after the session started; a URL stashed at initiate time would already
+// be expired by then. Short expiry (default 15 min) is long enough for one
+// part's PUT on a poor connection, short enough to be genuinely time-limited
+// per the "no permanent/long-lived credentials reach the client" requirement.
+async function presignUploadPart(key, r2UploadId, partNumber, expiresInSeconds = 900) {
+  const command = new UploadPartCommand({
+    Bucket: BUCKET,
+    Key: key,
+    UploadId: r2UploadId,
+    PartNumber: partNumber,
+  });
+  return presign(client, command, { expiresIn: expiresInSeconds });
+}
+
+// parts: [{ PartNumber, ETag }]. This call IS the real trust boundary for
+// "did the client actually upload what it claims" -- R2 rejects completion
+// outright if a part/ETag doesn't match what it actually has, so there's no
+// separate pre-check to invent here; the route's job is just to not swallow
+// that rejection.
+async function completeMultipartUpload(key, r2UploadId, parts) {
+  return client.send(
+    new CompleteMultipartUploadCommand({
+      Bucket: BUCKET,
+      Key: key,
+      UploadId: r2UploadId,
+      MultipartUpload: { Parts: parts },
+    })
+  );
+}
+
+// Best-effort, same "missing isn't an error" contract as remove() -- used
+// both for an explicit user cancel and the orphan sweep (uploadSweep.js),
+// and a session that was already completed/aborted (e.g. a duplicate sweep
+// pass) throwing NoSuchUpload here is expected, not a failure to surface.
+async function abortMultipartUpload(key, r2UploadId) {
+  try {
+    await client.send(
+      new AbortMultipartUploadCommand({ Bucket: BUCKET, Key: key, UploadId: r2UploadId })
+    );
+  } catch (error) {
+    if (error.name !== "NoSuchUpload") {
+      console.error("Failed to abort R2 multipart upload:", r2UploadId, error);
+    }
+  }
+}
+
+// The authoritative "what has actually landed" read for resume -- the
+// server always asks R2 fresh rather than trusting the client's own
+// IndexedDB bookkeeping, which could be stale or partially evicted.
+// Paginated defensively even though a realistic part count (a few hundred,
+// at a 10MB part size up to several GB) fits in one page.
+async function listParts(key, r2UploadId) {
+  const parts = [];
+  let partNumberMarker;
+
+  do {
+    const result = await client.send(
+      new ListPartsCommand({
+        Bucket: BUCKET,
+        Key: key,
+        UploadId: r2UploadId,
+        PartNumberMarker: partNumberMarker,
+      })
+    );
+
+    for (const part of result.Parts || []) {
+      parts.push({ partNumber: part.PartNumber, etag: part.ETag, size: part.Size });
+    }
+
+    partNumberMarker = result.IsTruncated ? result.NextPartNumberMarker : undefined;
+  } while (partNumberMarker);
+
+  return parts;
+}
+
+module.exports = {
+  upload,
+  getSignedUrl,
+  exists,
+  remove,
+  downloadToFile,
+  getObjectSize,
+  createMultipartUpload,
+  presignUploadPart,
+  completeMultipartUpload,
+  abortMultipartUpload,
+  listParts,
+};

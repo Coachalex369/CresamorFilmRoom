@@ -1252,6 +1252,14 @@ function setManualUploadStatus(text) {
 // Sprint 3: converted from fetch to XMLHttpRequest so this manual upload
 // path gets the same real progress/percentage/size/ETA feedback as the
 // capture.js recording flow — fetch() doesn't expose upload progress events.
+//
+// Resumable-uploads sprint: this is now a thin dispatcher. The role/file
+// checks stay here (they apply either way); the actual transport is either
+// legacyUploadVideo() (unchanged, still the only path while
+// multipartUploader's RESUMABLE_UPLOADS_ENABLED flag is false) or
+// uploadVideoResumable() once that flag is deliberately flipped on for a
+// large enough file. See multipartUploader.js's file header for why the
+// flag defaults off.
 function uploadVideo(file) {
   debugLog(`uploadVideo() called, file=${file ? "present" : "MISSING"}`);
 
@@ -1270,6 +1278,117 @@ function uploadVideo(file) {
     return;
   }
 
+  if (typeof multipartUploader !== "undefined" && multipartUploader.shouldUseResumableUpload(file.size)) {
+    uploadVideoResumable(file);
+    return;
+  }
+
+  legacyUploadVideo(file);
+}
+
+// Resumable multipart uploads require a team_id (see migration
+// 019_video_uploads.sql / videoUploads.js's initiate handler — unassigned
+// multipart uploads aren't authorized yet, a deliberate product decision,
+// not a gap to work around here). This manual picker has no team-selection
+// UI of its own, so this only auto-resolves the unambiguous case — a coach
+// with exactly one team — rather than inventing a team-picker UI as a side
+// effect of this checkpoint. Anything else falls back to the legacy path.
+async function uploadVideoResumable(file) {
+  debugLog(`uploadVideoResumable() called, file=${file ? "present" : "MISSING"}`);
+
+  // /api/teams lists every team in the org, not just ones this coach can
+  // upload to — canUploadToTeam() on the server requires an active
+  // ('coach'|'assistant_coach') team_members row, so that's what has to be
+  // filtered on here too. Using the raw /api/teams list instead would
+  // "auto-pick" a team this coach has no authority on and just trade one
+  // guaranteed failure (this fallback) for a different one (initiate's 403).
+  let teamId = null;
+  try {
+    const myTeams = await apiFetch(`/api/users/${currentUser.id}/teams`);
+    const uploadableTeams = myTeams.filter((t) => ["coach", "assistant_coach"].includes(t.role_on_team));
+    if (uploadableTeams.length === 1) {
+      teamId = uploadableTeams[0].id;
+    }
+  } catch (error) {
+    console.error("uploadVideoResumable(): failed to load teams:", error);
+  }
+
+  if (!teamId) {
+    debugLog("uploadVideoResumable(): could not resolve a single team — falling back to legacy upload");
+    legacyUploadVideo(file);
+    return;
+  }
+
+  const progressSection = document.querySelector("#manual-upload-progress");
+  const progressFill = document.querySelector("#manual-upload-progress-fill");
+  const progressPercent = document.querySelector("#manual-upload-percent");
+  const progressSize = document.querySelector("#manual-upload-size");
+  const progressEta = document.querySelector("#manual-upload-eta");
+
+  setManualUploadStatus(`Video received (${(file.size / 1024 / 1024).toFixed(1)}MB) — uploading (resumable)…`);
+
+  if (progressSection) {
+    progressSection.classList.remove("hidden");
+    progressFill.style.width = "0%";
+    progressPercent.textContent = "0%";
+    progressSize.textContent = "";
+    progressEta.textContent = "";
+  }
+
+  setManualUploadStatus(null);
+
+  try {
+    const video = await multipartUploader.upload(file, {
+      title: file.name,
+      teamId,
+      onProgress: ({ percent, loadedBytes, totalBytes, etaSeconds }) => {
+        if (!progressSection) return;
+
+        progressFill.style.width = `${percent}%`;
+        progressPercent.textContent = `${percent}%`;
+        progressSize.textContent = `${(loadedBytes / 1024 / 1024).toFixed(1)}MB of ${(totalBytes / 1024 / 1024).toFixed(1)}MB`;
+        progressEta.textContent =
+          etaSeconds && etaSeconds > 0
+            ? `Estimated time remaining: ${etaSeconds < 60 ? `${etaSeconds}s` : `${Math.round(etaSeconds / 60)}m`}`
+            : "";
+      },
+      onStatus: (status) => debugLog(`uploadVideoResumable() status=${status}`),
+    });
+
+    if (progressSection) progressSection.classList.add("hidden");
+
+    showMessage("Video uploaded.");
+    await loadVideos();
+
+    const freshlyUploaded = allVideos.find((v) => Number(v.id) === Number(video.id));
+    if (freshlyUploaded) selectVideo(freshlyUploaded);
+
+    if (videoUploadInput) videoUploadInput.value = "";
+  } catch (error) {
+    if (progressSection) progressSection.classList.add("hidden");
+    console.error("uploadVideoResumable() failed:", error);
+
+    if (error.status === 401) {
+      showMessage("Your session expired — please log in again.");
+      return;
+    }
+
+    // 501 means STORAGE_PROVIDER isn't r2 in this environment (see
+    // videoUploads.js's requireR2 middleware) — not a real failure of this
+    // particular upload, just this path being unavailable here. Fall back
+    // to the legacy path instead of surfacing an error for something the
+    // user did nothing wrong to cause.
+    if (error.status === 501) {
+      debugLog("uploadVideoResumable(): resumable path unavailable (501) — falling back to legacy upload");
+      legacyUploadVideo(file);
+      return;
+    }
+
+    showMessage("Could not upload video (resumable path) — see console for details.");
+  }
+}
+
+function legacyUploadVideo(file) {
   console.log(`Manual upload file received: size=${file.size} type=${file.type || "(none)"} name=${file.name || "(none)"}`);
   debugLog(`Manual upload file received: size=${file.size} type=${file.type || "(none)"} name=${file.name || "(none)"}`);
   setManualUploadStatus(`Video received (${(file.size / 1024 / 1024).toFixed(1)}MB) — uploading…`);
