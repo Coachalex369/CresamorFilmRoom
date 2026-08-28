@@ -417,6 +417,510 @@ li {
   border: 1px solid var(--border);
   border-radius: 14px;
   padding: 1rem;
+  display: grid;
+  grid-template-columns: minmax(220px, 300px) 1fr;
+  gap: 1rem;
+  align-items: start;
+}
+
+/* ---------- Direct Messaging Phase 2: inbox ---------- */
+
+#messages-inbox {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  max-height: 70vh;
+  overflow-y: auto;
+  min-width: 0;
+}
+
+#messages-inbox-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+#messages-inbox-header h2 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+#new-message-btn {
+  flex-shrink: 0;
+}
+
+.messages-inbox-section-label {
+  margin: 0.5rem 0 0.35rem;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
+
+.messages-inbox-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.messages-inbox-empty {
+  color: var(--muted);
+  font-size: 0.85rem;
+  padding: 0.4rem 0;
+}
+
+/* Tap target sized for touch, not hover — rows are clickable regardless
+   of pointer type. */
+.messages-inbox-item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.6rem 0.5rem;
+  border-radius: 10px;
+  cursor: pointer;
+  min-width: 0;
+}
+
+.messages-inbox-item:hover,
+.messages-inbox-item-selected {
+  background: var(--gold-dim, rgba(212, 175, 55, 0.12));
+}
+
+.messages-inbox-item-main {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.messages-inbox-item-name-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.messages-inbox-item-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.messages-inbox-item-unread .messages-inbox-item-name {
+  color: var(--gold-soft, var(--gold));
+}
+
+.messages-inbox-item-time {
+  flex-shrink: 0;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+.messages-inbox-item-context {
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+.messages-inbox-item-preview {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.messages-inbox-item-unread .messages-inbox-item-preview {
+  color: var(--text);
+}
+
+.messages-inbox-unread-badge {
+  flex-shrink: 0;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--gold, #d4af37);
+  color: #000;
+  font-size: 0.7rem;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* ---------- active conversation pane (shared by Team Chat + DMs) ---------- */
+
+#messages-active-pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+#messages-active-title {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+
+#messages-active-context {
+  margin: 0.15rem 0 0.75rem;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+#messages-active-placeholder {
+  color: var(--muted);
+  text-align: center;
+  padding: 3rem 1rem;
+}
+
+/* Direct-message sender distinction — "own" vs "theirs," not "coach" vs
+   "everyone else" (that distinction has no meaning for a 1:1 thread).
+   Same visual treatment (right/accent vs left/dark) as the existing
+   coach/player styling below, just relabeled for a DM context. */
+.own-message {
+  align-self: flex-end;
+}
+
+.own-message .message-username {
+  text-align: right;
+}
+
+.own-message .message-bubble {
+  background: var(--accent);
+  color: #06100f;
+  border-top-right-radius: 4px;
+}
+
+.their-message {
+  align-self: flex-start;
+}
+
+.their-message .message-bubble {
+  background: #1d2a38;
+  color: var(--text);
+  border-top-left-radius: 4px;
+}
+
+/* ---------- New Message recipient picker ---------- */
+
+#new-message-recipient-list {
+  list-style: none;
+  margin: 1rem 0 0;
+  padding: 0;
+  max-height: 50vh;
+  overflow-y: auto;
+}
+
+.new-message-recipient-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.65rem 0.4rem;
+  border-bottom: 1px solid var(--gold-dim, rgba(212, 175, 55, 0.15));
+  cursor: pointer;
+}
+
+.new-message-recipient-item:last-child {
+  border-bottom: none;
+}
+
+.new-message-recipient-item:hover {
+  background: var(--gold-dim, rgba(212, 175, 55, 0.1));
+}
+
+.new-message-recipient-item small {
+  color: var(--muted);
+}
+
+/* ---------- Messages nav tab unread bubble ---------- */
+
+.nav-unread-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  margin-left: 0.35rem;
+  border-radius: 999px;
+  background: var(--gold, #d4af37);
+  color: #000;
+  font-size: 0.68rem;
+  font-weight: 700;
+  vertical-align: middle;
+}
+
+/* ---------- Direct Messaging Phase 3: floating AIM-style windows ----------
+   Deliberately outside every .app-screen (see index.html) so they stay
+   visible across tab navigation. New windows accumulate from the
+   bottom-right corner outward (flex-end + normal DOM order), wrapping
+   upward (wrap-reverse) if there isn't room for another row, rather than
+   ever covering the composer bar. */
+
+#dm-windows-container {
+  position: fixed;
+  right: 1rem;
+  bottom: 1rem;
+  z-index: 200;
+  display: flex;
+  flex-direction: row;
+  justify-content: flex-end;
+  align-items: flex-end;
+  flex-wrap: wrap-reverse;
+  gap: 0.75rem;
+  max-width: calc(100vw - 2rem);
+}
+
+.dm-window {
+  width: 300px;
+  height: 380px;
+  display: flex;
+  flex-direction: column;
+  background: linear-gradient(180deg, var(--panel), var(--panel-2));
+  border: 1px solid var(--gold-dim, rgba(212, 175, 55, 0.35));
+  border-radius: 12px 12px 4px 4px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+}
+
+.dm-window.dm-window-focused {
+  border-color: var(--gold, #d4af37);
+}
+
+.dm-window.dm-window-disabled {
+  opacity: 0.75;
+}
+
+.dm-window-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.5rem 0.6rem;
+  background: var(--gold-dim, rgba(212, 175, 55, 0.14));
+  border-bottom: 1px solid var(--gold-dim, rgba(212, 175, 55, 0.25));
+}
+
+.dm-window-header-text {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.dm-window-title {
+  font-weight: 600;
+  font-size: 0.85rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dm-window-context {
+  font-size: 0.68rem;
+  color: var(--muted);
+}
+
+.dm-window-controls {
+  display: flex;
+  gap: 0.3rem;
+  flex-shrink: 0;
+}
+
+/* Real controls, sized for a fingertip even though this surface is
+   desktop-only today — cheap to get right, never assume mouse-only. */
+.dm-window-controls button {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border-radius: 50%;
+  line-height: 1;
+}
+
+.dm-window-thread {
+  flex: 1;
+  overflow-x: hidden;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.6rem;
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.dm-window-thread .message-row {
+  max-width: 82%;
+}
+
+.dm-window-disabled-banner {
+  margin: 0;
+  padding: 0.45rem 0.6rem;
+  font-size: 0.72rem;
+  color: var(--muted);
+  text-align: center;
+  background: rgba(0, 0, 0, 0.3);
+  border-top: 1px solid var(--border);
+}
+
+.dm-window-form {
+  display: flex;
+  gap: 0.4rem;
+  padding: 0.5rem;
+  border-top: 1px solid var(--border);
+}
+
+.dm-window-form input {
+  flex: 1;
+  min-width: 0;
+}
+
+.dm-minimized-tab {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.4rem 0.5rem;
+  border-radius: 999px;
+  background: linear-gradient(180deg, var(--panel), var(--panel-2));
+  border: 1px solid var(--gold-dim, rgba(212, 175, 55, 0.35));
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+  cursor: pointer;
+  max-width: 200px;
+}
+
+.dm-minimized-tab-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.8rem;
+  color: var(--text);
+}
+
+.dm-minimized-tab-badge {
+  flex-shrink: 0;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--gold, #d4af37);
+  color: #000;
+  font-size: 0.68rem;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.dm-minimized-tab-close-btn {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border-radius: 50%;
+  line-height: 1;
+  font-size: 0.7rem;
+}
+
+@media (max-width: 700px) {
+  /* Never squeeze desktop floating windows onto a phone -- opening a DM
+     on a narrow viewport uses #dm-mobile-overlay instead (see
+     directMessages.js's isMobileViewport() gate at open time). This is
+     also a defensive fallback if a window somehow stayed open across a
+     live resize past the breakpoint: it disappears rather than
+     overlapping the mobile layout, even though nothing in this app
+     currently migrates an open window's presentation live. */
+  #dm-windows-container {
+    display: none;
+  }
+}
+
+/* ---------- Direct Messaging Phase 3: mobile full-screen DM overlay ---------- */
+
+#dm-mobile-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 250;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg, #0b0f14);
+}
+
+#dm-mobile-header {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--border);
+  background: rgba(11, 15, 20, 0.95);
+}
+
+#dm-mobile-back-btn {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  font-size: 1.3rem;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+#dm-mobile-header-text {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+#dm-mobile-title {
+  margin: 0;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#dm-mobile-context {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+#dm-mobile-thread {
+  flex: 1;
+  overflow-x: hidden;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 1rem;
+}
+
+#dm-mobile-thread .message-row {
+  max-width: 88%;
+}
+
+#dm-mobile-disabled-banner {
+  margin: 0;
+  padding: 0.6rem 1rem;
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.82rem;
+  background: rgba(0, 0, 0, 0.25);
+}
+
+#dm-mobile-form {
+  display: flex;
+  gap: 0.5rem;
+  padding: 0.75rem 1rem calc(0.75rem + env(safe-area-inset-bottom, 0px));
+  border-top: 1px solid var(--border);
+  background: rgba(11, 15, 20, 0.95);
+}
+
+#dm-mobile-input {
+  flex: 1;
+  min-width: 0;
 }
 
 #message-thread {
@@ -499,6 +1003,23 @@ li {
   }
 
   .message-row {
+    max-width: 88%;
+  }
+
+  /* Phase 2 foundation only — a real mobile master/detail or full-screen
+     DM overlay is Phase 3/4 work per the approved plan; for now the
+     inbox and active pane simply stack, each independently scrollable,
+     so nothing is unusably cramped in the meantime. */
+  #messages-layout {
+    grid-template-columns: 1fr;
+  }
+
+  #messages-inbox {
+    max-height: 260px;
+  }
+
+  .own-message,
+  .their-message {
     max-width: 88%;
   }
 }
@@ -1606,7 +2127,8 @@ body.app-active #reset-password-screen {
 
 .team-list-item,
 .team-roster-item,
-.team-invitation-item {
+.team-invitation-item,
+.my-pending-invitation-item {
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -1620,7 +2142,8 @@ body.app-active #reset-password-screen {
 
 .team-list-item-info,
 .team-roster-item-info,
-.team-invitation-item-info {
+.team-invitation-item-info,
+.my-pending-invitation-item-info {
   display: flex;
   flex-direction: column;
   gap: 0.25rem;
@@ -1628,9 +2151,16 @@ body.app-active #reset-password-screen {
 
 .team-list-item-meta,
 .team-roster-item-meta,
-.team-invitation-item-meta {
+.team-invitation-item-meta,
+.my-pending-invitation-item-meta {
   color: var(--muted);
   font-size: 0.85rem;
+}
+
+#my-pending-invitations-section {
+  margin-bottom: 1.5rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--gold-dim);
 }
 
 .invitation-status-badge {
@@ -1697,7 +2227,8 @@ body.app-active #reset-password-screen {
 #invitation-confirm-modal,
 #video-team-modal,
 #schedule-day-modal,
-#schedule-event-modal {
+#schedule-event-modal,
+#new-message-modal {
   position: fixed;
   inset: 0;
   z-index: 100;
@@ -1713,7 +2244,8 @@ body.app-active #reset-password-screen {
 #invitation-confirm-modal.hidden,
 #video-team-modal.hidden,
 #schedule-day-modal.hidden,
-#schedule-event-modal.hidden {
+#schedule-event-modal.hidden,
+#new-message-modal.hidden {
   display: none;
 }
 
@@ -1722,7 +2254,8 @@ body.app-active #reset-password-screen {
 #invitation-confirm-modal-inner,
 #video-team-modal-inner,
 #schedule-day-modal-inner,
-#schedule-event-modal-inner {
+#schedule-event-modal-inner,
+#new-message-modal-inner {
   position: relative;
   width: 100%;
   max-width: 480px;
@@ -1739,7 +2272,8 @@ body.app-active #reset-password-screen {
 #invite-close-btn,
 #video-team-close-btn,
 #schedule-day-close-btn,
-#schedule-event-close-btn {
+#schedule-event-close-btn,
+#new-message-close-btn {
   position: absolute;
   top: 0.75rem;
   right: 0.75rem;

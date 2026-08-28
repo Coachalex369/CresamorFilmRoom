@@ -14,7 +14,13 @@ const express = require("express");
 const client = require("../db/client");
 const { authenticate } = require("../middleware/authenticate");
 const { canManageTeam } = require("../services/permissions");
-const { createInvitation, getInvitationPreview, acceptInvitation } = require("../services/invitations");
+const {
+  createInvitation,
+  getInvitationPreview,
+  acceptInvitation,
+  acceptInvitationById,
+  getPendingInvitationsForUser,
+} = require("../services/invitations");
 const { sendEmail } = require("../services/email");
 const { logSecurityEvent } = require("../services/auditLog");
 
@@ -125,6 +131,37 @@ router.get("/api/teams/:teamId/invitations", authenticate, async (req, res) => {
   }
 });
 
+// In-app "Pending invitations for you" list -- server-derived email
+// only (req.user.email, reloaded fresh from Postgres by authenticate.js
+// on every request), never a client-supplied email/query param.
+//
+// Registered BEFORE GET /api/invitations/:token below: Express matches
+// path patterns in registration order, and "/api/invitations/mine" is
+// structurally identical to "/api/invitations/:token" (one segment
+// after /invitations/) -- if :token were registered first, it would
+// greedily match the literal string "mine" as a token value and this
+// route would never be reached.
+router.get("/api/invitations/mine", authenticate, async (req, res) => {
+  try {
+    const invitations = await getPendingInvitationsForUser(req.user.email);
+
+    res.json(
+      invitations.map((invitation) => ({
+        id: invitation.id,
+        teamId: invitation.team_id,
+        teamName: invitation.team_name,
+        coachName: invitation.coach_name || invitation.coach_email,
+        roleOnTeam: invitation.role_on_team,
+        roleLabel: ROLE_LABELS[invitation.role_on_team] || invitation.role_on_team,
+        expiresAt: invitation.expires_at,
+      }))
+    );
+  } catch (err) {
+    console.error("GET /api/invitations/mine error:", err);
+    res.status(500).json({ error: "Failed to fetch your pending invitations" });
+  }
+});
+
 // Deliberately public — see file header.
 router.get("/api/invitations/:token", async (req, res) => {
   try {
@@ -143,6 +180,9 @@ router.get("/api/invitations/:token", async (req, res) => {
       roleOnTeam: preview.role_on_team,
       roleLabel: ROLE_LABELS[preview.role_on_team] || preview.role_on_team,
       expiresAt: preview.expires_at,
+      // Only meaningful for email invitations -- null for phone, where
+      // there's no comparable identity on users to check against.
+      accountExists: preview.destination_type === "email" ? preview.account_exists : null,
     });
   } catch (err) {
     console.error("GET /api/invitations/:token error:", err);
@@ -150,40 +190,76 @@ router.get("/api/invitations/:token", async (req, res) => {
   }
 });
 
+// Shared by both accept routes below (token-based and id-based) -- one
+// place mapping applyInvitation's outcome to an HTTP response, so the
+// in-app "Pending invitations for you" accept path can't drift from the
+// emailed-link accept path's behavior.
+async function respondToAcceptOutcome(req, res, result) {
+  if (result.outcome === "invalid_or_expired") {
+    return res.status(404).json({
+      error: "This invitation link has expired or already been used. Ask your coach to send a new one.",
+    });
+  }
+
+  // Beta permissions incident fix: distinct 409 (not 404) so the client
+  // can tell "wrong account currently signed in" apart from "this link
+  // is dead" — mutates nothing (see applyInvitation()).
+  if (result.outcome === "account_mismatch") {
+    return res.status(409).json({
+      error: "account_mismatch",
+      invitedDestination: result.invitedDestination,
+    });
+  }
+
+  await logSecurityEvent("invitation_accepted", {
+    userId: req.user.id,
+    ip: req.ip,
+    metadata: { teamId: result.team.id, preservedExistingCoachRole: result.preservedExistingCoachRole },
+  });
+
+  res.json({
+    team: { id: result.team.id, name: result.team.name },
+    roleOnTeam: result.teamMember.role_on_team,
+    alreadyMember: result.alreadyMember,
+    preservedExistingCoachRole: result.preservedExistingCoachRole,
+  });
+}
+
 router.post("/api/invitations/:token/accept", authenticate, async (req, res) => {
   try {
     const result = await acceptInvitation(req.params.token, req.user);
-
-    if (result.outcome === "invalid_or_expired") {
-      return res.status(404).json({
-        error: "This invitation link has expired or already been used. Ask your coach to send a new one.",
-      });
-    }
-
-    // Beta permissions incident fix: distinct 409 (not 404) so the client
-    // can tell "wrong account currently signed in" apart from "this link
-    // is dead" — mutates nothing (see acceptInvitation()).
-    if (result.outcome === "account_mismatch") {
-      return res.status(409).json({
-        error: "account_mismatch",
-        invitedDestination: result.invitedDestination,
-      });
-    }
-
-    await logSecurityEvent("invitation_accepted", {
-      userId: req.user.id,
-      ip: req.ip,
-      metadata: { teamId: result.team.id, preservedExistingCoachRole: result.preservedExistingCoachRole },
-    });
-
-    res.json({
-      team: { id: result.team.id, name: result.team.name },
-      roleOnTeam: result.teamMember.role_on_team,
-      alreadyMember: result.alreadyMember,
-      preservedExistingCoachRole: result.preservedExistingCoachRole,
-    });
+    await respondToAcceptOutcome(req, res, result);
   } catch (err) {
     console.error("POST /api/invitations/:token/accept error:", err);
+    res.status(500).json({ error: "Failed to accept invitation" });
+  }
+});
+
+// Accepts by numeric id -- the in-app "Pending invitations for you" list
+// never has the raw token (it was never persisted, see
+// services/invitations.js's file header), so it can't use the
+// token-based route above. Same authorization/outcome handling either
+// way (respondToAcceptOutcome, applyInvitation).
+//
+// Deliberately "/by-id/:id/accept", not "/:id/accept" -- the latter is
+// structurally identical to "/:token/accept" above (one param segment
+// then /accept) and would either be shadowed by it or shadow it
+// depending on registration order. The extra /by-id/ segment makes this
+// four segments long (never colliding with any three-segment
+// invitations route regardless of registration order) and names what
+// actually distinguishes this route from the one above: it looks up by
+// numeric id, not by raw token.
+router.post("/api/invitations/by-id/:id/accept", authenticate, async (req, res) => {
+  try {
+    const invitationId = Number(req.params.id);
+    if (!Number.isInteger(invitationId) || invitationId <= 0) {
+      return res.status(400).json({ error: "Invalid invitation id" });
+    }
+
+    const result = await acceptInvitationById(invitationId, req.user);
+    await respondToAcceptOutcome(req, res, result);
+  } catch (err) {
+    console.error("POST /api/invitations/by-id/:id/accept error:", err);
     res.status(500).json({ error: "Failed to accept invitation" });
   }
 });

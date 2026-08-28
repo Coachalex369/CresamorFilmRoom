@@ -84,6 +84,20 @@ async function createInvitation({ teamId, invitedBy, roleOnTeam, destinationType
 // or even has an account. Returns null for anything invalid/expired/used
 // so the route can map that to a single plain 404, not leak which
 // specific thing was wrong with the token.
+//
+// account_exists (email invitations only -- users has no phone column to
+// check against): whether a Cresamor account already exists for this
+// exact invitation's destination email. Deliberately narrow: this is
+// only ever exposed to someone who already holds a valid, unexpired,
+// unguessable (32 random bytes) invitation TOKEN for this SPECIFIC
+// email -- a much narrower gate than a public "does this email exist"
+// lookup would be, and existing/broken by design elsewhere in this file
+// (forgot-password intentionally returns identical responses either way
+// -- that endpoint has no comparable per-recipient gate, so it can't
+// safely do what this one can). Exists so the client can show a
+// LOG IN flow instead of blindly attempting registration for an email
+// that already has an account — see the client-side fix this enables in
+// app.js/invitations.js.
 async function getInvitationPreview(rawToken) {
   if (!rawToken) return null;
 
@@ -92,8 +106,13 @@ async function getInvitationPreview(rawToken) {
   const result = await client.query(
     `
     SELECT invitations.role_on_team, invitations.expires_at,
+           invitations.destination_type,
            teams.id AS team_id, teams.name AS team_name,
-           users.display_name AS coach_name, users.email AS coach_email
+           users.display_name AS coach_name, users.email AS coach_email,
+           EXISTS (
+             SELECT 1 FROM users existing
+             WHERE invitations.destination_type = 'email' AND existing.email = invitations.destination
+           ) AS account_exists
     FROM invitations
     JOIN teams ON teams.id = invitations.team_id
     JOIN users ON users.id = invitations.invited_by
@@ -145,20 +164,16 @@ async function getInvitationPreview(rawToken) {
 // accepted-status write can never partially apply; FOR UPDATE closes a
 // small pre-existing race where two concurrent accepts for the same
 // team/user could interleave their reads.
-async function acceptInvitation(rawToken, authenticatedUser) {
-  const tokenHash = hashToken(rawToken);
-
-  const invitationResult = await client.query(
-    `
-    SELECT * FROM invitations
-    WHERE token_hash = $1 AND status = 'pending' AND expires_at > now()
-    `,
-    [tokenHash]
-  );
-
-  const invitation = invitationResult.rows[0];
-  if (!invitation) return { outcome: "invalid_or_expired" };
-
+//
+// Split into this transactional core (applyInvitation, given an already-
+// loaded invitation ROW) plus two thin lookup wrappers below
+// (acceptInvitation by raw token — the emailed-link path;
+// acceptInvitationById by numeric id — the in-app "Pending invitations
+// for you" list, which never has the raw token since it was never
+// persisted). Both wrappers re-run the exact same identity/authorization
+// check and call this same core — no second, parallel acceptance
+// implementation for the in-app path.
+async function applyInvitation(invitation, authenticatedUser) {
   if (invitation.destination_type === "email") {
     const normalizedUserEmail = String(authenticatedUser.email || "").trim().toLowerCase();
     if (normalizedUserEmail !== invitation.destination) {
@@ -233,10 +248,82 @@ async function acceptInvitation(rawToken, authenticatedUser) {
   }
 }
 
+// The emailed-link path -- looks up by token hash, never by anything
+// client-supplied except the raw token itself.
+async function acceptInvitation(rawToken, authenticatedUser) {
+  const tokenHash = hashToken(rawToken);
+
+  const invitationResult = await client.query(
+    `
+    SELECT * FROM invitations
+    WHERE token_hash = $1 AND status = 'pending' AND expires_at > now()
+    `,
+    [tokenHash]
+  );
+
+  const invitation = invitationResult.rows[0];
+  if (!invitation) return { outcome: "invalid_or_expired" };
+
+  return applyInvitation(invitation, authenticatedUser);
+}
+
+// The in-app "Pending invitations for you" path -- looks up by numeric
+// id. Never trust the id alone as proof this invitation belongs to the
+// caller: applyInvitation's own destination-match check below still runs
+// exactly as it does for the token path, so someone guessing/enumerating
+// ids gets the same account_mismatch/invalid outcome a stolen or
+// mistargeted token would.
+async function acceptInvitationById(invitationId, authenticatedUser) {
+  const invitationResult = await client.query(
+    `
+    SELECT * FROM invitations
+    WHERE id = $1 AND status = 'pending' AND expires_at > now()
+    `,
+    [invitationId]
+  );
+
+  const invitation = invitationResult.rows[0];
+  if (!invitation) return { outcome: "invalid_or_expired" };
+
+  return applyInvitation(invitation, authenticatedUser);
+}
+
+// GET /api/invitations/mine — pending invitations addressed to the
+// authenticated caller's own server-derived email (never a client-
+// supplied email/query param; same discipline as the destination-match
+// check in applyInvitation above). Phone invitations can never appear
+// here -- there's no verified phone identity on the authenticated user
+// to match against, same limitation applyInvitation itself already has.
+async function getPendingInvitationsForUser(userEmail) {
+  const normalizedEmail = String(userEmail || "").trim().toLowerCase();
+  if (!normalizedEmail) return [];
+
+  const result = await client.query(
+    `
+    SELECT invitations.id, invitations.role_on_team, invitations.expires_at, invitations.created_at,
+           teams.id AS team_id, teams.name AS team_name,
+           users.display_name AS coach_name, users.email AS coach_email
+    FROM invitations
+    JOIN teams ON teams.id = invitations.team_id
+    JOIN users ON users.id = invitations.invited_by
+    WHERE invitations.destination_type = 'email'
+      AND invitations.destination = $1
+      AND invitations.status = 'pending'
+      AND invitations.expires_at > now()
+    ORDER BY invitations.created_at DESC
+    `,
+    [normalizedEmail]
+  );
+
+  return result.rows;
+}
+
 module.exports = {
   createInvitation,
   getInvitationPreview,
   acceptInvitation,
+  acceptInvitationById,
+  getPendingInvitationsForUser,
   normalizeDestination,
   inviteUrlFor,
 };

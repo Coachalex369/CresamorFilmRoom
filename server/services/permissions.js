@@ -42,6 +42,17 @@ async function canAccessConversation(userId, conversationId) {
     return canAccessTeam(userId, conversation.team_id);
   }
 
+  // Direct Messaging: same "reevaluate live, don't trust a stale row"
+  // discipline as the category='team' branch above, not the older static
+  // participant-row model every other (currently unused) category below
+  // still uses. A conversation_participants row still identifies WHO the
+  // two people in the thread are (immutable thread identity, set once at
+  // creation) but no longer alone proves they're CURRENTLY allowed to use
+  // it — see canAccessDirectMessage.
+  if (conversation.category === "direct") {
+    return canAccessDirectMessage(userId, conversationId);
+  }
+
   const result = await client.query(
     `
     SELECT 1
@@ -52,6 +63,323 @@ async function canAccessConversation(userId, conversationId) {
   );
 
   return result.rows.length > 0;
+}
+
+// Direct Messaging — the live relationship check, shared by three call
+// sites: canAccessDirectMessage (read/send/mark-read on an EXISTING
+// thread), the eligible-recipients list, and POST /api/direct-messages
+// (creating/resolving a NEW thread). One symmetric boolean query so the
+// three call sites can never silently drift apart from each other. Three
+// relationship types, all live (never a stale/static row alone):
+//   1. Shared active team membership where at least one side is
+//      coach/assistant_coach — covers the "COACH" rule directly, and
+//      lets a parent/athlete/teammate message that coaching staff.
+//   2. A parent_athlete_links row, either direction (parent<->athlete).
+//   3. A parent and their linked athlete's own coaching staff, either
+//      direction (parent<->athlete's coaches) — the transitive rule.
+// parent_athlete_links is empty until Roster Profiles populates it, so
+// (2) and (3) are correctly inert (not unsafely open) until then.
+// Asymmetric, per-initiator: "can fromUserId proactively start/reach
+// toUserId", mirroring each role's OWN literal rule rather than a
+// symmetric pair fact. This is deliberately NOT the same question as
+// "can these two people use an existing conversation" (see
+// isEligibleRecipientPair below) -- a Coach's broad reach to their whole
+// roster (including a not-yet-linked parent) is real and should let the
+// Coach initiate, but that same unlinked parent must not be able to
+// reach the Coach on their own; only a parent_athlete_links row grants a
+// parent that reach, directly or via their athlete's coaching staff.
+async function canInitiateDirectMessage(fromUserId, toUserId) {
+  if (!fromUserId || !toUserId || Number(fromUserId) === Number(toUserId)) return false;
+
+  const result = await client.query(
+    `
+    SELECT (
+      -- fromUser is coach/assistant_coach on a team; toUser is any other
+      -- active member of that same team (Coach's own broad rule).
+      EXISTS (
+        SELECT 1 FROM team_members mine
+        JOIN team_members other ON other.team_id = mine.team_id AND other.revoked_at IS NULL
+        WHERE mine.user_id = $1 AND other.user_id = $2
+          AND mine.revoked_at IS NULL AND mine.role_on_team IN ('coach', 'assistant_coach')
+      )
+      -- fromUser is an athlete; toUser is coach/assistant_coach on that
+      -- SAME team (Athlete's own rule reaching their team's coaching
+      -- staff). A bare 'parent' row never satisfies this branch.
+      OR EXISTS (
+        SELECT 1 FROM team_members mine
+        JOIN team_members other ON other.team_id = mine.team_id AND other.revoked_at IS NULL
+        WHERE mine.user_id = $1 AND other.user_id = $2
+          AND mine.revoked_at IS NULL AND mine.role_on_team = 'athlete'
+          AND other.role_on_team IN ('coach', 'assistant_coach')
+      )
+      -- Direct parent<->athlete link, either direction -- both roles'
+      -- own stated rule explicitly grants this (Parent: "their linked
+      -- athletes"; Athlete: "their linked parent/guardian(s)").
+      OR EXISTS (
+        SELECT 1 FROM parent_athlete_links pal
+        WHERE pal.revoked_at IS NULL
+          AND ((pal.parent_user_id = $1 AND pal.athlete_user_id = $2)
+            OR (pal.athlete_user_id = $1 AND pal.parent_user_id = $2))
+      )
+      -- fromUser is a parent linked to an athlete who is an active
+      -- member of a team where toUser is active coaching staff
+      -- (Parent's own rule: "coaches associated with those athlete/team
+      -- relationships").
+      OR EXISTS (
+        SELECT 1 FROM parent_athlete_links pal
+        JOIN team_members tm_athlete
+          ON tm_athlete.user_id = pal.athlete_user_id AND tm_athlete.revoked_at IS NULL
+        JOIN team_members tm_coach
+          ON tm_coach.team_id = tm_athlete.team_id AND tm_coach.revoked_at IS NULL
+          AND tm_coach.role_on_team IN ('coach', 'assistant_coach')
+        WHERE pal.parent_user_id = $1 AND pal.revoked_at IS NULL AND tm_coach.user_id = $2
+      )
+    ) AS eligible
+    `,
+    [fromUserId, toUserId]
+  );
+
+  return Boolean(result.rows[0]?.eligible);
+}
+
+// Symmetric pair check: "is this DM still usable by BOTH participants
+// right now." Deliberately broader than canInitiateDirectMessage in
+// either single direction -- once a conversation has been legitimately
+// created (by whichever side's own rule permitted it), both sides need
+// to be able to read/reply, or a Coach messaging an unlinked parent
+// would create a one-way mailbox the parent can't respond to. Used by
+// canAccessDirectMessage (ongoing read/send/mark-read on an EXISTING
+// conversation) -- NOT used to gate creation of a NEW one; that's
+// canInitiateDirectMessage's job specifically, via POST
+// /api/direct-messages, so an unlinked parent still cannot be the one to
+// spontaneously start that conversation.
+async function isEligibleRecipientPair(userIdA, userIdB) {
+  if (!userIdA || !userIdB || Number(userIdA) === Number(userIdB)) return false;
+
+  const [aToB, bToA] = await Promise.all([
+    canInitiateDirectMessage(userIdA, userIdB),
+    canInitiateDirectMessage(userIdB, userIdA),
+  ]);
+
+  return aToB || bToA;
+}
+
+// A direct conversation's two conversation_participants rows are its
+// immutable thread identity (who this DM is between, set once at
+// creation — see resolveOrCreateDirectConversation). Access itself is
+// NOT granted by that row alone: it requires the caller to be one of the
+// two AND the pair to still be isEligibleRecipientPair() right now. A
+// malformed/legacy direct conversation with != 2 participants is denied
+// rather than guessed at.
+async function canAccessDirectMessage(userId, conversationId) {
+  if (!userId || !conversationId) return false;
+
+  const participantsResult = await client.query(
+    `SELECT user_id FROM conversation_participants WHERE conversation_id = $1`,
+    [conversationId]
+  );
+  const participantIds = participantsResult.rows.map((row) => Number(row.user_id));
+
+  if (!participantIds.includes(Number(userId))) return false;
+  if (participantIds.length !== 2) return false;
+
+  const otherUserId = participantIds.find((id) => id !== Number(userId));
+  return isEligibleRecipientPair(userId, otherUserId);
+}
+
+function directPairKey(userIdA, userIdB) {
+  const [lo, hi] = [Number(userIdA), Number(userIdB)].sort((a, b) => a - b);
+  return `${lo}_${hi}`;
+}
+
+// Canonical-thread resolution: always returns the SAME conversation row
+// for a given unordered pair, creating it only if it doesn't exist yet.
+// Race-safety is a database guarantee, not an application one — two
+// concurrent calls for the same pair both attempt the INSERT, the
+// partial unique index on conversations.direct_pair_key (migration 017)
+// lets exactly one succeed, and the loser catches the resulting unique-
+// violation (Postgres 23505) and re-selects the winner's row rather than
+// erroring. Does not itself check isEligibleRecipientPair -- callers
+// (the POST /api/direct-messages route) authorize before calling this;
+// this function's only job is canonical identity, not authorization.
+async function resolveOrCreateDirectConversation(userId, otherUserId) {
+  const pairKey = directPairKey(userId, otherUserId);
+
+  const existing = await client.query(
+    `SELECT * FROM conversations WHERE category = 'direct' AND direct_pair_key = $1`,
+    [pairKey]
+  );
+  if (existing.rows.length) return existing.rows[0];
+
+  try {
+    const created = await client.query(
+      `INSERT INTO conversations (category, direct_pair_key) VALUES ('direct', $1) RETURNING *`,
+      [pairKey]
+    );
+    const conversation = created.rows[0];
+
+    await client.query(
+      `
+      INSERT INTO conversation_participants (conversation_id, user_id)
+      VALUES ($1, $2), ($1, $3)
+      ON CONFLICT (conversation_id, user_id) DO NOTHING
+      `,
+      [conversation.id, userId, otherUserId]
+    );
+
+    return conversation;
+  } catch (err) {
+    if (err.code === "23505") {
+      const retry = await client.query(
+        `SELECT * FROM conversations WHERE category = 'direct' AND direct_pair_key = $1`,
+        [pairKey]
+      );
+      if (retry.rows.length) return retry.rows[0];
+    }
+    throw err;
+  }
+}
+
+function addEligibleRecipient(map, { id, displayName, email, role, context }) {
+  const label = displayName || (email ? email.split("@")[0] : "User");
+
+  if (map.has(id)) {
+    const existing = map.get(id);
+    if (!existing.context.includes(context)) existing.context.push(context);
+    return;
+  }
+
+  map.set(id, { id, display_name: label, role, context: [context] });
+}
+
+// Direct Messaging "New Message" recipient list. Deliberately NOT a
+// global directory (see permissions.js file header + the Direct
+// Messaging architecture proposal) -- built from the exact same
+// per-initiator rules canInitiateDirectMessage checks (mine = the
+// viewer, so this is intentionally asymmetric: a Coach's list includes
+// their whole roster including not-yet-linked parents, but an unlinked
+// Parent's own list will NOT include their team's coach -- only a real
+// parent_athlete_links row grants that, direct or via the linked
+// athlete's coaching staff). Never returns email/phone -- display_name
+// (or a safe email-local-part fallback, matching the pattern used
+// elsewhere in this app) and role only. `context` is a list of
+// human-readable reasons (team name(s) / "your athlete" / "your
+// parent/guardian") since the same person can be reachable via more than
+// one relationship at once (multi-team users).
+async function getEligibleRecipients(userId) {
+  const recipients = new Map();
+
+  const teamRows = await client.query(
+    `
+    SELECT DISTINCT other.user_id AS id, u.display_name, u.email, u.role, t.name AS team_name
+    FROM team_members mine
+    JOIN team_members other
+      ON other.team_id = mine.team_id AND other.revoked_at IS NULL AND other.user_id != mine.user_id
+    JOIN teams t ON t.id = mine.team_id
+    JOIN users u ON u.id = other.user_id
+    WHERE mine.user_id = $1 AND mine.revoked_at IS NULL
+      AND (
+        mine.role_on_team IN ('coach', 'assistant_coach')
+        OR (mine.role_on_team = 'athlete' AND other.role_on_team IN ('coach', 'assistant_coach'))
+      )
+    `,
+    [userId]
+  );
+  teamRows.rows.forEach((row) =>
+    addEligibleRecipient(recipients, {
+      id: row.id,
+      displayName: row.display_name,
+      email: row.email,
+      role: row.role,
+      context: `via ${row.team_name}`,
+    })
+  );
+
+  const parentToAthlete = await client.query(
+    `
+    SELECT u.id, u.display_name, u.email, u.role
+    FROM parent_athlete_links pal
+    JOIN users u ON u.id = pal.athlete_user_id
+    WHERE pal.parent_user_id = $1 AND pal.revoked_at IS NULL
+    `,
+    [userId]
+  );
+  parentToAthlete.rows.forEach((row) =>
+    addEligibleRecipient(recipients, {
+      id: row.id,
+      displayName: row.display_name,
+      email: row.email,
+      role: row.role,
+      context: "your athlete",
+    })
+  );
+
+  const athleteToParent = await client.query(
+    `
+    SELECT u.id, u.display_name, u.email, u.role
+    FROM parent_athlete_links pal
+    JOIN users u ON u.id = pal.parent_user_id
+    WHERE pal.athlete_user_id = $1 AND pal.revoked_at IS NULL
+    `,
+    [userId]
+  );
+  athleteToParent.rows.forEach((row) =>
+    addEligibleRecipient(recipients, {
+      id: row.id,
+      displayName: row.display_name,
+      email: row.email,
+      role: row.role,
+      context: "your parent/guardian",
+    })
+  );
+
+  const parentToAthleteCoaches = await client.query(
+    `
+    SELECT DISTINCT u.id, u.display_name, u.email, u.role, t.name AS team_name
+    FROM parent_athlete_links pal
+    JOIN team_members tm_athlete ON tm_athlete.user_id = pal.athlete_user_id AND tm_athlete.revoked_at IS NULL
+    JOIN team_members tm_coach
+      ON tm_coach.team_id = tm_athlete.team_id AND tm_coach.revoked_at IS NULL
+      AND tm_coach.role_on_team IN ('coach', 'assistant_coach')
+    JOIN teams t ON t.id = tm_athlete.team_id
+    JOIN users u ON u.id = tm_coach.user_id
+    WHERE pal.parent_user_id = $1 AND pal.revoked_at IS NULL
+    `,
+    [userId]
+  );
+  parentToAthleteCoaches.rows.forEach((row) =>
+    addEligibleRecipient(recipients, {
+      id: row.id,
+      displayName: row.display_name,
+      email: row.email,
+      role: row.role,
+      context: `coach via ${row.team_name}`,
+    })
+  );
+
+  const coachToAthleteParents = await client.query(
+    `
+    SELECT DISTINCT u.id, u.display_name, u.email, u.role, t.name AS team_name
+    FROM team_members mine
+    JOIN team_members tm_athlete ON tm_athlete.team_id = mine.team_id AND tm_athlete.revoked_at IS NULL
+    JOIN parent_athlete_links pal ON pal.athlete_user_id = tm_athlete.user_id AND pal.revoked_at IS NULL
+    JOIN teams t ON t.id = mine.team_id
+    JOIN users u ON u.id = pal.parent_user_id
+    WHERE mine.user_id = $1 AND mine.revoked_at IS NULL AND mine.role_on_team IN ('coach', 'assistant_coach')
+    `,
+    [userId]
+  );
+  coachToAthleteParents.rows.forEach((row) =>
+    addEligibleRecipient(recipients, {
+      id: row.id,
+      displayName: row.display_name,
+      email: row.email,
+      role: row.role,
+      context: `parent via ${row.team_name}`,
+    })
+  );
+
+  return Array.from(recipients.values());
 }
 
 // Beta permissions audit fix: this used to be "the original uploader, or
@@ -222,4 +550,10 @@ module.exports = {
   canViewVideo,
   canManageTeamMembership,
   canUploadToTeam,
+  canInitiateDirectMessage,
+  isEligibleRecipientPair,
+  canAccessDirectMessage,
+  directPairKey,
+  resolveOrCreateDirectConversation,
+  getEligibleRecipients,
 };

@@ -13,6 +13,8 @@ const { requireProductionTestOptIn } = require("./lib/requireProductionTestOptIn
 requireProductionTestOptIn("testInvitations.js");
 
 const crypto = require("crypto");
+const bcrypt = require("bcrypt");
+const jwt = require("jsonwebtoken");
 
 const app = require("../app");
 const client = require("../db/client");
@@ -63,6 +65,28 @@ async function registerUser(email, role) {
   return data; // { token, user }
 }
 
+// Same convention as this project's newer test scripts (testDirectMessaging.js,
+// testRosterProfiles.js): direct-insert plus a hand-signed JWT for any test
+// user that's just SETUP, not the thing actually under test -- registerUser()
+// above hits the real, rate-limited /api/auth/register endpoint
+// (registerLimiter: 5/hour/IP), which this file was already at the edge of
+// budget-wise before the existing-user multi-team invitation correction
+// added more test users on top. Real registration is still used wherever a
+// test's whole point IS registration/login behavior (see the "multi-team
+// parent registers for the first time" and "registering an already-
+// registered email returns 409" checks below) -- this helper is only for
+// users that merely need to exist.
+async function createTestUser(email, role) {
+  const hash = await bcrypt.hash("TestPass123!", 10);
+  const result = await client.query(
+    `INSERT INTO users (email, password_hash, role) VALUES ($1, $2, $3) RETURNING id, email, role`,
+    [email, hash, role]
+  );
+  const user = result.rows[0];
+  const token = jwt.sign({ id: user.id }, process.env.JWT_SECRET, { expiresIn: "1h" });
+  return { token, user };
+}
+
 async function main() {
   const created = { userIds: [], teamIds: [] };
   const server = app.listen(PORT);
@@ -95,7 +119,7 @@ async function main() {
     );
 
     // ---- Non-coach cannot create a team or invitations ----
-    const outsider = await registerUser(`${RUN_TAG}-outsider@test.cresamor.local`, "athlete");
+    const outsider = await createTestUser(`${RUN_TAG}-outsider@test.cresamor.local`, "athlete");
     created.userIds.push(outsider.user.id);
 
     const outsiderCreateInviteRes = await req(`/api/teams/${team.id}/invitations`, {
@@ -220,7 +244,7 @@ async function main() {
     );
 
     // ---- Unrelated user denied on team detail/roster/manage endpoints ----
-    const unrelated = await registerUser(`${RUN_TAG}-unrelated@test.cresamor.local`, "athlete");
+    const unrelated = await createTestUser(`${RUN_TAG}-unrelated@test.cresamor.local`, "athlete");
     created.userIds.push(unrelated.user.id);
 
     const unrelatedDetailRes = await req(`/api/teams/${team.id}`, { token: unrelated.token });
@@ -241,7 +265,7 @@ async function main() {
     // "any coach can access any team" shortcut. Before this sprint's
     // permission change, every one of these would have incorrectly
     // succeeded (200) purely because unrelatedCoach.user.role === 'coach'. ----
-    const unrelatedCoach = await registerUser(`${RUN_TAG}-unrelated-coach@test.cresamor.local`, "coach");
+    const unrelatedCoach = await createTestUser(`${RUN_TAG}-unrelated-coach@test.cresamor.local`, "coach");
     created.userIds.push(unrelatedCoach.user.id);
 
     const unrelatedCoachDetailRes = await req(`/api/teams/${team.id}`, { token: unrelatedCoach.token });
@@ -404,6 +428,313 @@ async function main() {
       "coach can log in with the new password after reset",
       loginWithNewPasswordRes.status === 200,
       `status=${loginWithNewPasswordRes.status}`
+    );
+
+    // ==================================================================
+    // Existing-user multi-team invitation correction
+    // ==================================================================
+
+    // ---- The exact required regression case: an existing Parent
+    // already on Team A is invited with the same email to Team B, and
+    // successfully joins Team B (identity/other-team roles untouched). ----
+    const coachC = await createTestUser(`${RUN_TAG}-coachC@test.cresamor.local`, "coach");
+    created.userIds.push(coachC.user.id);
+    const teamARes2 = await req("/api/teams", {
+      method: "POST",
+      token: coachC.token,
+      body: { name: `${RUN_TAG} Multi-team A`, sport: "Wrestling" },
+    });
+    const teamA2 = teamARes2.data;
+    created.teamIds.push(teamA2.id);
+
+    const coachD = await createTestUser(`${RUN_TAG}-coachD@test.cresamor.local`, "coach");
+    created.userIds.push(coachD.user.id);
+    const teamBRes2 = await req("/api/teams", {
+      method: "POST",
+      token: coachD.token,
+      body: { name: `${RUN_TAG} Multi-team B`, sport: "Track" },
+    });
+    const teamB2 = teamBRes2.data;
+    created.teamIds.push(teamB2.id);
+
+    const parentEmail2 = `${RUN_TAG}-multiteam-parent@test.cresamor.local`;
+    const parentPassword = "TestPass123!";
+
+    // Parent joins Team A first, as a real registered account (not via
+    // the test helper's raw /api/auth/register call this time -- go
+    // through the actual invitation token so this mirrors production).
+    const teamAInviteRes = await req(`/api/teams/${teamA2.id}/invitations`, {
+      method: "POST",
+      token: coachC.token,
+      body: { destinationType: "email", destination: parentEmail2, roleOnTeam: "parent" },
+    });
+    const teamAToken = new URL(teamAInviteRes.data.inviteUrl).searchParams.get("invite");
+
+    const teamARegisterRes = await req("/api/auth/register", {
+      method: "POST",
+      body: { email: parentEmail2, password: parentPassword, role: "parent" },
+    });
+    assert("multi-team parent registers for the first time", teamARegisterRes.status === 201, `status=${teamARegisterRes.status}`);
+    const parentUserId = teamARegisterRes.data.user.id;
+    created.userIds.push(parentUserId);
+    const parentAuthToken1 = teamARegisterRes.data.token;
+
+    const teamAAcceptRes = await req(`/api/invitations/${teamAToken}/accept`, {
+      method: "POST",
+      token: parentAuthToken1,
+    });
+    assert("parent accepts Team A invitation", teamAAcceptRes.status === 200, `status=${teamAAcceptRes.status}`);
+
+    // Now invite that SAME email to a SECOND, unrelated team.
+    const teamBInviteRes = await req(`/api/teams/${teamB2.id}/invitations`, {
+      method: "POST",
+      token: coachD.token,
+      body: { destinationType: "email", destination: parentEmail2, roleOnTeam: "parent" },
+    });
+    assert("coach D can invite an email that already belongs to a user -- creates a pending invitation, not a registration attempt", teamBInviteRes.status === 201, `status=${teamBInviteRes.status}`);
+    const teamBToken = new URL(teamBInviteRes.data.inviteUrl).searchParams.get("invite");
+
+    // ---- Preview must show accountExists: true for this email ----
+    const teamBPreviewRes = await req(`/api/invitations/${teamBToken}`);
+    assert(
+      "preview reports accountExists: true for an email that already has an account",
+      teamBPreviewRes.data.accountExists === true,
+      JSON.stringify(teamBPreviewRes.data)
+    );
+
+    // ---- The fix in action: the existing user logs in (does NOT
+    // register again) and accepts -- this is what the corrected client
+    // flow does when accountExists is true. ----
+    const teamBLoginRes = await req("/api/auth/login", {
+      method: "POST",
+      body: { email: parentEmail2, password: parentPassword },
+    });
+    assert("existing parent logs in with their existing password (not a second registration)", teamBLoginRes.status === 200, `status=${teamBLoginRes.status}`);
+    const parentAuthToken2 = teamBLoginRes.data.token;
+    assert(
+      "login returns the SAME account id -- not a newly created duplicate",
+      teamBLoginRes.data.user.id === parentUserId,
+      `${teamBLoginRes.data.user.id} vs ${parentUserId}`
+    );
+
+    const teamBAcceptRes = await req(`/api/invitations/${teamBToken}/accept`, {
+      method: "POST",
+      token: parentAuthToken2,
+    });
+    assert("existing parent accepts the Team B invitation and joins", teamBAcceptRes.status === 200, `status=${teamBAcceptRes.status}`);
+    assert(
+      "Team B accept reports alreadyMember=false (this is a genuinely new membership row)",
+      teamBAcceptRes.data.alreadyMember === false,
+      JSON.stringify(teamBAcceptRes.data)
+    );
+
+    const teamBRosterRes = await req(`/api/teams/${teamB2.id}/members`, { token: coachD.token });
+    assert(
+      "parent appears on Team B's roster",
+      teamBRosterRes.data.some((m) => m.id === parentUserId),
+      JSON.stringify(teamBRosterRes.data)
+    );
+
+    // ---- Identity/other-team roles must be untouched ----
+    const teamARosterAfterRes = await req(`/api/teams/${teamA2.id}/members`, { token: coachC.token });
+    const parentOnTeamA = teamARosterAfterRes.data.find((m) => m.id === parentUserId);
+    assert(
+      "parent's Team A membership is completely untouched by joining Team B",
+      parentOnTeamA && parentOnTeamA.role_on_team === "parent",
+      JSON.stringify(parentOnTeamA)
+    );
+
+    const bothMembershipRows = await client.query(
+      "SELECT team_id, role_on_team FROM team_members WHERE user_id = $1 ORDER BY team_id",
+      [parentUserId]
+    );
+    assert(
+      "one account now has two SEPARATE team_members rows (multi-team, not an overwrite)",
+      bothMembershipRows.rows.length === 2 &&
+        bothMembershipRows.rows.some((r) => r.team_id === teamA2.id) &&
+        bothMembershipRows.rows.some((r) => r.team_id === teamB2.id),
+      JSON.stringify(bothMembershipRows.rows)
+    );
+
+    // ---- Repeated acceptance is idempotent (same token, second time) ----
+    const teamBAcceptAgainRes = await req(`/api/invitations/${teamBToken}/accept`, {
+      method: "POST",
+      token: parentAuthToken2,
+    });
+    assert(
+      "re-accepting the same Team B invitation is rejected (single-use token), not a duplicate row",
+      teamBAcceptAgainRes.status === 404,
+      `status=${teamBAcceptAgainRes.status}`
+    );
+    const teamBRosterCount = (
+      await client.query("SELECT id FROM team_members WHERE team_id = $1 AND user_id = $2", [teamB2.id, parentUserId])
+    ).rows.length;
+    assert("still exactly one Team B membership row for this parent", teamBRosterCount === 1, `count=${teamBRosterCount}`);
+
+    // ---- Reinviting can reactivate a revoked membership (Team B, not just Team A) ----
+    await req(`/api/teams/${teamB2.id}/members/${parentUserId}`, { method: "DELETE", token: coachD.token });
+    const teamBReInviteRes = await req(`/api/teams/${teamB2.id}/invitations`, {
+      method: "POST",
+      token: coachD.token,
+      body: { destinationType: "email", destination: parentEmail2, roleOnTeam: "parent" },
+    });
+    const teamBReInviteToken = new URL(teamBReInviteRes.data.inviteUrl).searchParams.get("invite");
+    const teamBReAcceptRes = await req(`/api/invitations/${teamBReInviteToken}/accept`, {
+      method: "POST",
+      token: parentAuthToken2,
+    });
+    assert("reinviting reactivates a revoked Team B membership", teamBReAcceptRes.status === 200, `status=${teamBReAcceptRes.status}`);
+    const teamBRosterAfterReactivate = await req(`/api/teams/${teamB2.id}/members`, { token: coachD.token });
+    assert(
+      "parent is active on Team B's roster again after reactivation",
+      teamBRosterAfterReactivate.data.some((m) => m.id === parentUserId),
+      JSON.stringify(teamBRosterAfterReactivate.data)
+    );
+
+    // ---- accountExists: false for a genuinely new email ----
+    const newEmailInviteRes = await req(`/api/teams/${teamA2.id}/invitations`, {
+      method: "POST",
+      token: coachC.token,
+      body: { destinationType: "email", destination: `${RUN_TAG}-brandnew@test.cresamor.local`, roleOnTeam: "athlete" },
+    });
+    const newEmailToken = new URL(newEmailInviteRes.data.inviteUrl).searchParams.get("invite");
+    const newEmailPreviewRes = await req(`/api/invitations/${newEmailToken}`);
+    assert(
+      "preview reports accountExists: false for an email with no existing account",
+      newEmailPreviewRes.data.accountExists === false,
+      JSON.stringify(newEmailPreviewRes.data)
+    );
+
+    // ---- accountExists: null for a phone invitation (no comparable identity to check) ----
+    const phonePreviewInviteRes = await req(`/api/teams/${teamA2.id}/invitations`, {
+      method: "POST",
+      token: coachC.token,
+      body: { destinationType: "phone", destination: "555-987-6543", roleOnTeam: "athlete" },
+    });
+    const phonePreviewToken = new URL(phonePreviewInviteRes.data.inviteUrl).searchParams.get("invite");
+    const phonePreviewRes = await req(`/api/invitations/${phonePreviewToken}`);
+    assert(
+      "preview reports accountExists: null for a phone invitation",
+      phonePreviewRes.data.accountExists === null,
+      JSON.stringify(phonePreviewRes.data)
+    );
+
+    // ---- Registration hardening: registering an email that already has
+    // an account now returns a clear 409, not an opaque 500 -- this is
+    // the backstop if the client-side accountExists branch is ever wrong
+    // about a given email. ----
+    const duplicateRegisterRes = await req("/api/auth/register", {
+      method: "POST",
+      body: { email: parentEmail2, password: "SomeOtherPassword1!", role: "parent" },
+    });
+    assert(
+      "registering an already-registered email returns 409 with a clear message, not a 500",
+      duplicateRegisterRes.status === 409 && /already exists/i.test(duplicateRegisterRes.data.error || ""),
+      `status=${duplicateRegisterRes.status} body=${JSON.stringify(duplicateRegisterRes.data)}`
+    );
+
+    // ---- In-app pending-invitation visibility: GET /api/invitations/mine ----
+    const newUserForMine = await createTestUser(`${RUN_TAG}-mine-user@test.cresamor.local`, "athlete");
+    created.userIds.push(newUserForMine.user.id);
+    const mineInviteRes = await req(`/api/teams/${teamA2.id}/invitations`, {
+      method: "POST",
+      token: coachC.token,
+      body: { destinationType: "email", destination: `${RUN_TAG}-mine-user@test.cresamor.local`, roleOnTeam: "athlete" },
+    });
+    assert("setup: invitation created for the /mine test user", mineInviteRes.status === 201, `status=${mineInviteRes.status}`);
+
+    const mineListRes = await req("/api/invitations/mine", { token: newUserForMine.token });
+    assert("GET /api/invitations/mine succeeds", mineListRes.status === 200, `status=${mineListRes.status}`);
+    const mineEntry = mineListRes.data.find((inv) => inv.teamId === teamA2.id);
+    assert(
+      "the pending invitation appears in the invitee's own in-app list, with team and role shown",
+      Boolean(mineEntry) && mineEntry.roleOnTeam === "athlete" && mineEntry.teamName === teamA2.name,
+      JSON.stringify(mineListRes.data)
+    );
+
+    const mineListForUnrelated = await req("/api/invitations/mine", { token: coachD.token });
+    assert(
+      "GET /api/invitations/mine never shows another user's invitations",
+      !mineListForUnrelated.data.some((inv) => inv.teamId === teamA2.id && inv.id === mineEntry.id),
+      JSON.stringify(mineListForUnrelated.data)
+    );
+
+    // ---- Route-level proof: POST /api/invitations/by-id/:id/accept
+    // reaches acceptInvitationById(), not the token-based handler -- the
+    // two routes are structurally similar enough (one param segment then
+    // /accept) that a registration-order mistake would silently route
+    // one into the other. ----
+    const wrongRouteAttempt = await req(`/api/invitations/${mineEntry.id}/accept`, {
+      method: "POST",
+      token: newUserForMine.token,
+    });
+    assert(
+      "the numeric invitation id is NOT accidentally accepted as a token by the token-based route",
+      wrongRouteAttempt.status === 404,
+      `status=${wrongRouteAttempt.status} body=${JSON.stringify(wrongRouteAttempt.data)}`
+    );
+
+    const byIdAcceptRes = await req(`/api/invitations/by-id/${mineEntry.id}/accept`, {
+      method: "POST",
+      token: newUserForMine.token,
+    });
+    assert(
+      "POST /api/invitations/by-id/:id/accept succeeds and reaches the real acceptance logic",
+      byIdAcceptRes.status === 200 && byIdAcceptRes.data.team.id === teamA2.id,
+      `status=${byIdAcceptRes.status} body=${JSON.stringify(byIdAcceptRes.data)}`
+    );
+
+    const mineRosterRes = await req(`/api/teams/${teamA2.id}/members`, { token: coachC.token });
+    assert(
+      "the by-id-accepted user actually appears on the roster (proves it reached applyInvitation, not a no-op)",
+      mineRosterRes.data.some((m) => m.id === newUserForMine.user.id),
+      JSON.stringify(mineRosterRes.data)
+    );
+
+    const mineListAfterAccept = await req("/api/invitations/mine", { token: newUserForMine.token });
+    assert(
+      "the invitation disappears from /mine once accepted (no longer pending)",
+      !mineListAfterAccept.data.some((inv) => inv.id === mineEntry.id),
+      JSON.stringify(mineListAfterAccept.data)
+    );
+
+    // ---- by-id accept is idempotent too, same as the token-based route ----
+    const byIdAcceptAgainRes = await req(`/api/invitations/by-id/${mineEntry.id}/accept`, {
+      method: "POST",
+      token: newUserForMine.token,
+    });
+    assert(
+      "re-accepting the same invitation by id is rejected (single-use), not a duplicate row",
+      byIdAcceptAgainRes.status === 404,
+      `status=${byIdAcceptAgainRes.status}`
+    );
+
+    // ---- account_mismatch still enforced on the by-id path too (not
+    // just the token path) -- a different logged-in user cannot accept
+    // someone else's invitation merely by knowing/guessing its id. ----
+    const mismatchInviteRes = await req(`/api/teams/${teamA2.id}/invitations`, {
+      method: "POST",
+      token: coachC.token,
+      body: { destinationType: "email", destination: `${RUN_TAG}-mismatch-target@test.cresamor.local`, roleOnTeam: "athlete" },
+    });
+    // We don't have an account for the invited destination, so use the
+    // coach's own token (a real, different, logged-in account) to prove
+    // the mismatch is rejected even via the id-based route -- we need
+    // the invitation's numeric id, which /mine won't show coachC (wrong
+    // email), so fetch it directly for test purposes.
+    const mismatchTokenHash = crypto
+      .createHash("sha256")
+      .update(new URL(mismatchInviteRes.data.inviteUrl).searchParams.get("invite"))
+      .digest("hex");
+    const mismatchRow = await client.query("SELECT id FROM invitations WHERE token_hash = $1", [mismatchTokenHash]);
+    const mismatchAttemptRes = await req(`/api/invitations/by-id/${mismatchRow.rows[0].id}/accept`, {
+      method: "POST",
+      token: coachC.token,
+    });
+    assert(
+      "account_mismatch is enforced on the by-id accept route too, not just the token route",
+      mismatchAttemptRes.status === 409 && mismatchAttemptRes.data.error === "account_mismatch",
+      `status=${mismatchAttemptRes.status} body=${JSON.stringify(mismatchAttemptRes.data)}`
     );
 
     // ---- No invitation-related audit log entry ever contains a token ----

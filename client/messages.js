@@ -1,26 +1,45 @@
 /*
-  messages.js — real, conversation-scoped persistence for Team Messages.
+  messages.js — real, conversation-scoped persistence for Messages.
 
-  Foundation Sprint Phase 2: previously (Sprint 3) this called the flat
-  GET/POST /api/messages endpoints. Those are now retired — the backend is
-  built around Conversations -> Conversation Participants -> Messages (see
-  CLAUDE.md). The MVP UI still only ever shows one thread, but the
-  underlying calls are genuinely conversation-scoped and permission-checked
-  server-side now (a user who isn't a participant gets a real 403, not just
-  "the UI doesn't show a picker").
+  Direct Messaging Phase 2: this file previously drove a single Team-Chat
+  thread with a team dropdown/label. It now owns a real inbox
+  (#messages-inbox) listing every conversation the user can currently
+  access -- both category='team' and category='direct' -- and a single
+  shared active pane (#messages-active-pane, still the same
+  #message-thread/#message-form elements as before) that renders
+  whichever conversation is selected. Team Chat and Direct Messages are
+  NOT separate code paths here: both categories fetch/send/mark-read
+  through the exact same functions, because the server (Phase 1) already
+  authorizes both uniformly once a conversation id is known -- the only
+  per-category branch left on the client is cosmetic (message bubble
+  styling; see renderMessageRow).
 
-  Production bug fix: messages only showed up after a manual browser
-  refresh — there was no live update mechanism at all. Adds polling: the
-  active conversation every ~4s while the Messages screen is open, plus a
-  slower ~12s conversation-list/metadata refresh (mainly for Home's
-  preview block), both paused while the tab is hidden and stopped
-  entirely when leaving Messages or logging out. Deliberately polling, not
-  WebSockets/SSE — "smallest reliable beta solution" per the brief; a real
-  push mechanism is a bigger, separate architectural change.
+  directMessages.js (loaded after this file) owns the "New Message"
+  recipient picker and the reusable window.openDirectMessage() entry
+  point; it hands off to window.selectMessagesConversation() (exposed by
+  this file) once a canonical DM conversation id is known. Phase 3 will
+  intercept ONLY the direct-conversation case to render a floating
+  AIM-style window instead of this inline pane -- selectConversation()
+  and the inbox itself are the "client foundation" that hand-off point
+  is built on.
 
-  Keeps the exact same DOM structure/classes (.message-row, .coach-message /
-  .player-message, .message-username, .message-bubble) so home.js's
-  renderMessagesPreview() keeps working completely unmodified.
+  Keeps the exact same #message-thread DOM structure/classes for TEAM
+  messages (.message-row, .coach-message/.player-message,
+  .message-username, .message-bubble) so home.js's renderMessagesPreview()
+  keeps working unmodified when a team conversation is the one selected
+  -- see the note above appendNewMessages for the one known edge case
+  this doesn't cover.
+
+  Production bug fix (unchanged from before this phase): messages only
+  showed up after a manual browser refresh — there was no live update
+  mechanism at all. Polling: the active conversation every ~4s while the
+  Messages screen is open, plus a slower ~12s conversation-list refresh
+  (also what keeps the inbox rows' previews/unread counts and the nav
+  badge current), both paused while the tab is hidden and stopped
+  entirely when leaving Messages or logging out. Deliberately polling,
+  not WebSockets/SSE — same "smallest reliable beta solution" reasoning
+  as before, explicitly reaffirmed for Direct Messaging by the approved
+  plan (section 10: "use the existing polling/refresh infrastructure").
 
   NOTE: every top-level const here is prefixed `real*` deliberately — app.js
   already declares its own messageForm/messageInput/messageThread/etc. for
@@ -45,159 +64,320 @@ if (staleMessageForm && realMessageForm) {
 const realMessageBodyInput = realMessageForm?.querySelector("#message-input");
 const realMessageSubmitBtn = realMessageForm?.querySelector('button[type="submit"]');
 
-const messagesTeamLabel = document.querySelector("#messages-team-label");
-const messagesTeamSelectLabel = document.querySelector("#messages-team-select-label");
-const messagesTeamSelect = document.querySelector("#messages-team-select");
-const messagesTeamEmpty = document.querySelector("#messages-team-empty");
-const messagesComposeContext = document.querySelector("#messages-compose-context");
+const messagesInboxTeamList = document.querySelector("#messages-inbox-team-list");
+const messagesInboxTeamEmpty = document.querySelector("#messages-inbox-team-empty");
+const messagesInboxDirectList = document.querySelector("#messages-inbox-direct-list");
+const messagesInboxDirectEmpty = document.querySelector("#messages-inbox-direct-empty");
+const messagesActiveTitle = document.querySelector("#messages-active-title");
+const messagesActiveContext = document.querySelector("#messages-active-context");
+const messagesActivePlaceholder = document.querySelector("#messages-active-placeholder");
+const messagesNavBadge = document.querySelector("#messages-nav-badge");
 
-/* ---------- team-scoped conversation state ----------
-   Local to this file, deliberately not shared with teams.js/capture.js —
-   Messages gets its own team selector, not a global "current team"
-   context (that's a separate future decision, not part of this feature).
+const MESSAGES_ROLE_LABELS = {
+  coach: "Coach",
+  assistant_coach: "Assistant Coach",
+  athlete: "Athlete",
+  parent: "Parent",
+};
+
+/* ---------- inbox state ----------
+   Local to this file. `conversations` is the ONE array both the inbox
+   list and the active pane read from — there is no separate per-category
+   copy, matching the same "one fetched array, multiple views" discipline
+   Schedule already established for Calendar/Agenda.
 */
 
-let messagesTeamState = { myTeams: [], conversations: [], selectedTeamId: null };
-let messagesTeamsLoaded = false;
+let messagesInboxState = { conversations: [], selectedConversationId: null, selectedConversation: null };
+let messagesConversationsLoaded = false;
 
-const MESSAGES_TEAM_STORAGE_KEY = "cresamor_messages_selected_team";
-
-function getStoredTeamPreference() {
-  const raw = localStorage.getItem(MESSAGES_TEAM_STORAGE_KEY);
-  return raw ? Number(raw) : null;
-}
-
-// The stored value is only ever a PREFERENCE, never authorization — every
-// call site that sets it also just finished validating it against the
-// server's own myTeams list (see loadMessagesTeamsAndConversations).
-// localStorage itself grants nothing; it only shapes which already-
-// authorized team is pre-selected.
-function setSelectedTeam(teamId) {
-  messagesTeamState.selectedTeamId = teamId;
-  if (teamId) {
-    localStorage.setItem(MESSAGES_TEAM_STORAGE_KEY, String(teamId));
-  } else {
-    localStorage.removeItem(MESSAGES_TEAM_STORAGE_KEY);
-  }
-}
-
-// Recomputed fresh from current state every time it's called — never
-// cached in a variable that could go stale between a team switch and a
-// message send. This is what guarantees a message can never be
-// associated with the wrong team: the server independently re-checks
-// team membership for whatever conversation_id this resolves to, but
-// this is the client-side half of "never accidentally Team B."
 function getSelectedConversationId() {
-  if (!messagesTeamState.selectedTeamId) return null;
-  const conversation = messagesTeamState.conversations.find(
-    (c) => Number(c.team_id) === Number(messagesTeamState.selectedTeamId)
-  );
-  return conversation ? conversation.id : null;
+  return messagesInboxState.selectedConversationId;
 }
 
-function teamDisplayLabel(team) {
-  // "Do not rely on names alone" — pair the name with sport (and school,
-  // if present) so two similarly-named teams are never ambiguous. Same
-  // pattern teams.js already uses for its own team meta line.
-  return [team.name, team.sport, team.school_name].filter(Boolean).join(" — ");
+function conversationDisplayName(conversation) {
+  if (conversation.category === "team") return conversation.team_name || "Team Chat";
+  if (conversation.category === "direct") return conversation.other_participant?.display_name || "Direct Message";
+  return conversation.title || "Conversation";
 }
 
-function renderMessagesTeamContext() {
-  if (!messagesTeamLabel) return;
+function conversationContextLabel(conversation) {
+  if (conversation.category === "team") return "Team Chat";
+  if (conversation.category === "direct") {
+    const role = conversation.other_participant?.role;
+    return role ? MESSAGES_ROLE_LABELS[role] || role : "Direct Message";
+  }
+  return "";
+}
 
-  const teams = messagesTeamState.myTeams;
+function formatInboxTimestamp(iso) {
+  if (!iso) return "";
+  const date = new Date(iso);
+  const sameDay = date.toDateString() === new Date().toDateString();
+  return date.toLocaleString(undefined, sameDay ? { hour: "numeric", minute: "2-digit" } : { month: "short", day: "numeric" });
+}
 
-  messagesTeamLabel.classList.add("hidden");
-  messagesTeamSelectLabel.classList.add("hidden");
-  messagesTeamSelect.classList.add("hidden");
-  messagesTeamEmpty.classList.add("hidden");
-  messagesComposeContext.classList.add("hidden");
+/* ---------- inbox rendering ---------- */
 
-  if (!teams.length) {
-    messagesTeamEmpty.classList.remove("hidden");
-    if (realMessageBodyInput) realMessageBodyInput.disabled = true;
-    if (realMessageSubmitBtn) realMessageSubmitBtn.disabled = true;
+// Production bug fix: the inbox previously rendered conversations in
+// whatever order the server returned (conversation id / creation order),
+// so a new unread message could sit below several older, already-read
+// conversations -- a coach with a busy Team Chat plus several DMs had to
+// hunt for what was actually new. Sort order: unread first (any
+// unread_count > 0), then by most recent activity within each group.
+// Applied independently within the Team Chats and Direct Messages
+// sections (not merged into one list) -- keeps the existing two-section
+// layout, and every regression scenario ("unread Team Chat above newer
+// read conversations", "unread DM above newer read conversations") is a
+// within-section comparison in real usage (a multi-team coach can easily
+// have several Team Chats, or several DMs, to sort among).
+// Array.prototype.sort is spec-guaranteed stable (ES2019+), so ties on
+// both keys keep their prior relative order rather than shuffling.
+// Purely a render-time computation over already-fetched data (unread_count,
+// last_message_at) -- no separate sort state to cache, invalidate, or lose
+// sync with, so a mark-read (which zeroes unread_count locally and calls
+// renderInbox() again -- see window.markCurrentConversationRead) or a
+// fresh renderInbox() after any loadConversations() call (including a
+// cold page-load restore) always re-sorts from scratch against current
+// data. Never touches messagesInboxState.selectedConversationId, so the
+// currently-open conversation is never disturbed by a re-sort -- only
+// its position in the list can move.
+function compareConversationsForInbox(a, b) {
+  const aUnread = Number(a.unread_count) > 0 ? 0 : 1;
+  const bUnread = Number(b.unread_count) > 0 ? 0 : 1;
+  if (aUnread !== bUnread) return aUnread - bUnread;
+
+  const aTime = a.last_message_at ? new Date(a.last_message_at).getTime() : 0;
+  const bTime = b.last_message_at ? new Date(b.last_message_at).getTime() : 0;
+  return bTime - aTime;
+}
+
+function renderInboxRow(conversation) {
+  const li = document.createElement("li");
+  li.className = "messages-inbox-item";
+  if (conversation.id === messagesInboxState.selectedConversationId) {
+    li.classList.add("messages-inbox-item-selected");
+  }
+  if (Number(conversation.unread_count) > 0) {
+    li.classList.add("messages-inbox-item-unread");
+  }
+
+  const main = document.createElement("div");
+  main.className = "messages-inbox-item-main";
+
+  const nameRow = document.createElement("div");
+  nameRow.className = "messages-inbox-item-name-row";
+
+  const nameEl = document.createElement("span");
+  nameEl.className = "messages-inbox-item-name";
+  nameEl.textContent = conversationDisplayName(conversation);
+
+  const timeEl = document.createElement("span");
+  timeEl.className = "messages-inbox-item-time";
+  timeEl.textContent = formatInboxTimestamp(conversation.last_message_at);
+
+  nameRow.appendChild(nameEl);
+  nameRow.appendChild(timeEl);
+
+  const contextEl = document.createElement("span");
+  contextEl.className = "messages-inbox-item-context";
+  contextEl.textContent = conversationContextLabel(conversation);
+
+  const previewEl = document.createElement("p");
+  previewEl.className = "messages-inbox-item-preview";
+  previewEl.textContent = conversation.last_message_preview || "No messages yet.";
+
+  main.appendChild(nameRow);
+  main.appendChild(contextEl);
+  main.appendChild(previewEl);
+  li.appendChild(main);
+
+  const unread = Number(conversation.unread_count);
+  if (unread > 0) {
+    const badge = document.createElement("span");
+    badge.className = "messages-inbox-unread-badge";
+    badge.textContent = unread > 9 ? "9+" : String(unread);
+    li.appendChild(badge);
+  }
+
+  // Team Chat keeps opening in the shared inline pane below; a Direct
+  // Message now opens/focuses its own floating window (desktop) or the
+  // mobile overlay instead — see window.selectMessagesConversation's own
+  // category branch, which both this row click and openDirectMessage()
+  // funnel through, so the two entry points can never disagree about
+  // where a given conversation opens.
+  li.addEventListener("click", () => window.selectMessagesConversation(conversation.id));
+  return li;
+}
+
+function renderInbox() {
+  if (!messagesInboxTeamList || !messagesInboxDirectList) return;
+
+  const teamConversations = messagesInboxState.conversations
+    .filter((c) => c.category === "team")
+    .sort(compareConversationsForInbox);
+  const directConversations = messagesInboxState.conversations
+    .filter((c) => c.category === "direct")
+    .sort(compareConversationsForInbox);
+
+  messagesInboxTeamList.innerHTML = "";
+  teamConversations.forEach((c) => messagesInboxTeamList.appendChild(renderInboxRow(c)));
+  messagesInboxTeamEmpty.classList.toggle("hidden", teamConversations.length > 0);
+
+  messagesInboxDirectList.innerHTML = "";
+  directConversations.forEach((c) => messagesInboxDirectList.appendChild(renderInboxRow(c)));
+  messagesInboxDirectEmpty.classList.toggle("hidden", directConversations.length > 0);
+
+  renderNavBadge();
+}
+
+// Main Messages nav tab badge (section 10) — the sum of every accessible
+// conversation's unread_count, the exact same field the inbox rows
+// already render individually. No separate endpoint: this is what
+// "use the existing polling/refresh infrastructure" means concretely —
+// pollConversationList()'s regular GET /api/conversations already
+// carries everything this needs.
+function renderNavBadge() {
+  if (!messagesNavBadge) return;
+  const total = messagesInboxState.conversations.reduce((sum, c) => sum + Number(c.unread_count || 0), 0);
+  messagesNavBadge.textContent = total > 9 ? "9+" : String(total);
+  messagesNavBadge.classList.toggle("hidden", total === 0);
+}
+
+function renderActiveHeader() {
+  const conversation = messagesInboxState.selectedConversation;
+  if (!conversation) {
+    messagesActiveTitle.classList.add("hidden");
+    messagesActiveContext.classList.add("hidden");
     return;
   }
 
-  if (realMessageBodyInput) realMessageBodyInput.disabled = false;
-  if (realMessageSubmitBtn) realMessageSubmitBtn.disabled = false;
-
-  const selectedTeam = teams.find((t) => Number(t.id) === Number(messagesTeamState.selectedTeamId));
-
-  // Single-team users see identity with no selection control at all — no
-  // unnecessary friction. Multi-team users get a real <select>.
-  if (teams.length === 1) {
-    messagesTeamLabel.textContent = teamDisplayLabel(teams[0]);
-    messagesTeamLabel.classList.remove("hidden");
-  } else {
-    messagesTeamSelectLabel.classList.remove("hidden");
-    messagesTeamSelect.classList.remove("hidden");
-    messagesTeamSelect.innerHTML = "";
-    teams.forEach((team) => {
-      const option = document.createElement("option");
-      option.value = team.id;
-      option.textContent = teamDisplayLabel(team);
-      option.selected = Number(team.id) === Number(messagesTeamState.selectedTeamId);
-      messagesTeamSelect.appendChild(option);
-    });
-  }
-
-  // Persistent identity right at the compose point, not just at the top
-  // of the screen — separate from the label/select above so it stays
-  // visible even if the user has scrolled through a long thread.
-  if (selectedTeam) {
-    messagesComposeContext.textContent = `Sending as: ${teamDisplayLabel(selectedTeam)}`;
-    messagesComposeContext.classList.remove("hidden");
-  }
+  messagesActiveTitle.textContent = conversationDisplayName(conversation);
+  messagesActiveTitle.classList.remove("hidden");
+  messagesActiveContext.textContent = conversationContextLabel(conversation);
+  messagesActiveContext.classList.remove("hidden");
 }
 
-// Fetches the user's real, currently-active teams AND their visible
-// conversations together, then resolves which team is selected. The
-// stored localStorage preference is validated against myTeams (the
-// server's live answer) every single time this runs — a team the user
-// no longer belongs to is silently discarded in favor of a real one,
-// never trusted as-is.
-async function loadMessagesTeamsAndConversations() {
+function showEmptyActivePane() {
+  messagesActivePlaceholder.classList.remove("hidden");
+  realMessageThread.classList.add("hidden");
+  realMessageForm?.classList.add("hidden");
+  messagesActiveTitle.classList.add("hidden");
+  messagesActiveContext.classList.add("hidden");
+}
+
+/* ---------- loading conversations (the inbox's one data source) ---------- */
+
+async function loadConversations() {
   if (!currentUser) return;
 
   try {
-    const [myTeams, conversations] = await Promise.all([
-      apiFetch(`/api/users/${currentUser.id}/teams`),
-      apiFetch("/api/conversations"),
-    ]);
+    const conversations = await apiFetch("/api/conversations");
+    messagesInboxState.conversations = conversations || [];
 
-    messagesTeamState.myTeams = myTeams || [];
-    messagesTeamState.conversations = conversations || [];
+    if (messagesInboxState.selectedConversationId) {
+      const stillPresent = messagesInboxState.conversations.find(
+        (c) => c.id === messagesInboxState.selectedConversationId
+      );
+      messagesInboxState.selectedConversation = stillPresent || null;
 
-    const stored = getStoredTeamPreference();
-    const storedIsValid = stored && messagesTeamState.myTeams.some((t) => Number(t.id) === Number(stored));
-
-    if (storedIsValid) {
-      setSelectedTeam(stored);
-    } else if (messagesTeamState.myTeams.length) {
-      setSelectedTeam(messagesTeamState.myTeams[0].id);
-    } else {
-      setSelectedTeam(null);
+      // A conversation can legitimately disappear from this list without
+      // any message being deleted — Phase 1's live reauthorization drops
+      // a direct conversation whose relationship has since lapsed, and a
+      // revoked team member's team chat the same way. History persists
+      // server-side either way; the client just stops showing it.
+      if (!stillPresent) {
+        messagesInboxState.selectedConversationId = null;
+        showEmptyActivePane();
+      }
     }
 
-    renderMessagesTeamContext();
+    renderInbox();
+    renderActiveHeader();
   } catch (error) {
-    console.error("Failed to load teams/conversations for Messages:", error);
+    console.error("Failed to load conversations for Messages:", error);
   }
 }
 
-if (messagesTeamSelect) {
-  messagesTeamSelect.addEventListener("change", async () => {
-    const newTeamId = Number(messagesTeamSelect.value);
-    setSelectedTeam(newTeamId);
-    renderMessagesTeamContext();
+// First-time default: land on the first Team Chat, same habitual
+// behavior as before this phase (a single-team coach opening Messages
+// used to always see their team thread immediately). Never
+// auto-selects a Direct Message — those are opened deliberately, via an
+// inbox click or openDirectMessage(), not guessed at.
+async function ensureInitialSelection() {
+  if (messagesInboxState.selectedConversationId) return;
 
-    realMessageThread.innerHTML = "";
-    renderedMessageIds.clear();
-    await loadMessages();
-  });
+  const firstTeamConversation = messagesInboxState.conversations.find((c) => c.category === "team");
+  if (firstTeamConversation) {
+    await selectConversation(firstTeamConversation.id);
+  } else {
+    showEmptyActivePane();
+  }
 }
+
+async function initMessagesScreen() {
+  if (!currentUser) return;
+
+  await loadConversations();
+  messagesConversationsLoaded = true;
+  await ensureInitialSelection();
+}
+
+/* ---------- selecting a conversation (shared by inbox clicks AND
+   openDirectMessage()) ---------- */
+
+async function selectConversation(conversationId) {
+  const conversation = messagesInboxState.conversations.find((c) => c.id === conversationId);
+
+  messagesInboxState.selectedConversationId = conversationId;
+  messagesInboxState.selectedConversation = conversation || null;
+
+  renderInbox();
+  renderActiveHeader();
+
+  messagesActivePlaceholder.classList.add("hidden");
+  realMessageThread.classList.remove("hidden");
+  realMessageForm?.classList.remove("hidden");
+
+  realMessageThread.innerHTML = "";
+  renderedMessageIds.clear();
+
+  await loadMessages();
+}
+
+// The one shared "open/show this conversation" entry point — used by
+// inbox row clicks AND by directMessages.js's openDirectMessage() once
+// it has a real conversation id from POST /api/direct-messages. A
+// brand-new canonical thread won't be in messagesInboxState yet (it was
+// just created), so this refreshes the list first when needed. Branches
+// by category so the two call sites can never disagree about WHERE a
+// conversation opens: Team Chat -> the shared inline pane (unchanged
+// since Phase 2); Direct Message -> a floating window (desktop) or the
+// full-screen mobile overlay, owned by directMessages.js — this file
+// never renders DM content itself as of Phase 3.
+window.selectMessagesConversation = async function (conversationId) {
+  if (!messagesInboxState.conversations.some((c) => c.id === conversationId)) {
+    await loadConversations();
+  }
+
+  const conversation = messagesInboxState.conversations.find((c) => c.id === conversationId);
+  if (!conversation) return;
+
+  if (conversation.category === "direct") {
+    if (typeof window.openDirectMessageWindow === "function") {
+      window.openDirectMessageWindow(conversation);
+    }
+    return;
+  }
+
+  await selectConversation(conversationId);
+};
+
+// directMessages.js calls this after marking a DM read (or seeing new
+// messages) so the inbox rows and nav badge reflect it promptly instead
+// of waiting for the next CONVERSATION_LIST_POLL_INTERVAL_MS tick — same
+// reasoning as the send-handler's own immediate loadConversations() call
+// above.
+window.refreshMessagesConversations = loadConversations;
 
 /* ---------- polling state ---------- */
 
@@ -220,9 +400,22 @@ function isNearBottom() {
   );
 }
 
+// Team messages keep their original role-based styling/classes exactly
+// (home.js's renderMessagesPreview() DOM-scrapes .coach-message off
+// #message-thread — see this file's header note). Direct messages use a
+// sender-based own/theirs distinction instead, since "coach vs everyone
+// else" has no meaning for a 1:1 thread between two arbitrary people —
+// this is also the sender-distinction Phase 3's AIM windows will reuse.
 function renderMessageRow(message) {
   const row = document.createElement("div");
-  row.className = `message-row ${message.role === "coach" ? "coach-message" : "player-message"}`;
+  const isDirect = messagesInboxState.selectedConversation?.category === "direct";
+
+  if (isDirect) {
+    const isMine = currentUser && Number(message.sender_id) === Number(currentUser.id);
+    row.className = `message-row ${isMine ? "own-message" : "their-message"}`;
+  } else {
+    row.className = `message-row ${message.role === "coach" ? "coach-message" : "player-message"}`;
+  }
 
   const usernameEl = document.createElement("p");
   usernameEl.className = "message-username";
@@ -265,44 +458,28 @@ function appendNewMessages(messages) {
   return appended;
 }
 
-// Team-scoping fix: this used to cache a single currentConversationId for
-// the whole session — whichever conversation the DB happened to return
-// first, ignoring team entirely, and never re-resolved after that. There
-// is deliberately no conversation-ID cache anymore: the selected team
-// (messagesTeamState.selectedTeamId) is the only source of truth, and
-// getSelectedConversationId() re-derives the conversation from it fresh
-// on every call. This function's only remaining job is making sure
-// team/conversation data has been loaded at least once per session
-// (messagesTeamsLoaded — not once per poll tick).
-async function ensureCurrentConversation() {
-  if (!currentUser) return null;
-
-  if (!messagesTeamsLoaded) {
-    await loadMessagesTeamsAndConversations();
-    messagesTeamsLoaded = true;
-  }
-
-  return getSelectedConversationId();
-}
-
 function afterNewMessagesRendered() {
   if (typeof window.renderMessagesPreview === "function") {
     window.renderMessagesPreview();
   }
 
+  // "Read" corresponds to the user actually viewing the conversation —
+  // this only fires from loadMessages() (a deliberate open/select) and
+  // the visible-poll path below, both gated on the Messages screen
+  // actually being the active tab; a background list-only poll never
+  // calls this (see pollConversationList — it never touches read state).
   if (typeof window.markCurrentConversationRead === "function") {
     window.markCurrentConversationRead();
   }
 }
 
-// Full load: used for the initial fetch (login/session restore) and for
-// sending a message — always resets and re-renders the whole thread, and
-// always jumps to the bottom (a deliberate user action, unlike a
-// background poll tick).
+// Full load: used when selecting a conversation and after sending —
+// always resets and re-renders the whole thread, and always jumps to the
+// bottom (a deliberate user action, unlike a background poll tick).
 async function loadMessages() {
   if (!realMessageThread) return;
 
-  const conversationId = await ensureCurrentConversation();
+  const conversationId = getSelectedConversationId();
   if (!conversationId || !currentUser) return;
 
   try {
@@ -328,13 +505,23 @@ async function pollActiveConversation() {
   messagePollBusy = true;
 
   try {
-    const conversationId = await ensureCurrentConversation();
+    const conversationId = getSelectedConversationId();
     if (!conversationId || !currentUser) return;
 
     const messages = await apiFetch(`/api/conversations/${conversationId}/messages`);
     const appended = appendNewMessages(messages);
 
-    if (appended > 0) {
+    // Phase 4: re-check messagesScreenActive AFTER the await, not just
+    // before it. Without this, a tick that started while Messages was
+    // the active tab but whose response arrives after the user has
+    // already navigated away (e.g. clicked Home mid-flight) would still
+    // mark the conversation read based on now-stale intent -- exactly
+    // the "background polling must never equal read" failure mode this
+    // phase is about, just triggered by a navigation race rather than a
+    // plain background tick. Appending the fetched messages into the
+    // (now hidden) pane is harmless either way; only the read-marking
+    // needs this guard.
+    if (appended > 0 && messagesScreenActive) {
       afterNewMessagesRendered();
     }
   } catch (error) {
@@ -348,35 +535,21 @@ async function pollActiveConversation() {
   }
 }
 
-// Slower metadata refresh — keeps Home's messages preview fresh, and
-// (team-scoping fix) is also what catches a team revocation that happens
-// WHILE the user is actively viewing Messages: loadMessagesTeamsAndConversations()
-// re-validates the selected team against the server's live myTeams list
-// every time this runs, so a revoked team is silently dropped and a real
-// remaining team (or none) takes its place, same fallback logic as the
-// initial load — never trusting stale client state.
+// Slower list refresh — keeps every inbox row's preview/timestamp/unread
+// count current, keeps the nav badge current, catches a brand-new
+// incoming DM from someone else, and (same as before this phase) catches
+// a relationship change (team revocation, or now a lapsed DM
+// eligibility) that happens WHILE the user is actively in Messages —
+// loadConversations() re-derives the whole list from the server's live
+// answer every time, never trusting stale client state. Deliberately
+// never marks anything read — see afterNewMessagesRendered's comment.
 async function pollConversationList() {
   if (conversationListPollBusy) return;
   conversationListPollBusy = true;
 
   try {
     if (!currentUser) return;
-
-    const previousSelectedTeamId = messagesTeamState.selectedTeamId;
-    await loadMessagesTeamsAndConversations();
-
-    if (Number(messagesTeamState.selectedTeamId) !== Number(previousSelectedTeamId)) {
-      // The previously selected team is no longer valid (e.g. revoked
-      // mid-session) — reload the thread for whichever team the
-      // fallback landed on (or clear it if the user now has none).
-      realMessageThread.innerHTML = "";
-      renderedMessageIds.clear();
-      await loadMessages();
-    }
-
-    if (typeof window.renderMessagesPreview === "function") {
-      window.renderMessagesPreview();
-    }
+    await loadConversations();
   } catch (error) {
     if (error?.status === 401) {
       stopMessagePolling();
@@ -388,55 +561,86 @@ async function pollConversationList() {
   }
 }
 
-function startMessagePolling() {
+// Phase 4: these two timers now have INDEPENDENT lifecycles, not one
+// combined start/stop pair. The active-thread poll (message bodies for
+// whatever's selected in the inline pane) only matters while that pane
+// is actually visible, so it stays gated on messagesScreenActive. The
+// conversation-list poll is what keeps unread_count fresh everywhere —
+// including the nav badge, which is visible on every screen, not just
+// Messages — so it deliberately runs app-wide, gated only on tab
+// visibility + being logged in. This is the concrete fix for "the
+// navigation badge should update without requiring a full page refresh"
+// even while the user is on Home/Teams/Film and hasn't opened Messages
+// or any DM window at all.
+function startActiveThreadPolling() {
   if (!messagePollTimer) {
     messagePollTimer = setInterval(pollActiveConversation, MESSAGE_POLL_INTERVAL_MS);
   }
+}
+
+function stopActiveThreadPolling() {
+  if (messagePollTimer) {
+    clearInterval(messagePollTimer);
+    messagePollTimer = null;
+  }
+}
+
+function startConversationListPolling() {
   if (!conversationListPollTimer) {
     conversationListPollTimer = setInterval(pollConversationList, CONVERSATION_LIST_POLL_INTERVAL_MS);
   }
 }
 
-function stopMessagePolling() {
-  if (messagePollTimer) {
-    clearInterval(messagePollTimer);
-    messagePollTimer = null;
-  }
+function stopConversationListPolling() {
   if (conversationListPollTimer) {
     clearInterval(conversationListPollTimer);
     conversationListPollTimer = null;
   }
 }
 
-// Polling should only actually run when the Messages screen is the
-// selected tab AND the tab/window is visible AND someone's logged in —
-// any other combination stops both timers. Called from the tab-click
-// listener, visibilitychange, window focus, and login/logout.
-function refreshPollingState({ immediate = false } = {}) {
-  const shouldPoll = messagesScreenActive && document.visibilityState === "visible" && Boolean(currentUser);
+// Still stops BOTH — used by logout and the 401 paths, where "stop
+// everything" is unambiguously correct regardless of which screen was
+// active.
+function stopMessagePolling() {
+  stopActiveThreadPolling();
+  stopConversationListPolling();
+}
 
-  if (shouldPoll) {
-    startMessagePolling();
-    if (immediate) {
-      pollActiveConversation();
-      pollConversationList();
-    }
+// Called from the tab-click listener, visibilitychange, window focus,
+// and login/logout/session-restore.
+function refreshPollingState({ immediate = false } = {}) {
+  const loggedInAndVisible = document.visibilityState === "visible" && Boolean(currentUser);
+  const shouldPollActiveThread = messagesScreenActive && loggedInAndVisible;
+
+  if (shouldPollActiveThread) {
+    startActiveThreadPolling();
+    if (immediate) pollActiveConversation();
   } else {
-    stopMessagePolling();
+    stopActiveThreadPolling();
+  }
+
+  if (loggedInAndVisible) {
+    startConversationListPolling();
+    if (immediate) pollConversationList();
+  } else {
+    stopConversationListPolling();
   }
 }
 
 // Independent listener on the same tab buttons app.js already wires —
 // this doesn't touch app.js's own click handler, just observes the same
 // clicks (multiple listeners on one element is fine). Entering Messages
-// starts polling with an immediate refresh; leaving it stops both timers.
+// re-validates the inbox (team/relationship changes since last visit,
+// same discipline as Schedule's initScheduleScreen) and starts/stops the
+// active-thread poll; the conversation-list poll (nav badge) keeps
+// running either way, per refreshPollingState's own app-wide gating.
 document.querySelectorAll(".tab-btn").forEach((button) => {
   button.addEventListener("click", () => {
     messagesScreenActive = button.dataset.screen === "messages-screen";
+    if (messagesScreenActive) {
+      initMessagesScreen();
+    }
     refreshPollingState({ immediate: true });
-    // Opening the Messages tab should land at the newest message every
-    // time, not just on login/session-restore or right after sending —
-    // scrollTop/scrollHeight only, no re-fetch, so dedup state is untouched.
     if (messagesScreenActive && realMessageThread) {
       realMessageThread.scrollTop = realMessageThread.scrollHeight;
     }
@@ -456,15 +660,25 @@ window.addEventListener("focus", () => {
 // Exposed so home.js's "View All Messages" click can mark the conversation
 // read server-side (real, cross-device unread state) in addition to its
 // existing local unread-badge reset — loose coupling via window, same
-// pattern as window.renderMessagesPreview above.
+// pattern as window.renderMessagesPreview above. Marks whichever
+// conversation is currently selected, if any; a no-op otherwise (there
+// is no longer a single universal "current" conversation to fall back
+// to now that Messages is a real multi-thread inbox).
 window.markCurrentConversationRead = async function () {
-  const conversationId = await ensureCurrentConversation();
+  const conversationId = getSelectedConversationId();
   if (!conversationId || !currentUser) return;
 
   try {
     await apiFetch(`/api/conversations/${conversationId}/read`, {
       method: "PUT",
     });
+    // Reflect the read state in this device's own badge/rows immediately
+    // rather than waiting for the next list poll.
+    const conversation = messagesInboxState.conversations.find((c) => c.id === conversationId);
+    if (conversation) {
+      conversation.unread_count = 0;
+      renderInbox();
+    }
   } catch (error) {
     console.error("Failed to mark conversation read:", error);
   }
@@ -478,16 +692,17 @@ if (realMessageForm) {
 
     if (!body) return;
 
-    // Always resolved fresh from the currently selected team at the
-    // moment of sending — ensureCurrentConversation() no longer caches a
-    // conversation id, so a team switch mid-compose can never result in
-    // a message landing in the wrong team's conversation.
-    const conversationId = await ensureCurrentConversation();
+    const conversationId = getSelectedConversationId();
 
     if (!conversationId) {
-      showMessage("No team conversation available yet.");
+      showMessage("Select a conversation first.");
       return;
     }
+
+    // Blank-message prevention (above) and accidental-duplicate-send
+    // prevention: disable the control for the duration of the request
+    // rather than relying on the user not double-clicking.
+    if (realMessageSubmitBtn) realMessageSubmitBtn.disabled = true;
 
     try {
       await apiFetch(`/api/conversations/${conversationId}/messages`, {
@@ -498,9 +713,15 @@ if (realMessageForm) {
 
       realMessageBodyInput.value = "";
       await loadMessages();
+      // Refresh the inbox row's own preview/timestamp immediately rather
+      // than waiting up to CONVERSATION_LIST_POLL_INTERVAL_MS for the
+      // sender to see their own just-sent message reflected there.
+      await loadConversations();
     } catch (error) {
       console.error("Failed to send message:", error);
       showMessage("Could not send message. Please try again.");
+    } finally {
+      if (realMessageSubmitBtn) realMessageSubmitBtn.disabled = false;
     }
   });
 }
@@ -508,14 +729,22 @@ if (realMessageForm) {
 const __originalActivateAppForMessages = window.activateApp;
 window.activateApp = function (user) {
   __originalActivateAppForMessages(user);
-  // Reset on login so a different user re-resolves their own teams and
-  // conversations from scratch, not whatever the previous session had —
-  // messagesTeamsLoaded=false is what makes ensureCurrentConversation()
+  // Reset on login so a different user re-resolves their own conversations
+  // from scratch, not whatever the previous session had —
+  // messagesConversationsLoaded=false is what makes initMessagesScreen()
   // actually refetch instead of trusting stale state.
-  messagesTeamsLoaded = false;
-  messagesTeamState = { myTeams: [], conversations: [], selectedTeamId: null };
-  loadMessages();
-  refreshPollingState();
+  messagesConversationsLoaded = false;
+  messagesInboxState = { conversations: [], selectedConversationId: null, selectedConversation: null };
+  // immediate: true -- production bug fix: without this, a fresh login
+  // started the poll TIMER right away but the first real pollConversationList()
+  // call still waited a full CONVERSATION_LIST_POLL_INTERVAL_MS, so an
+  // already-existing unread DM/Team Chat message left the nav badge at
+  // 0/hidden for up to that long after login, self-correcting only once
+  // the timer's first tick fired or the user clicked a tab/refocused the
+  // window (both of which already passed immediate: true). Every other
+  // call site already did this; login/cold-restore were the two that
+  // didn't.
+  refreshPollingState({ immediate: true });
 };
 
 // Stops polling on both an explicit user logout AND the 401-triggered
@@ -527,11 +756,18 @@ const __originalLogoutLocalStateForMessages = window.logoutLocalState;
 window.logoutLocalState = function () {
   stopMessagePolling();
   messagesScreenActive = false;
-  messagesTeamsLoaded = false;
-  messagesTeamState = { myTeams: [], conversations: [], selectedTeamId: null };
+  messagesConversationsLoaded = false;
+  messagesInboxState = { conversations: [], selectedConversationId: null, selectedConversation: null };
   __originalLogoutLocalStateForMessages();
 };
 
+// Covers the case where a session was already restored by app.js's own
+// restoreSession() call before this script finished loading. immediate:
+// true is what actually makes the nav badge reflect any already-existing
+// unread state on this very first render, not just eventually once the
+// poll timer's first tick fires — see the matching fix in
+// window.activateApp above for the fresh-login half of the same bug.
 if (currentUser) {
-  loadMessages();
+  initMessagesScreen();
+  refreshPollingState({ immediate: true });
 }

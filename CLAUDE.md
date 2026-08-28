@@ -71,7 +71,7 @@ Cresamor: not just a film platform — the product goal (per the project owner) 
 Plain Node/Express backend (routes organized by resource under `server/routes/`, see `ARCHITECTURE.md`) + vanilla JS/HTML/CSS frontend. **No framework, no bundler, no build step.** New frontend code is added as separate files loaded via `<script>` tags in `client/index.html`, in load order:
 
 ```
-recordingLibrary.js → app.js → mockData.js → messages.js → home.js → recordingPipeline.js → uploadSessions.js → multipartUploader.js → capture.js → teams.js → invitations.js → schedule.js
+recordingLibrary.js → app.js → mockData.js → messages.js → home.js → recordingPipeline.js → uploadSessions.js → multipartUploader.js → capture.js → teams.js → invitations.js → schedule.js → directMessages.js
 ```
 
 `teams.js`, `invitations.js`, and `schedule.js` load last, after `capture.js` — same shared-global-scope convention applies. (`schedule.js` bit this exact collision once already, during its own initial implementation: a top-level `teamDisplayLabel` helper collided with `messages.js`'s function of the same name — caught by this project's own collision-check command before it shipped, renamed to `scheduleTeamDisplayLabel`.)
@@ -91,7 +91,7 @@ function topLevelDecls(file) {
   while ((m = re.exec(src))) names.add(m[1]);
   return names;
 }
-const files = ["recordingLibrary.js", "app.js", "mockData.js", "messages.js", "home.js", "recordingPipeline.js", "capture.js", "teams.js", "invitations.js", "schedule.js"];
+const files = ["recordingLibrary.js", "app.js", "mockData.js", "messages.js", "home.js", "recordingPipeline.js", "capture.js", "teams.js", "invitations.js", "schedule.js", "directMessages.js"];
 const seen = new Map();
 for (const f of files) {
   for (const name of topLevelDecls(f)) {
@@ -162,6 +162,53 @@ Remember: even locally, all API calls go to the live deployed backend by default
   branch. (2) `GET /api/users/:id/teams` and `/clips` had no ownership
   check beyond `authenticate` — fixed with `requireOwner("id")` (already
   proven on `profile.js`).
+
+- **Existing-user multi-team invitation correction** (on `feature/invitation-multiteam-fix`,
+  branched from this exact checkpoint — not merged): `team_members`
+  (`UNIQUE(team_id, user_id)`, by original Foundation-Sprint design) and
+  `acceptInvitation()`'s `ON CONFLICT(team_id, user_id)` logic already
+  correctly supported one account on multiple teams, idempotent accepts,
+  and revoked-membership reactivation — that layer needed no changes.
+  The actual bug: `handleAuth(role)` (the invitation screen's auth
+  button) always tried login first and silently fell back to
+  `POST /api/auth/register` on ANY login failure, including an existing
+  user simply not having typed their correct password yet. Since
+  `users.email` is `UNIQUE`, that fallback threw a Postgres
+  unique-violation, got swallowed by a generic `catch`, and surfaced an
+  opaque `500 "Registration failed"` — an existing Parent invited to a
+  second team could get permanently stuck. Fixed: `getInvitationPreview()`
+  now returns `account_exists` (email invitations only, computed from a
+  valid unexpired invitation token someone already holds — not a public
+  "does this email exist" lookup); the client uses it to pick ONE flow
+  up front (`handleInvitedAuth()` in `invitations.js`) — real login-only
+  with a clear error for an existing account, or the original
+  register-with-invited-role flow for a new one — instead of guessing via
+  try/catch. `POST /api/auth/register` also now returns a clear `409`
+  (not `500`) for a duplicate email regardless of call site, as a
+  backstop. `acceptInvitation()` was split into a shared transactional
+  core (`applyInvitation`) plus token-based and new id-based lookups
+  (`acceptInvitationById`), so a new `GET /api/invitations/mine` +
+  `POST /api/invitations/by-id/:id/accept` (in-app "Pending Invitations"
+  list on the Teams screen, for a user who never clicks the emailed
+  link) reuses the exact same acceptance/authorization logic as the
+  emailed-link path — not a second implementation. `/by-id/:id/accept`
+  is deliberately NOT `/:id/accept`: that shape is structurally identical
+  to the existing `/:token/accept` (one param segment then `/accept`)
+  and a registration-order mistake would silently route one into the
+  other — caught and fixed before commit, with a dedicated route-level
+  test proving the numeric id is rejected by the token route and
+  correctly reaches `acceptInvitationById` via the real path. 28 new
+  checks in `testInvitations.js` (68/68 total, up from 40/40), including the exact
+  required regression case (existing Parent already on Team A, invited
+  with the same email to Team B, joins Team B via login-not-registration,
+  Team A membership completely untouched). Full regression clean: Auth
+  30/30, Platform Admin 23/23, Messages Team Scoping 25/25, Schedule
+  40/40. Manually verified end-to-end in the browser against a throwaway
+  production fixture (created/cleaned up with exact-id verification):
+  the real emailed-link flow showing "Log In to Accept" with an
+  explanatory hint, successful login-based acceptance leaving both team
+  memberships intact, and the in-app Pending Invitations list showing
+  and accepting a never-clicked invitation.
 
 ## Remaining known debt (see `ARCHITECTURE.md`'s "Not yet built" for the full list)
 
