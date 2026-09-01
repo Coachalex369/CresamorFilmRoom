@@ -17,8 +17,14 @@ diagnosis performed against checkpoint `49e15c5` after integrating current
 
 - **Node presigned PUT succeeds.** A direct `fetch()` PUT (and a raw
   `https.request()` PUT) from Node to the exact same presigned R2 part URL
-  returns `200 OK`, an `ETag` response header, and the part is durably
-  stored (confirmed via R2 `ListParts`).
+  returns `200 OK` with a real `ETag` response header — under the S3
+  multipart-upload protocol, that response is itself the confirmation the
+  part was accepted and stored; this pass did not make a separate
+  `ListParts` call to re-verify it. (The general R2 multipart
+  initiate/upload/complete/abort pipeline's actual storage behavior, via
+  `ListParts`, is independently verified by `testMultipartUploads.js`'s
+  34/34 — see "Checkpoint" above — not by this diagnosis pass's own ad hoc
+  Node requests.)
 - **CORS preflight succeeds.** The `OPTIONS` preflight for the browser's PUT
   returns `204` with the correct request origin and `PUT` allowed.
 - **Successful responses expose `ETag`.** Both the Node control PUTs and (per
@@ -36,10 +42,18 @@ diagnosis performed against checkpoint `49e15c5` after integrating current
   `multipartUploader.js`'s own retry loop (5 attempts, exponential backoff)
   exhausted and tripped its circuit breaker, surfacing as `Error: Network
   error during part upload` in the app.
-- **R2 stores zero parts from the failed Chrome attempts.** Confirmed via
-  `ListParts` immediately after the failed run — not merely an
-  unreadable-`ETag`/CORS-response-reading issue; the part genuinely never
-  landed.
+- **R2 stores zero parts from the failed Chrome attempts.** Across all 10
+  browser PUT attempts in this pass (the automatic reproduction plus two
+  manual, isolated concurrency-1 reproductions), none ever returned a
+  `200`/`ETag` — under the S3 multipart-upload protocol, a part is only
+  durably stored once `UploadPart` returns successfully, so none of these
+  attempts landed a part. Correction to an earlier overstatement: this was
+  not independently confirmed via a `ListParts` call made *before* the
+  session was aborted — `ListParts` was only called *after* the abort,
+  where it returned `NoSuchUpload` (consistent with zero parts, since an
+  abort also discards any parts that were stored, so it doesn't by itself
+  prove none landed). The zero-parts conclusion above rests on the
+  all-attempts-failed evidence, not on that post-abort `ListParts` call.
 - Chrome's DevTools network log shows the true wire-level status as `503`
   for every failed PUT (i.e., this is confirmed as a real HTTP status
   returned to the browser, not an artifact of the JS-level CORS block on
