@@ -767,6 +767,35 @@
           </div>
         </div>
 
+        <!-- Unassigned-video authorization fix: the manual Upload Film
+             picker's required destination step. Options are populated
+             client-side from GET /api/users/:id/teams (the caller's own
+             active memberships), filtered to role_on_team 'coach' or
+             'assistant_coach' only — never the broad GET /api/teams list,
+             and never defaulted/auto-selected even when only one team
+             qualifies — see loadUploadDestinationTeams() /
+             openUploadDestinationModal() in app.js. Server-side,
+             POST /api/upload-video independently re-validates whatever
+             team_id actually arrives via canAccessTeam() — this modal is
+             a UX narrowing, not the real authorization boundary. -->
+        <div id="upload-destination-modal" class="hidden">
+          <div id="upload-destination-modal-inner">
+            <button id="upload-destination-close-btn" type="button" aria-label="Close">✕</button>
+            <h3>Where should this video go?</h3>
+
+            <label for="upload-destination-select">Destination</label>
+            <select id="upload-destination-select">
+              <option value="">Personal Film — only you can view it</option>
+            </select>
+
+            <p id="upload-destination-error" class="hidden"></p>
+
+            <div class="capture-step-actions">
+              <button id="upload-destination-confirm-btn" type="button">Upload</button>
+            </div>
+          </div>
+        </div>
+
         <!-- Team-scoped video reassignment. Destination options are
              populated client-side from GET /api/users/:id/teams (the
              caller's own active coach memberships), never the broad

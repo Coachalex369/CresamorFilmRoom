@@ -48,11 +48,34 @@ const isMobileLikely = window.matchMedia("(pointer: coarse)").matches;
 
 let cachedTeams = null;
 
+// Unassigned-video authorization fix: this used to call the unfiltered
+// GET /api/teams (every team in the whole system, no scoping at all) —
+// the Record flow's own team picker offered every team system-wide as a
+// recording destination, not just ones this user actually belongs to.
+// GET /api/users/:id/teams (already used elsewhere, e.g. app.js's
+// loadManageableTeams()) is scoped server-side to the caller's own
+// active, non-revoked team_members rows and already includes every field
+// this file reads (id/name/sport) — a pure data-source swap, no behavior
+// change to WHO may record for their own team: any active member
+// (coach, assistant coach, athlete, or parent) still sees and can pick
+// their own team here exactly as before, matching the current iPhone
+// native recording flow's existing rule ("active team members may record
+// for their own team") — this only removes every OTHER team in the
+// system from ever being offered as an option.
+//
+// TRANSITIONAL: this recording destination is still a single, flat
+// "team_id" — recording for a team does not yet distinguish a durable
+// Team Highlights post from Team Film Breakdown (that split, and its own
+// post/source data model, is a separate future branch — see CLAUDE.md /
+// the Personal Film security fix's own scope notes). Every active member
+// of a team, regardless of role, may record for it here exactly as
+// before; this file does not need to change again when Team Highlights
+// ships unless the Record flow itself gains a destination choice.
 async function loadTeams() {
   if (cachedTeams) return cachedTeams;
 
   try {
-    cachedTeams = await apiFetch("/api/teams");
+    cachedTeams = await apiFetch(`/api/users/${currentUser.id}/teams`);
   } catch (error) {
     console.error("Failed to load teams:", error);
     cachedTeams = [];

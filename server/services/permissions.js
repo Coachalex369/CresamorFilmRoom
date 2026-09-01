@@ -393,31 +393,42 @@ async function getEligibleRecipients(userId) {
 // canViewVideo's existing unconditional uploader check); for an
 // assigned video (team_id NOT NULL), management requires real per-team
 // authority via canManageTeam — global coach role alone is no longer
-// sufficient; for an unassigned video (team_id NULL), the rule is
-// unchanged from before (any global coach can still manage it) —
-// deliberately mirroring canViewVideo's own team_id===null branch, since
-// there's no team boundary to scope against yet and this is the exact
-// mechanism a coach already relies on to clean up / Change-Team an
-// unassigned upload today.
+// sufficient. Unassigned-video authorization fix (Personal Film): for an
+// unassigned video (team_id NULL), the former "any global coach" fallback
+// let ANY coach anywhere in the system view/manage/delete ANY uploader's
+// personal recording — confirmed via a real production incident (Chad's
+// two Samsung/Android uploads, both unassigned, both reachable by every
+// other coach account). Personal Film is uploader-private: only the
+// uploader (checked above, unconditional) or a Platform Admin
+// (users.is_platform_admin, a real DB-backed designation entirely
+// separate from role — see migration 014) may act on it. Mirrors
+// canViewVideo's identical team_id===null branch below; deliberately
+// checked here via a second query rather than threading is_platform_admin
+// through the same row (keeps this function's existing single-query shape
+// for the common case, only pays for the second lookup on the rarer
+// non-uploader path).
 async function canDeleteVideo(userId, videoId) {
   if (!userId || !videoId) return false;
 
   const result = await client.query(
     `
-    SELECT videos.uploaded_by, videos.team_id, users.role
-    FROM videos, users
-    WHERE videos.id = $1 AND users.id = $2
+    SELECT videos.uploaded_by, videos.team_id
+    FROM videos
+    WHERE videos.id = $1
     `,
-    [videoId, userId]
+    [videoId]
   );
 
   if (!result.rows.length) return false;
 
-  const { uploaded_by, team_id, role } = result.rows[0];
+  const { uploaded_by, team_id } = result.rows[0];
 
   if (Number(uploaded_by) === Number(userId)) return true;
 
-  if (team_id === null) return role === "coach";
+  if (team_id === null) {
+    const admin = await client.query("SELECT is_platform_admin FROM users WHERE id = $1", [userId]);
+    return admin.rows[0]?.is_platform_admin === true;
+  }
 
   return canManageTeam(userId, team_id);
 }
@@ -481,17 +492,21 @@ async function canViewTeamRoster(userId, teamId) {
 // picker doesn't verify membership before offering a team) lost
 // visibility into their OWN upload — GET /api/videos/:id even 403'd for
 // its own uploader. video.team_id === null is the "unassigned" case (see
-// videos.js's upload route) — visible to the uploader (below) or a coach,
-// since there's no team to scope it to. Otherwise, visibility follows
-// team membership for everyone except the uploader.
+// videos.js's upload route) — now called Personal Film — visible to the
+// uploader (below) or a Platform Admin ONLY, since there's no team to
+// scope it to and it is explicitly uploader-private (see canDeleteVideo's
+// identical fix and comment for the full incident this closes: any global
+// coach previously had blanket access to every uploader's personal
+// video). Otherwise, visibility follows team membership for everyone
+// except the uploader.
 async function canViewVideo(userId, video) {
   if (!userId || !video) return false;
 
   if (Number(video.uploaded_by) === Number(userId)) return true;
 
   if (video.team_id === null || video.team_id === undefined) {
-    const result = await client.query("SELECT role FROM users WHERE id = $1", [userId]);
-    return result.rows[0]?.role === "coach";
+    const result = await client.query("SELECT is_platform_admin FROM users WHERE id = $1", [userId]);
+    return result.rows[0]?.is_platform_admin === true;
   }
 
   return canAccessTeam(userId, video.team_id);

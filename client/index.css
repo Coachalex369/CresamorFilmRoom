@@ -2226,6 +2226,7 @@ body.app-active #reset-password-screen {
 #invite-modal,
 #invitation-confirm-modal,
 #video-team-modal,
+#upload-destination-modal,
 #schedule-day-modal,
 #schedule-event-modal,
 #new-message-modal {
@@ -2243,6 +2244,7 @@ body.app-active #reset-password-screen {
 #invite-modal.hidden,
 #invitation-confirm-modal.hidden,
 #video-team-modal.hidden,
+#upload-destination-modal.hidden,
 #schedule-day-modal.hidden,
 #schedule-event-modal.hidden,
 #new-message-modal.hidden {
@@ -2253,6 +2255,7 @@ body.app-active #reset-password-screen {
 #invite-modal-inner,
 #invitation-confirm-modal-inner,
 #video-team-modal-inner,
+#upload-destination-modal-inner,
 #schedule-day-modal-inner,
 #schedule-event-modal-inner,
 #new-message-modal-inner {
@@ -2271,6 +2274,7 @@ body.app-active #reset-password-screen {
 #create-team-close-btn,
 #invite-close-btn,
 #video-team-close-btn,
+#upload-destination-close-btn,
 #schedule-day-close-btn,
 #schedule-event-close-btn,
 #new-message-close-btn {
@@ -2287,6 +2291,7 @@ body.app-active #reset-password-screen {
 #invite-modal-inner input,
 #invite-modal-inner select,
 #video-team-modal-inner select,
+#upload-destination-modal-inner select,
 #schedule-event-modal-inner input,
 #schedule-event-modal-inner select,
 #schedule-event-modal-inner textarea {
@@ -2306,6 +2311,7 @@ body.app-active #reset-password-screen {
 
 #invite-modal-inner label,
 #video-team-modal-inner label,
+#upload-destination-modal-inner label,
 #schedule-event-modal-inner label {
   display: block;
   color: var(--muted);

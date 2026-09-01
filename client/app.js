@@ -86,6 +86,12 @@ const videoTeamSelect = document.querySelector("#video-team-select");
 const videoTeamError = document.querySelector("#video-team-error");
 const videoTeamSaveBtn = document.querySelector("#video-team-save-btn");
 
+const uploadDestinationModal = document.querySelector("#upload-destination-modal");
+const uploadDestinationCloseBtn = document.querySelector("#upload-destination-close-btn");
+const uploadDestinationSelect = document.querySelector("#upload-destination-select");
+const uploadDestinationError = document.querySelector("#upload-destination-error");
+const uploadDestinationConfirmBtn = document.querySelector("#upload-destination-confirm-btn");
+
 // Temporary mobile debug panel (see index.html) — a global every later
 // script (recordingPipeline.js, capture.js) can call to surface what's
 // happening directly on a phone's screen, since Chrome iOS can't be
@@ -465,6 +471,99 @@ async function loadManageableTeams() {
     console.error("Failed to load manageable teams:", error);
     return [];
   }
+}
+
+// Unassigned-video authorization fix: the manual Upload Film destination
+// picker's own list. Deliberately includes 'assistant_coach', unlike
+// loadManageableTeams() above (which stays coach-only, matching
+// canManageTeam()'s narrower reassignment-authority rule) — an Assistant
+// Coach may add Film Room content to a team they help run, same
+// distinction Roster Profiles' guardian-linking already draws between
+// canManageTeam (coach-only) and a broader per-team authority check. Same
+// GET /api/users/:id/teams source, never the unscoped GET /api/teams —
+// the server independently re-validates via canAccessTeam() regardless of
+// what this list offers, so this is a UX narrowing, not the enforcement.
+//
+// TRANSITIONAL: offers a single flat "team" destination, same as the
+// server-side check it feeds — Team Highlights vs. Team Film Breakdown as
+// distinct destinations is deliberately out of scope for this branch (see
+// POST /api/upload-video's own transitional note in videos.js). This
+// picker is reachable only by role='coach' (the pre-existing .coach-only
+// gate on #upload-section) — Parent/Athlete uploads never go through it
+// at all, only through the Record flow (capture.js).
+async function loadUploadDestinationTeams() {
+  try {
+    const myTeams = await apiFetch(`/api/users/${currentUser.id}/teams`);
+    return myTeams.filter((team) => team.role_on_team === "coach" || team.role_on_team === "assistant_coach");
+  } catch (error) {
+    console.error("Failed to load upload destination teams:", error);
+    return [];
+  }
+}
+
+// The file the destination modal is currently scoped to (set on open,
+// cleared on close/confirm) — held here rather than re-read from the
+// picker input, since the picker's own value may already have changed by
+// the time the modal resolves (e.g. a second picker interaction).
+let pendingUploadFile = null;
+
+async function openUploadDestinationModal(file) {
+  pendingUploadFile = file;
+  uploadDestinationError.classList.add("hidden");
+  uploadDestinationConfirmBtn.disabled = false;
+  uploadDestinationConfirmBtn.textContent = "Upload";
+
+  const destinations = await loadUploadDestinationTeams();
+
+  uploadDestinationSelect.innerHTML = "";
+
+  const personalOption = document.createElement("option");
+  personalOption.value = "";
+  personalOption.textContent = "Personal Film — only you can view it";
+  uploadDestinationSelect.appendChild(personalOption);
+
+  destinations.forEach((team) => {
+    const option = document.createElement("option");
+    option.value = team.id;
+    option.textContent = team.sport ? `${team.name} (${team.sport})` : team.name;
+    uploadDestinationSelect.appendChild(option);
+  });
+
+  // No default/silent inference across multiple teams — Personal Film is
+  // the select's first/default option regardless of how many real teams
+  // this coach could otherwise pick, so a multi-team coach always sees
+  // and must actively change the selection to choose a team, never has
+  // one silently pre-picked for them.
+  uploadDestinationSelect.value = "";
+
+  uploadDestinationModal.classList.remove("hidden");
+}
+
+function closeUploadDestinationModal() {
+  uploadDestinationModal.classList.add("hidden");
+  pendingUploadFile = null;
+  if (videoUploadInput) videoUploadInput.value = "";
+}
+
+function confirmUploadDestination() {
+  if (!pendingUploadFile) return;
+
+  const selected = uploadDestinationSelect.value;
+  const teamId = selected === "" ? null : Number(selected);
+  const file = pendingUploadFile;
+
+  uploadDestinationModal.classList.add("hidden");
+  pendingUploadFile = null;
+
+  uploadVideo(file, teamId);
+}
+
+if (uploadDestinationCloseBtn) {
+  uploadDestinationCloseBtn.addEventListener("click", closeUploadDestinationModal);
+}
+
+if (uploadDestinationConfirmBtn) {
+  uploadDestinationConfirmBtn.addEventListener("click", confirmUploadDestination);
 }
 
 async function openVideoTeamModal(video) {
@@ -1252,7 +1351,15 @@ function setManualUploadStatus(text) {
 // Sprint 3: converted from fetch to XMLHttpRequest so this manual upload
 // path gets the same real progress/percentage/size/ETA feedback as the
 // capture.js recording flow — fetch() doesn't expose upload progress events.
-function uploadVideo(file) {
+// teamId: the destination the upload-destination modal resolved — a real
+// team id (Coach/Assistant Coach destinations only, see
+// loadUploadDestinationTeams()) or null for Personal Film. Never inferred
+// here; the modal always requires an explicit choice before this is
+// called (see openUploadDestinationModal()) — the server independently
+// re-validates whatever team_id actually arrives (canAccessTeam(), see
+// POST /api/upload-video), so this is a UX convenience, not the real
+// authorization boundary.
+function uploadVideo(file, teamId) {
   debugLog(`uploadVideo() called, file=${file ? "present" : "MISSING"}`);
 
   if (!currentUser || currentUser.role !== "coach") {
@@ -1284,6 +1391,7 @@ function uploadVideo(file) {
 
   formData.append("video", file);
   formData.append("title", file.name);
+  if (teamId) formData.append("team_id", teamId);
 
   const startedAt = Date.now();
 
@@ -1744,7 +1852,18 @@ if (videoUploadInput) {
     // bug than anything inside uploadVideo() below.
     debugLog("video-upload CHANGE fired", `files=${event.target.files?.length ?? 0}`);
     const file = event.target.files[0];
-    uploadVideo(file);
+
+    if (!file) {
+      uploadVideo(file); // preserves uploadVideo()'s own "no file" messaging/logging
+      return;
+    }
+
+    // Unassigned-video authorization fix: a file is never uploaded
+    // straight off the picker anymore — the destination modal always
+    // requires an explicit choice (Personal Film or one of this coach's
+    // own active coach/assistant-coach teams) first. uploadVideo() itself
+    // is unchanged below; only what calls it changed.
+    openUploadDestinationModal(file);
   });
 }
 
