@@ -404,6 +404,38 @@ async function main() {
       assistantCoachDestinations.some((t) => t.id === team.id)
     );
 
+    // ============================================================
+    // #upload-section visibility fix (client/app.js's
+    // refreshUploadSectionVisibility()): the real production bug was
+    // setCoachVisibility()/.coach-only gating the entire upload control on
+    // users.role === 'coach' — wrong, because a genuine Assistant Coach
+    // registers with global role='assistant_coach' (handleInvitedAuth()
+    // passes the invited roleOnTeam straight through, see invitations.js)
+    // and never becomes role='coach' afterward. Replicates the exact
+    // fixed predicate (an OR of the old global-role rule and a live
+    // per-team check) against real data, using the already-registered
+    // `outsider` (global role='athlete' — standing in for any non-'coach'
+    // global role, including the real-world 'assistant_coach' case;
+    // the predicate itself doesn't special-case which non-coach role it
+    // is) who now genuinely holds an active assistant_coach team_members
+    // row from the block above. No new registrations (registerLimiter is
+    // 5/hour/IP, already fully used by this script). ---
+    // ============================================================
+    function uploadSectionVisibilityPredicate(globalRole, teams) {
+      if (globalRole === "coach") return true;
+      return teams.some((t) => t.role_on_team === "coach" || t.role_on_team === "assistant_coach");
+    }
+
+    assert(
+      "a non-coach global role WITH a live active Assistant Coach membership passes upload-section visibility (the actual bug this fixes)",
+      uploadSectionVisibilityPredicate("athlete", assistantCoachTeams.data) === true
+    );
+
+    assert(
+      "a plain global role='coach' account passes upload-section visibility even with ZERO teams (Personal Film never required a team)",
+      uploadSectionVisibilityPredicate("coach", []) === true
+    );
+
     const uploaderTeamsForFilter = await req(`/api/users/${uploader.user.id}/teams`, { token: uploader.token });
     const uploaderDestinations = uploaderTeamsForFilter.data.filter(uploadDestinationFilter);
     assert(
@@ -416,6 +448,11 @@ async function main() {
     assert(
       "an active Coach's own team passes the manual-picker destination filter",
       coachDestinations.some((t) => t.id === team.id)
+    );
+
+    assert(
+      "a non-coach global role with NO active coach/assistant_coach membership anywhere fails upload-section visibility",
+      uploadSectionVisibilityPredicate("athlete", uploaderTeamsForFilter.data) === false
     );
 
     const unrelatedCoachTeamsForFilter = await req(`/api/users/${unrelatedCoach.user.id}/teams`, { token: unrelatedCoach.token });

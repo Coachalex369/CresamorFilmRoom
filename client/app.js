@@ -54,6 +54,7 @@ const appShell = document.querySelector("#app-shell");
 const currentRoleLabel = document.querySelector("#current-role-label");
 
 const coachOnlyElements = document.querySelectorAll(".coach-only");
+const uploadSection = document.querySelector("#upload-section");
 
 const videoSection = document.querySelector("#video-section");
 const videoWrapper = document.querySelector("#video-wrapper");
@@ -213,6 +214,63 @@ function setCoachVisibility(role) {
       element.classList.add("hidden");
     }
   });
+}
+
+// Unassigned-video authorization fix: #upload-section's visibility is
+// deliberately NOT part of setCoachVisibility()/.coach-only above — that
+// mechanism is keyed on users.role, the global account type, which is
+// wrong (too strict) for this control specifically. A real Assistant
+// Coach account registers with global role='assistant_coach' (see
+// handleInvitedAuth() in invitations.js passing the invited roleOnTeam
+// straight through as the new account's role) and NEVER becomes
+// role='coach' afterward (nothing in this app ever updates users.role
+// post-registration) — a role==='coach'-only gate would permanently hide
+// the upload control from every genuine Assistant Coach, exactly the bug
+// this fixes.
+//
+// Two independent grants, deliberately an OR, not a replacement: (1) a
+// plain global role='coach' account keeps upload access unconditionally,
+// even with zero teams at all — Personal Film has never required any
+// team relationship, this is the original, still-correct behavior
+// ("a global Coach with no coached teams may upload only to Personal
+// Film"); (2) LIVE per-team membership grants it too — any active
+// (non-revoked) coach or assistant_coach team_members row on ANY team,
+// via the same GET /api/users/:id/teams source loadUploadDestinationTeams()
+// already uses — this is what actually covers the Assistant Coach case.
+// Athlete/Parent correctly see nothing here even if a stray self-service
+// membership exists — Team Highlights, not this control, is their
+// eventual upload surface (deliberately not built yet).
+async function refreshUploadSectionVisibility() {
+  if (!uploadSection) return;
+
+  if (!currentUser) {
+    uploadSection.classList.add("hidden");
+    return;
+  }
+
+  // A plain global role='coach' account keeps upload access even with
+  // ZERO teams at all — Personal Film has never required any team
+  // relationship, and this is the pre-existing, still-correct behavior
+  // (confirmed: "a global Coach with no coached teams may upload only to
+  // Personal Film"). The live per-team check below is what ADDS access
+  // for a genuine Assistant Coach (global role !== 'coach'), it isn't
+  // meant to ever SUBTRACT the plain-coach case — this is an OR of both
+  // conditions, not a replacement of the old rule.
+  if (currentUser.role === "coach") {
+    uploadSection.classList.remove("hidden");
+    return;
+  }
+
+  try {
+    const myTeams = await apiFetch(`/api/users/${currentUser.id}/teams`);
+    const hasActiveCoachingRole = myTeams.some(
+      (team) => team.role_on_team === "coach" || team.role_on_team === "assistant_coach"
+    );
+    uploadSection.classList.toggle("hidden", !hasActiveCoachingRole);
+  } catch (error) {
+    console.error("Failed to determine upload-section visibility:", error);
+    uploadSection.classList.add("hidden");
+  }
 }
 
 function updateSpeedDisplay() {
@@ -1149,6 +1207,7 @@ function activateApp(user) {
   logoutBtn.classList.remove("hidden");
 
   setCoachVisibility(user.role);
+  refreshUploadSectionVisibility();
   loadVideos();
   loadMyClips();
   refreshVideoPollingState();
@@ -1176,6 +1235,7 @@ function logoutLocalState() {
   logoutBtn.classList.add("hidden");
 
   setCoachVisibility(null);
+  if (uploadSection) uploadSection.classList.add("hidden");
 
   emailInput.value = "";
   passwordInput.value = "";
@@ -1362,10 +1422,20 @@ function setManualUploadStatus(text) {
 function uploadVideo(file, teamId) {
   debugLog(`uploadVideo() called, file=${file ? "present" : "MISSING"}`);
 
-  if (!currentUser || currentUser.role !== "coach") {
-    debugLog("uploadVideo() blocked: role is", currentUser ? currentUser.role : "(logged out)");
-    setManualUploadStatus("Only coaches can upload videos.");
-    showMessage("Only coaches can upload videos.");
+  // Unassigned-video authorization fix: this used to require
+  // currentUser.role === 'coach' specifically — wrong for the same
+  // reason #upload-section's own visibility was wrong (see
+  // refreshUploadSectionVisibility()): a real Assistant Coach's global
+  // role is 'assistant_coach', never 'coach'. The real gates are (a) this
+  // function is only reachable via the destination modal, itself only
+  // shown when a live per-team coach/assistant_coach membership exists,
+  // and (b) the server independently re-validates every team_id via
+  // canAccessTeam() regardless of what this client believes — so a plain
+  // "must be logged in" check is sufficient here.
+  if (!currentUser) {
+    debugLog("uploadVideo() blocked: not logged in");
+    setManualUploadStatus("You must be logged in to upload.");
+    showMessage("You must be logged in to upload.");
     return;
   }
 

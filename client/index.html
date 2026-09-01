@@ -317,8 +317,21 @@
                 </div>
               </div>
 
-              <!-- UPLOAD -->
-              <div id="upload-section" class="coach-only">
+              <!-- UPLOAD. Deliberately NOT .coach-only (that class is
+                   driven by users.role, the global account type set once
+                   at registration/invitation time — see
+                   refreshUploadSectionVisibility() in app.js). A real
+                   Assistant Coach account registers with global
+                   role='assistant_coach', never 'coach' (see
+                   handleInvitedAuth() in invitations.js), so a
+                   role==='coach' gate would incorrectly hide this from
+                   every genuine Assistant Coach. Starts hidden; shown only
+                   after a live GET /api/users/:id/teams check confirms an
+                   active coach/assistant_coach team_members row on ANY
+                   team — per-team membership, not the account label.
+                   Parent/Athlete uploads intentionally have no surface
+                   here at all (see Team Highlights, not yet built). -->
+              <div id="upload-section" class="hidden">
                 <label for="video-upload">Upload Film:</label>
 
                 <input
