@@ -10,7 +10,7 @@ const {
   retryClassification,
   retryConversion,
 } = require("../services/videoProcessing");
-const { canDeleteVideo, canViewVideo, canManageTeam } = require("../services/permissions");
+const { canDeleteVideo, canViewVideo, canManageTeam, canAccessTeam } = require("../services/permissions");
 const storage = require("../services/storage/storage");
 const { authenticate } = require("../middleware/authenticate");
 const { uploadLimiter } = require("../middleware/rateLimiters");
@@ -268,6 +268,38 @@ router.post("/api/upload-video", authenticate, uploadLimiter, uploadDiagnosticMu
       return res.status(400).json({ error: "Missing required upload fields" });
     }
 
+    // Unassigned-video authorization fix: a submitted team_id is no longer
+    // trusted blindly, for ANY uploader role — a client-claimed team_id
+    // used to be written straight to the DB with zero check (the actual
+    // gap this closes; team_id was NEVER validated before this fix, not
+    // even loosely). Deliberately NOT scoped to role === 'coach': the
+    // Record flow (capture.js) lets athletes/parents record for their own
+    // team too, and their team_id must keep working exactly as before.
+    // canAccessTeam() is the right (and only) bar here — an active,
+    // non-revoked team_members row on that exact team, ANY role_on_team —
+    // matching every uploader's own literal claim ("I'm on this team"),
+    // not a coach-specific authority check (that stricter bar is what the
+    // manual Film Room picker's OWN team list is narrowed to client-side;
+    // this server-side check is the universal floor beneath every caller,
+    // picker or Record flow alike). Omitting team_id entirely (Personal
+    // Film) requires no check at all — every authenticated uploader may
+    // always upload unassigned to themselves.
+    //
+    // TRANSITIONAL, scoped deliberately narrow for this security branch:
+    // team_id here is still a single flat destination — it does NOT yet
+    // distinguish a durable Team Highlights post (parent/athlete
+    // contributions) from Team Film Breakdown (coach-managed film). That
+    // split, and its own post/source data model (a Team Highlight post
+    // referencing a source video, revocable independent of the source,
+    // never sharing a row with it), is real future work, intentionally
+    // NOT built here — this fix only closes the "was NEVER validated at
+    // all" gap. Once Team Highlights ships, this check's bar (any active
+    // membership) likely stays as the floor for "targeting this team at
+    // all," with a further per-destination-type check layered on top.
+    if (team_id && !(await canAccessTeam(req.user.id, team_id))) {
+      return res.status(403).json({ error: "You do not have an active membership on that team" });
+    }
+
     // TEMPORARY diagnostic (native-recording 500 investigation): only
     // req.file's own safe metadata fields — never file bytes, never
     // req.body values, never tokens.
@@ -405,20 +437,27 @@ router.delete("/api/videos/:id", authenticate, async (req, res) => {
   }
 });
 
-// Team-scoped video reassignment. Deliberately NOT reusing canDeleteVideo
-// (uploader-or-any-coach) — changing team_id changes which team members
-// can see the video, which is a team-scoped authorization operation, not
-// a general video-management one. Governed by canManageTeam() instead,
-// the same per-team-coach concept that already gates invitations:
+// Team-scoped video reassignment. The destination side is governed by
+// canManageTeam(), the same per-team-coach concept that already gates
+// invitations — reassignment is a team-scoped authorization operation,
+// not a general video-management one, so a coach's blanket
+// uploader-or-admin authority (canDeleteVideo) isn't the right bar there.
 //   Team A -> Team B: must manage BOTH A and B (leaving A's visibility
 //     boundary AND entering B's).
 //   Team A -> Unassigned: must manage A only (nothing to check on the
 //     "Unassigned" side — it isn't a team).
-//   Unassigned -> Team B: must manage B only. An uploader with no
-//     team-management role can never assign their own upload into a
-//     team's shared library this way.
 //   No-op (same team, or Unassigned -> Unassigned): short-circuits before
 //     any authorization check at all.
+// Unassigned-video authorization fix: the SOURCE side, when leaving
+// Personal Film (currentTeamId === null), used to have NO check at all —
+// worse than the old "any global coach" video rule, since it let literally
+// any coach who merely managed the DESTINATION team pull someone else's
+// unassigned video out of Personal Film, with zero relationship to the
+// video or its uploader required. Now reuses canDeleteVideo() (uploader
+// or Platform Admin for an unassigned video, matching the same fix
+// applied to canViewVideo/canDeleteVideo) for that side specifically —
+// the destination side's canManageTeam() check below is unchanged and
+// still evaluated separately.
 // "Team doesn't exist" and "exists but you don't manage it" deliberately
 // return the identical 403 — same "don't let a caller fingerprint why"
 // principle authenticate.js already uses for login rejections.
@@ -440,7 +479,11 @@ router.patch("/api/videos/:id/team", authenticate, async (req, res) => {
       return res.json(await withPlaybackStatus(video));
     }
 
-    if (currentTeamId !== null && !(await canManageTeam(req.user.id, currentTeamId))) {
+    if (currentTeamId === null) {
+      if (!(await canDeleteVideo(req.user.id, id))) {
+        return res.status(403).json({ error: "Not authorized to move this video out of Personal Film" });
+      }
+    } else if (!(await canManageTeam(req.user.id, currentTeamId))) {
       return res.status(403).json({ error: "Not authorized to remove this video from its current team" });
     }
 
