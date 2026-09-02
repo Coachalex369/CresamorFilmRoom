@@ -8,11 +8,14 @@
 
 const rateLimit = require("express-rate-limit");
 
-const { logSecurityEvent } = require("../services/auditLog");
+const { logSecurityEvent, testCorrelationMetadata } = require("../services/auditLog");
 
 function loggedHandler(eventType) {
   return async (req, res) => {
-    await logSecurityEvent(eventType, { ip: req.ip, metadata: { path: req.originalUrl } });
+    await logSecurityEvent(eventType, {
+      ip: req.ip,
+      metadata: { path: req.originalUrl, ...testCorrelationMetadata(req) },
+    });
     res.status(429).json({ error: "Too many requests — please try again later" });
   };
 }

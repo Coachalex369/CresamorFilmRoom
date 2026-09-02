@@ -3,6 +3,7 @@ require("dotenv").config();
 const app = require("./app");
 const client = require("./db/client");
 const { recoverStrandedConversions } = require("./services/videoProcessing");
+const { runRetentionSweep, startPeriodicRetentionSweep } = require("./services/retentionSweeper");
 
 const PORT = process.env.PORT || 3000;
 
@@ -32,6 +33,15 @@ const server = app.listen(PORT, () => {
   recoverStrandedConversions().catch((error) => {
     console.error("Startup conversion recovery failed:", error);
   });
+
+  // Team Highlights, Slice 1: same structural guarantee as the
+  // conversion recovery above — only ever runs once the HTTP server is
+  // already accepting requests. One immediate boot-time pass, then a
+  // periodic timer for ongoing lease/purge/cleanup reconciliation.
+  runRetentionSweep().catch((error) => {
+    console.error("Startup retention sweep failed:", error);
+  });
+  startPeriodicRetentionSweep();
 });
 
 server.on("close", () => {

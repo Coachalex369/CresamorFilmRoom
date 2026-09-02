@@ -501,6 +501,12 @@ async function main() {
         await client.query("DELETE FROM security_audit_log WHERE user_id = $1", [id]);
         await client.query("DELETE FROM team_members WHERE user_id = $1", [id]);
         await client.query("DELETE FROM videos WHERE uploaded_by = $1", [id]);
+        // Team Highlights, Slice 1: upload_attempts.user_id has no ON
+        // DELETE behavior -- this script exercises the real
+        // /api/upload-video route (unauthorizedUpload/authorizedUpload/
+        // revokedUpload), each creating a real upload_attempts row. Same
+        // fix as testAuth.js/testVideoClassification.js.
+        await client.query("DELETE FROM upload_attempts WHERE user_id = $1", [id]);
         await client.query("DELETE FROM users WHERE id = $1", [id]);
       }
       for (const id of created.teamIds) {

@@ -22,7 +22,7 @@
 const jwt = require("jsonwebtoken");
 
 const client = require("../db/client");
-const { logSecurityEvent } = require("../services/auditLog");
+const { logSecurityEvent, testCorrelationMetadata } = require("../services/auditLog");
 
 const UNAUTHORIZED = { error: "Unauthorized" };
 
@@ -31,7 +31,10 @@ async function authenticate(req, res, next) {
   const [scheme, token] = header.split(" ");
 
   if (scheme !== "Bearer" || !token) {
-    await logSecurityEvent("auth_rejected", { ip: req.ip, metadata: { reason: "missing_token" } });
+    await logSecurityEvent("auth_rejected", {
+      ip: req.ip,
+      metadata: { reason: "missing_token", ...testCorrelationMetadata(req) },
+    });
     return res.status(401).json(UNAUTHORIZED);
   }
 
@@ -41,7 +44,10 @@ async function authenticate(req, res, next) {
   } catch (err) {
     await logSecurityEvent("auth_rejected", {
       ip: req.ip,
-      metadata: { reason: err.name === "TokenExpiredError" ? "expired_token" : "invalid_token" },
+      metadata: {
+        reason: err.name === "TokenExpiredError" ? "expired_token" : "invalid_token",
+        ...testCorrelationMetadata(req),
+      },
     });
     return res.status(401).json(UNAUTHORIZED);
   }
@@ -56,7 +62,7 @@ async function authenticate(req, res, next) {
     if (!user) {
       await logSecurityEvent("auth_rejected", {
         ip: req.ip,
-        metadata: { reason: "deleted_user", tokenUserId: payload.id },
+        metadata: { reason: "deleted_user", tokenUserId: payload.id, ...testCorrelationMetadata(req) },
       });
       return res.status(401).json(UNAUTHORIZED);
     }

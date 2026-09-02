@@ -360,18 +360,19 @@ async function generateClipThumbnail(video, clip) {
   return thumbnail;
 }
 
-async function loadReelData(videos, clips) {
-  const videoById = new Map(videos.map((video) => [video.id, video]));
-
-  // Playback-fix pass: a clip whose video is missing/unavailable would
-  // otherwise rotate into the Featured Reel and just fail to load — filter
-  // it out here instead, same as the delete flow does when it refreshes
-  // this after removing a video.
+// Team Highlights, Slice 1: each clip now carries its own resolved,
+// authorized playback info (clip.video, embedded server-side by
+// GET /api/users/:id/clips — see clips.js) instead of this function
+// separately joining against the Film list (GET /api/videos) by
+// video_id. That join broke the moment the Film list started excluding
+// film-removed sources: a clip whose source was removed from Film would
+// silently vanish from the reel even though the clip and the source's R2
+// object were both still completely intact. clip.video is authoritative
+// and independent of Film-list membership — no videos parameter needed
+// here anymore.
+async function loadReelData(clips) {
   const withVideo = clips
-    .filter((clip) => {
-      const video = videoById.get(clip.video_id);
-      return video && video.available !== false && video.playback_state === "playable";
-    })
+    .filter((clip) => clip.video && clip.video.available !== false && clip.video.playback_state === "playable")
     .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
 
   reelState.clips = withVideo;
@@ -389,7 +390,7 @@ async function loadReelData(videos, clips) {
   reelVideo.classList.remove("hidden");
 
   const thumbnails = await Promise.all(
-    withVideo.map((clip) => generateClipThumbnail(videoById.get(clip.video_id), clip))
+    withVideo.map((clip) => generateClipThumbnail(clip.video, clip))
   );
 
   reelThumbnails.innerHTML = "";
@@ -412,20 +413,17 @@ async function loadReelData(videos, clips) {
     reelThumbnails.appendChild(thumbBtn);
   });
 
-  renderFeaturedClip(videoById);
-  startReelRotation(videoById);
+  renderFeaturedClip();
+  startReelRotation();
 }
 
-function renderFeaturedClip(videoById) {
+function renderFeaturedClip() {
   const clip = reelState.clips[reelState.index];
-  if (!clip) return;
+  if (!clip || !clip.video) return;
 
-  const video = videoById.get(clip.video_id);
-  if (!video) return;
-
-  const videoUrl = video.file_url.startsWith("http")
-    ? video.file_url
-    : `${API_URL}${video.file_url}`;
+  const videoUrl = clip.video.file_url.startsWith("http")
+    ? clip.video.file_url
+    : `${API_URL}${clip.video.file_url}`;
 
   reelVideo.pause();
   reelVideo.src = `${videoUrl}#t=${clip.start_time}`;
@@ -442,25 +440,22 @@ function renderFeaturedClip(videoById) {
 
 function selectReelClip(index) {
   reelState.index = index;
-  renderFeaturedClip(lastVideoLookup);
+  renderFeaturedClip();
   restartReelTimer();
 }
 
-let lastVideoLookup = new Map();
-
-function startReelRotation(videoById) {
-  lastVideoLookup = videoById;
+function startReelRotation() {
   stopReelRotation();
 
   reelState.timer = setInterval(() => {
     reelState.index = (reelState.index + 1) % reelState.clips.length;
-    renderFeaturedClip(lastVideoLookup);
+    renderFeaturedClip();
   }, 6500);
 }
 
 function restartReelTimer() {
   if (!reelState.clips.length) return;
-  startReelRotation(lastVideoLookup);
+  startReelRotation();
 }
 
 function stopReelRotation() {
@@ -470,13 +465,15 @@ function stopReelRotation() {
   }
 }
 
+// Team Highlights, Slice 1: uses the clip's own embedded, authorized
+// clip.video (see loadReelData's comment above) instead of looking the
+// video up in allVideos (the Film-list-filtered array) — a highlight
+// whose source was removed from Film must still be watchable from here.
 function watchClip(clip) {
   if (!clip) return;
 
-  const video = allVideos.find((v) => v.id === clip.video_id);
-
-  if (video) {
-    selectVideo(video);
+  if (clip.video) {
+    selectVideo(clip.video);
   }
 
   switchToScreen("film-screen");
@@ -829,7 +826,7 @@ async function renderHome() {
     const safeClips = Array.isArray(clips) ? clips : [];
 
     renderHeroCard(safeClips);
-    await loadReelData(safeVideos, safeClips);
+    await loadReelData(safeClips);
     renderRecentActivity(safeVideos, safeClips);
     renderContinueWatching(safeVideos);
   } catch (error) {
@@ -936,11 +933,16 @@ window.activateApp = function (user) {
   renderHome();
 };
 
-// Playback-fix pass: app.js's deleteVideo() calls this after a successful
-// delete so Featured Highlights / Continue Watching drop the removed
-// video without a full page reload — same re-render renderHome() already
-// does on login, just triggered on demand.
-window.refreshHomeAfterVideoDelete = function () {
+// Playback-fix pass, renamed for Team Highlights Slice 1: app.js's
+// deleteVideo() (really a "Remove from Film" action now, not a physical
+// delete) calls this afterward so Continue Watching drops a
+// no-longer-in-Film video without a full page reload — same re-render
+// renderHome() already does on login, just triggered on demand. Personal
+// highlights are NOT expected to disappear here; loadReelData/clip.video
+// (see above) is what keeps them working regardless of Film-list
+// membership — this rename exists so the name itself no longer implies
+// "the video was destroyed."
+window.refreshHomeAfterFilmRemoval = function () {
   if (!currentUser) return;
   renderHome();
 };
