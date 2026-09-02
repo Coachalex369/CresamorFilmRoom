@@ -38,6 +38,12 @@ async function req(path, { method = "GET", token, body } = {}) {
   const headers = {};
   if (token) headers.Authorization = `Bearer ${token}`;
   if (body) headers["Content-Type"] = "application/json";
+  // Correction: lets the server (only when already running with
+  // ALLOW_PRODUCTION_TESTS=true, per testCorrelationMetadata()'s own
+  // server-side gate in auditLog.js) tag any resulting security_audit_log
+  // row's metadata with this run's own RUN_TAG, so cleanup can find and
+  // delete exactly the rows this run created.
+  headers["X-Test-Correlation-Id"] = RUN_TAG;
 
   const response = await fetch(`${BASE_URL}${path}`, {
     method,
@@ -774,6 +780,26 @@ async function main() {
         await client.query("DELETE FROM users WHERE id = $1", [id]);
       }
       await client.query("DELETE FROM security_audit_log WHERE metadata->>'email' LIKE $1", [`${RUN_TAG}%`]);
+      // Exact-ID cleanup for this run's own NULL-user_id audit row (the
+      // non-existent-email forgot-password test) -- its metadata carries
+      // no email at all, so the LIKE catch-all above can't reach it.
+      // req() tags every request with X-Test-Correlation-Id: RUN_TAG,
+      // which auth.js's forgot-password route carries into the audit
+      // row's metadata (only when ALLOW_PRODUCTION_TESTS=true -- see
+      // testCorrelationMetadata() in auditLog.js). Looked up by that exact
+      // tag and deleted by exact id -- never a watermark/time range/
+      // pattern that could also match a genuine concurrent anonymous
+      // event.
+      const correlatedAuditRows = await client.query(
+        "SELECT id FROM security_audit_log WHERE metadata->>'testCorrelationId' = $1",
+        [RUN_TAG]
+      );
+      if (correlatedAuditRows.rows.length > 0) {
+        await client.query(
+          "DELETE FROM security_audit_log WHERE id = ANY($1::int[])",
+          [correlatedAuditRows.rows.map((r) => r.id)]
+        );
+      }
       console.log("Cleanup complete.");
     } catch (cleanupError) {
       console.error("Cleanup encountered an error (may need manual follow-up):", cleanupError);

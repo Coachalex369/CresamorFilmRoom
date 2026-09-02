@@ -36,13 +36,24 @@ const client = new S3Client({
 // Streams the temp file straight to R2 via a multipart upload — never
 // buffers the whole file in Node's memory, which matters on Render's
 // constrained instance for anything approaching a full game recording.
-async function upload(key, filePath, contentType) {
+//
+// Team Highlights, Slice 1: onProgress, if provided, is wired to the
+// Upload instance's own real httpUploadProgress event — the actual
+// mid-transfer signal this project's upload-attempt lease renewal needs
+// for a genuinely large file, not merely a fixed initial lease window.
+async function upload(key, filePath, contentType, { onProgress } = {}) {
   const body = fs.createReadStream(filePath);
 
   const uploader = new Upload({
     client,
     params: { Bucket: BUCKET, Key: key, Body: body, ContentType: contentType },
   });
+
+  if (onProgress) {
+    uploader.on("httpUploadProgress", (progress) => {
+      onProgress({ loadedBytes: progress.loaded, totalBytes: progress.total });
+    });
+  }
 
   await uploader.done();
   await fs.promises.unlink(filePath);
@@ -89,6 +100,22 @@ async function remove(key) {
   }
 }
 
+// Team Highlights retention: unlike remove() above (best-effort, used for
+// "delete this file we're confident should go away," swallows every
+// error since the caller has no retry/state-machine behind it),
+// removeVerified() genuinely throws on failure -- the upload-attempt
+// cleanup and physical-purge state machines both need to know whether a
+// deletion actually succeeded, so they can decide to retry rather than
+// silently believe an object is gone when it might not be. S3-compatible
+// DeleteObject is itself idempotent -- deleting an already-absent key is
+// NOT an error at the API level, so "already absent" naturally resolves
+// as success here with no special-casing, which is exactly what lets a
+// sweeper safely re-run this against an object it already removed on a
+// prior pass.
+async function removeVerified(key) {
+  await client.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: key }));
+}
+
 // Beta Stabilization Sprint (MOV conversion): the first download-oriented
 // function this project has needed — everything before this was upload-
 // only. Streams straight to disk via pipeline(), never buffers the whole
@@ -98,4 +125,4 @@ async function downloadToFile(key, destPath) {
   await pipeline(response.Body, fs.createWriteStream(destPath));
 }
 
-module.exports = { upload, getSignedUrl, exists, remove, downloadToFile, getObjectSize };
+module.exports = { upload, getSignedUrl, exists, remove, removeVerified, downloadToFile, getObjectSize };

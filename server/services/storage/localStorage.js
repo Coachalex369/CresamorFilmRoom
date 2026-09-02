@@ -21,8 +21,13 @@ function resolvePath(key) {
 }
 
 // filePath is always inside uploads/.tmp/ (same filesystem as the real
-// destination), so a rename is a cheap move, not a copy.
-async function upload(key, filePath) {
+// destination), so a rename is a cheap move, not a copy. The fourth
+// parameter (onProgress) is accepted for interface parity with
+// r2Storage's upload() but deliberately never called — a single
+// fs.rename() has no meaningful intermediate progress to report. A
+// caller relying on progress-driven lease renewal simply gets none on
+// local storage, which is a valid, harmless no-op, not a broken contract.
+async function upload(key, filePath, contentType, { onProgress } = {}) {
   const destination = resolvePath(key);
   await fs.promises.mkdir(path.dirname(destination), { recursive: true });
   await fs.promises.rename(filePath, destination);
@@ -49,6 +54,24 @@ async function remove(key) {
   });
 }
 
+// Team Highlights retention: mirrors r2Storage's removeVerified() —
+// genuinely rejects on a real failure so the caller's state machine can
+// decide to retry, rather than the best-effort remove() above's
+// swallow-everything contract. ENOENT (already absent) resolves as
+// success, matching the same "missing file isn't a failure" idempotent
+// delete semantics used everywhere else in this abstraction.
+async function removeVerified(key) {
+  return new Promise((resolve, reject) => {
+    fs.unlink(resolvePath(key), (err) => {
+      if (err && err.code !== "ENOENT") {
+        reject(err);
+        return;
+      }
+      resolve();
+    });
+  });
+}
+
 // A copy, not upload()'s move-semantics rename — the source (the real
 // stored object) must stay in place for a download.
 async function downloadToFile(key, destPath) {
@@ -63,4 +86,4 @@ async function getObjectSize(key) {
   return stats.size;
 }
 
-module.exports = { upload, getSignedUrl, exists, remove, downloadToFile, getObjectSize };
+module.exports = { upload, getSignedUrl, exists, remove, removeVerified, downloadToFile, getObjectSize };

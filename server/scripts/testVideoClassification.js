@@ -261,6 +261,11 @@ async function main() {
         await client.query("DELETE FROM conversation_participants WHERE user_id = $1", [id]);
         await client.query("DELETE FROM security_audit_log WHERE user_id = $1", [id]);
         await client.query("DELETE FROM videos WHERE uploaded_by = $1", [id]);
+        // Team Highlights, Slice 1: upload_attempts.user_id has no ON
+        // DELETE behavior -- found by actually running this script
+        // locally after Team Highlights landed (cleanup failed on
+        // upload_attempts_user_id_fkey). Same fix as testAuth.js.
+        await client.query("DELETE FROM upload_attempts WHERE user_id = $1", [id]);
         await client.query("DELETE FROM users WHERE id = $1", [id]);
       }
       await fs.promises.rm(fixtureDir, { recursive: true, force: true });

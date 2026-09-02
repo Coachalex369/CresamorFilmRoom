@@ -4,7 +4,7 @@ const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
 
 const client = require("../db/client");
-const { logSecurityEvent } = require("../services/auditLog");
+const { logSecurityEvent, testCorrelationMetadata } = require("../services/auditLog");
 const { sendEmail } = require("../services/email");
 const { loginLimiter, registerLimiter } = require("../middleware/rateLimiters");
 
@@ -187,7 +187,10 @@ router.post("/api/auth/forgot-password", loginLimiter, async (req, res) => {
     } else {
       // Still log the attempt (no userId, since none matched) — audit
       // trail without confirming/denying the email exists.
-      await logSecurityEvent("password_reset_requested", { ip: req.ip });
+      await logSecurityEvent("password_reset_requested", {
+        ip: req.ip,
+        metadata: testCorrelationMetadata(req),
+      });
     }
 
     res.json({ message: NEUTRAL_MESSAGE });

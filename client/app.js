@@ -428,13 +428,32 @@ async function deleteLocalRecording(video) {
   }
 }
 
+// Team Highlights, Slice 1: "Remove from Film" — logically hides this
+// video from the Film library. This action ITSELF never deletes anything
+// — any personal clip made from this source keeps working exactly as
+// before (e.g. from the Home/Profile reel), since a clip holds its own
+// reference and that reference is what blocks the underlying file from
+// ever actually being removed. There is no "delete forever" control in
+// this UI. Separately, later, if NOTHING ends up depending on the source
+// anymore, the reevaluation worker may purge the underlying file on its
+// own — the confirmation copy below says so plainly (correction: it used
+// to promise the file would never be deleted, which stopped being true
+// the moment that automatic cleanup was built).
 async function deleteVideo(video) {
   if (video.__local) {
     return deleteLocalRecording(video);
   }
 
+  // Correction: the prior copy unconditionally claimed "it does not
+  // delete the file" -- not always true. When nothing (no active Team
+  // Highlight post, no unmaterialized personal clip) depends on the
+  // source anymore, the reevaluation worker (sourceRetention.js's
+  // sweepPurgeReevaluations) intentionally purges the underlying object.
+  // Existing clips/highlights keep working because they hold their own
+  // reference and BLOCK that purge while they exist -- not because the
+  // file is guaranteed to survive forever.
   const confirmed = confirm(
-    `Delete "${video.title}"?\n\nThis will permanently remove the video and its associated clips.\nThis action cannot be undone.`
+    `Remove "${video.title}" from Film?\n\nThis removes it from your Film library. Existing highlights and clips will keep working. If nothing depends on the original video, Cresamor may remove the unused file.`
   );
 
   if (!confirmed) return;
@@ -445,16 +464,17 @@ async function deleteVideo(video) {
 
   if (deleteBtn) {
     deleteBtn.disabled = true;
-    deleteBtn.textContent = "Deleting...";
+    deleteBtn.textContent = "Removing...";
   }
 
   try {
-    await apiFetch(`/api/videos/${video.id}`, {
-      method: "DELETE",
+    await apiFetch(`/api/videos/${video.id}/film-removal`, {
+      method: "PATCH",
     });
 
+    // Removed from the Film list only — myClips is deliberately left
+    // untouched, since Remove from Film never invalidates a clip.
     allVideos = allVideos.filter((v) => v.id !== video.id);
-    myClips = myClips.filter((c) => c.video_id !== video.id);
 
     if (currentVideoId === video.id) {
       currentVideoId = null;
@@ -474,16 +494,16 @@ async function deleteVideo(video) {
       renderVideoList();
     }
 
-    if (typeof window.refreshHomeAfterVideoDelete === "function") {
-      window.refreshHomeAfterVideoDelete();
+    if (typeof window.refreshHomeAfterFilmRemoval === "function") {
+      window.refreshHomeAfterFilmRemoval();
     }
   } catch (error) {
-    console.error("Delete video failed:", error);
-    showMessage("Could not delete video.");
+    console.error("Remove from Film failed:", error);
+    showMessage("Could not remove this video from Film.");
 
     if (deleteBtn) {
       deleteBtn.disabled = false;
-      deleteBtn.textContent = "Delete";
+      deleteBtn.textContent = "Remove from Film";
     }
   }
 }
@@ -981,7 +1001,7 @@ function renderVideoList() {
       const deleteBtn = document.createElement("button");
       deleteBtn.type = "button";
       deleteBtn.className = "video-delete-btn";
-      deleteBtn.textContent = "Delete";
+      deleteBtn.textContent = "Remove from Film";
       deleteBtn.dataset.deleteVideoId = video.id;
 
       deleteBtn.addEventListener("click", (event) => {
@@ -1013,11 +1033,18 @@ function renderVideoList() {
   });
 }
 
+// Team Highlights, Slice 1: prefers the clip's own embedded, authorized
+// clip.video (see clips.js's GET /api/users/:id/clips) over looking the
+// video up in allVideos (the Film-list-filtered array) — a highlight
+// whose source was removed from Film must still jump to and play
+// correctly from here. Falls back to the allVideos lookup only for a
+// clip fetched from somewhere that doesn't embed .video (defensive, not
+// expected on any current call path).
 function jumpToClip(clip) {
   if (!clip) return;
 
   if (clip.video_id !== currentVideoId) {
-    const matchingVideo = allVideos.find((video) => video.id === clip.video_id);
+    const matchingVideo = clip.video || allVideos.find((video) => video.id === clip.video_id);
 
     if (matchingVideo) {
       selectVideo(matchingVideo);

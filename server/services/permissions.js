@@ -512,6 +512,73 @@ async function canViewVideo(userId, video) {
   return canAccessTeam(userId, video.team_id);
 }
 
+// Team Highlights, Slice 1 correction: batched sibling of canViewVideo()
+// for a route resolving MANY videos in one request (GET
+// /api/users/:id/clips) — the per-clip canViewVideo() call the route
+// originally used still issues its own query (is_platform_admin, or
+// canAccessTeam's team_members lookup) for every clip whose video wasn't
+// uploaded by the caller, which is the common case for a team-film
+// highlight clip — a real N+1 the route's own "avoids an N+1 query"
+// comment only ever covered for the video JOIN, not this. Computes the
+// SAME three-branch rule as canViewVideo(), for every video at once, using
+// at most two queries total regardless of how many videos are passed (and
+// zero extra queries if every video is self-uploaded). Must always agree
+// with canViewVideo() for identical inputs — never exposes anything a
+// per-video canViewVideo() call wouldn't have. Returns a Map<video.id,
+// boolean>.
+async function canViewVideosBatch(userId, videos) {
+  const decisions = new Map();
+  if (!userId) {
+    for (const video of videos) decisions.set(video.id, false);
+    return decisions;
+  }
+
+  const needsPlatformAdminCheck = videos.some(
+    (v) => Number(v.uploaded_by) !== Number(userId) && (v.team_id === null || v.team_id === undefined)
+  );
+  const needsTeamCheck = videos.some(
+    (v) => Number(v.uploaded_by) !== Number(userId) && v.team_id !== null && v.team_id !== undefined
+  );
+
+  const [isPlatformAdmin, accessibleTeamIds] = await Promise.all([
+    needsPlatformAdminCheck
+      ? client
+          .query("SELECT is_platform_admin FROM users WHERE id = $1", [userId])
+          .then((result) => result.rows[0]?.is_platform_admin === true)
+      : Promise.resolve(false),
+    needsTeamCheck
+      ? client
+          .query("SELECT team_id FROM team_members WHERE user_id = $1 AND revoked_at IS NULL", [userId])
+          .then((result) => new Set(result.rows.map((row) => row.team_id)))
+      : Promise.resolve(new Set()),
+  ]);
+
+  for (const video of videos) {
+    if (Number(video.uploaded_by) === Number(userId)) {
+      decisions.set(video.id, true);
+    } else if (video.team_id === null || video.team_id === undefined) {
+      decisions.set(video.id, isPlatformAdmin);
+    } else {
+      decisions.set(video.id, accessibleTeamIds.has(video.team_id));
+    }
+  }
+  return decisions;
+}
+
+// Team Highlights, Slice 1 correction: canUploadPersonalFilm() (a global
+// role='coach'-OR-live-coaching-membership check) was removed here before
+// ever being enforced anywhere. The account model it encoded has already
+// been superseded: capabilities are meant to derive entirely from live
+// team membership/relationship and selected team context, never from a
+// permanent global users.role — a person may hold different roles on
+// different teams, a no-team user may still keep private personal media,
+// and Parent/Athlete uploads in a team context are headed to Team
+// Highlights, not this check. Shipping this helper (even inert/unused)
+// would have encoded a rejected model into Slice 1's history for no
+// benefit, since nothing calls it. The real personal-upload capability
+// rule is deferred, to be redesigned alongside the unified-login/Team
+// Highlights work instead.
+
 // The role-escalation fix for POST /api/users/:id/teams: a coach may set
 // any membership, including a coach-level role_on_team, for anyone. A
 // non-coach may only add THEMSELVES, and only with a non-coach role.
@@ -533,6 +600,7 @@ module.exports = {
   canManageTeam,
   canViewTeamRoster,
   canViewVideo,
+  canViewVideosBatch,
   canManageTeamMembership,
   canInitiateDirectMessage,
   isEligibleRecipientPair,

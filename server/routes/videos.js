@@ -10,11 +10,19 @@ const {
   retryClassification,
   retryConversion,
 } = require("../services/videoProcessing");
-const { canDeleteVideo, canViewVideo, canManageTeam, canAccessTeam } = require("../services/permissions");
+const {
+  canDeleteVideo,
+  canViewVideo,
+  canManageTeam,
+  canAccessTeam,
+} = require("../services/permissions");
 const storage = require("../services/storage/storage");
 const { authenticate } = require("../middleware/authenticate");
 const { uploadLimiter } = require("../middleware/rateLimiters");
 const { logSecurityEvent } = require("../services/auditLog");
+const uploadAttempts = require("../services/uploadAttempts");
+const sourceRetention = require("../services/sourceRetention");
+const { withPlaybackStatus } = require("../services/videoPlayback");
 
 const router = express.Router();
 
@@ -33,80 +41,6 @@ const MAX_VIDEO_UPLOAD_MB = Number(process.env.MAX_VIDEO_UPLOAD_MB) || 3072;
 const tempUploadsDir = path.join(__dirname, "../../uploads/.tmp");
 if (!fs.existsSync(tempUploadsDir)) {
   fs.mkdirSync(tempUploadsDir, { recursive: true });
-}
-
-// Playback-fix pass: Render's /uploads disk is ephemeral and has already
-// lost files across a redeploy once (see ARCHITECTURE.md's storage
-// section). Rather than let the player discover that via a 404 mid-play,
-// GET responses check file existence up front so the client can show a
-// clear "unavailable" state instead of attempting playback. Only checked
-// for local /uploads paths — external http(s) URLs are assumed reachable
-// (no outbound request made here). This is the LEGACY path — rows from
-// before the R2 migration, which never got a storage_key and keep using
-// this exact logic indefinitely (see withPlaybackStatus below).
-function isFileAvailable(fileUrl) {
-  if (!fileUrl) return false;
-  if (/^https?:\/\//i.test(fileUrl)) return true;
-
-  const localPath = path.join(__dirname, "../..", fileUrl);
-  return fs.existsSync(localPath);
-}
-
-// Play-First Pipeline: the single source of truth the client renders,
-// replacing the old needs_conversion computed field. Maps the internal
-// processing_status (which still includes legacy values like 'deferred'
-// for historical rows not yet reclassified, and 'queued'/'converting' for
-// the dormant full-transcode path) onto the small, honest vocabulary the
-// UI actually shows — critically, there is no "too large" / unplayable
-// terminal mapping anywhere in this table anymore.
-const PLAYBACK_STATE_BY_PROCESSING_STATUS = {
-  uploading: "uploading",
-  classifying: "preparing_playback",
-  remuxing: "preparing_playback",
-  queued: "preparing_playback",
-  converting: "preparing_playback",
-  processing: "preparing_playback", // legacy/unused value, tolerated by the DB CHECK constraint
-  ready: "playable",
-  transcode_paused: "processing_paused",
-  deferred: "processing_paused", // legacy — pre-migration rows not yet reclassified
-  failed: "failed",
-};
-
-function playbackStateFor(video) {
-  return PLAYBACK_STATE_BY_PROCESSING_STATUS[video.processing_status] || "preparing_playback";
-}
-
-// storage_key IS NOT NULL means this row goes through the storage
-// abstraction (local disk or R2, whichever is active) — a signed/direct
-// URL and a real existence check. NULL means a legacy row: unchanged
-// file_url-based logic, forever, regardless of what STORAGE_PROVIDER is
-// set to today.
-async function withPlaybackStatus(video) {
-  if (video.storage_key) {
-    return {
-      ...video,
-      file_url: await storage.getSignedUrl(video.storage_key),
-      available: await storage.exists(video.storage_key),
-      playback_state: playbackStateFor(video),
-    };
-  }
-
-  return {
-    ...video,
-    available: isFileAvailable(video.file_url),
-    playback_state: playbackStateFor(video),
-  };
-}
-
-function deleteLocalFileIfPresent(fileUrl) {
-  if (!fileUrl || /^https?:\/\//i.test(fileUrl)) return;
-
-  const localPath = path.join(__dirname, "../..", fileUrl);
-  fs.unlink(localPath, (err) => {
-    if (err && err.code !== "ENOENT") {
-      console.error("Failed to delete file:", localPath, err);
-    }
-  });
 }
 
 const tempStorage = multer.diskStorage({
@@ -140,10 +74,35 @@ const upload = multer({
 
 router.get("/api/videos", authenticate, async (req, res) => {
   try {
+    // Team Highlights, Slice 1: the Film library list excludes anything
+    // logically removed from Film (film_removed_at) and anything
+    // destined for Team Highlights instead — that content has its own
+    // dedicated feed (Slice 2) and was never meant to clutter Team Film
+    // Breakdown. GET /api/videos/:id below is deliberately NOT filtered
+    // this way — direct playback (from a Team Highlights post or a clip)
+    // must keep working regardless of Film-list visibility.
+    //
+    // Rollout-safety correction: "upload_destination != 'team_highlights'"
+    // alone silently EXCLUDES a row where upload_destination IS NULL — a
+    // plain "x != y" comparison evaluates to NULL, not TRUE, when x is
+    // NULL, and Postgres's WHERE clause treats NULL as "don't include
+    // this row." During the expand/deploy/contract rollout window (018
+    // applied, new code not deployed yet — see 018's own header),
+    // currently-deployed code's INSERT never sets this column at all, so
+    // every video it creates would silently vanish from the Film list,
+    // including for its own uploader, the instant this migration landed
+    // — found by actually running the full local regression suite against
+    // a legacy-shaped row, not by inspection. NULL can never legitimately
+    // mean 'team_highlights' here (that destination is always explicit,
+    // hard-rejected server-side in Slice 1's own upload route), so it's
+    // always correct to treat it the same as any other non-team_highlights
+    // row.
     const result = await client.query(
       `
       SELECT *
       FROM videos
+      WHERE film_removed_at IS NULL
+        AND (upload_destination IS NULL OR upload_destination != 'team_highlights')
       ORDER BY id DESC
       `
     );
@@ -257,8 +216,29 @@ function uploadDiagnosticMulter(req, res, next) {
 }
 
 router.post("/api/upload-video", authenticate, uploadLimiter, uploadDiagnosticMulter, async (req, res) => {
+  let attempt = null;
+  let leaseToken = null;
+
+  // Multer has already written req.file.path to temp disk by the time
+  // this handler runs, BEFORE any of this route's own validation. Every
+  // early-return path below (invalid destination, unauthorized team_id,
+  // idempotent replay, already-in-progress, the premature
+  // 'team_highlights' rejection, and every other rejection) would
+  // otherwise leak that temp file forever — storage.upload() only ever
+  // cleans it up on the one path that actually reaches it. This finally
+  // block guarantees cleanup on every exit, success or failure alike;
+  // tolerant of "already gone" since storage.upload() itself already
+  // removes the file (R2: unlink after streaming; local: rename, which
+  // also removes the source) on the success path.
   try {
-    const { title, team_id, film_type } = req.body;
+    // req.body can be undefined (not just missing fields) for a request
+    // with no multipart body at all -- a real bug on main too (same
+    // unguarded destructuring at this route), found here by actually
+    // exercising this path for the first time rather than by inspection.
+    // Defaulting to {} lets the real validation below (title, req.file)
+    // produce its intended clean 400 instead of an unhandled 500.
+    const { title, team_id, film_type } = req.body || {};
+    const teamId = team_id || null;
 
     if (!req.file) {
       return res.status(400).json({ error: "No video file uploaded" });
@@ -268,37 +248,100 @@ router.post("/api/upload-video", authenticate, uploadLimiter, uploadDiagnosticMu
       return res.status(400).json({ error: "Missing required upload fields" });
     }
 
-    // Unassigned-video authorization fix: a submitted team_id is no longer
-    // trusted blindly, for ANY uploader role — a client-claimed team_id
-    // used to be written straight to the DB with zero check (the actual
-    // gap this closes; team_id was NEVER validated before this fix, not
-    // even loosely). Deliberately NOT scoped to role === 'coach': the
-    // Record flow (capture.js) lets athletes/parents record for their own
-    // team too, and their team_id must keep working exactly as before.
-    // canAccessTeam() is the right (and only) bar here — an active,
-    // non-revoked team_members row on that exact team, ANY role_on_team —
-    // matching every uploader's own literal claim ("I'm on this team"),
-    // not a coach-specific authority check (that stricter bar is what the
-    // manual Film Room picker's OWN team list is narrowed to client-side;
-    // this server-side check is the universal floor beneath every caller,
-    // picker or Record flow alike). Omitting team_id entirely (Personal
-    // Film) requires no check at all — every authenticated uploader may
-    // always upload unassigned to themselves.
-    //
-    // TRANSITIONAL, scoped deliberately narrow for this security branch:
-    // team_id here is still a single flat destination — it does NOT yet
-    // distinguish a durable Team Highlights post (parent/athlete
-    // contributions) from Team Film Breakdown (coach-managed film). That
-    // split, and its own post/source data model (a Team Highlight post
-    // referencing a source video, revocable independent of the source,
-    // never sharing a row with it), is real future work, intentionally
-    // NOT built here — this fix only closes the "was NEVER validated at
-    // all" gap. Once Team Highlights ships, this check's bar (any active
-    // membership) likely stays as the floor for "targeting this team at
-    // all," with a further per-destination-type check layered on top.
-    if (team_id && !(await canAccessTeam(req.user.id, team_id))) {
+    // Team Highlights, Slice 1: destination is now explicit, not merely
+    // inferred from team_id's presence. A caller MAY send
+    // upload_destination directly (forward-compatible with Slice 3's
+    // real destination picker); a legacy caller that omits it gets the
+    // exact same derivation this route has always used — team_id present
+    // -> 'team_film', absent -> 'personal'. 'team_highlights' is only
+    // ever reachable via an explicit, validated request — no caller can
+    // land there by accident.
+    const requestedDestination = req.body.upload_destination;
+    const uploadDestination = requestedDestination || (teamId ? "team_film" : "personal");
+
+    if (!["personal", "team_film", "team_highlights"].includes(uploadDestination)) {
+      return res.status(400).json({ error: "Invalid upload_destination" });
+    }
+    if (uploadDestination === "personal" && teamId) {
+      return res.status(400).json({ error: "Personal Film cannot specify a team" });
+    }
+    if (uploadDestination !== "personal" && !teamId) {
+      return res.status(400).json({ error: "team_id is required for this destination" });
+    }
+
+    // Team Highlights, Slice 1: 'team_highlights' has no usable workflow
+    // yet — no feed, no publish route, and nothing yet creates the
+    // matching team_highlights post atomically with the video (that's
+    // Slice 2/3's job). Accepting this value now would silently create a
+    // video excluded from the Film list (upload_destination !=
+    // 'team_highlights' filter) with no corresponding post anywhere —
+    // effectively invisible, orphaned content. Rejected outright until
+    // the complete destination workflow ships.
+    if (uploadDestination === "team_highlights") {
+      return res.status(400).json({ error: "Team Highlights uploads are not available yet" });
+    }
+
+    // Unassigned-video authorization fix (team_id validation), still the
+    // universal floor for any team-targeted upload — an active,
+    // non-revoked team_members row on that exact team, ANY role_on_team.
+    // Deliberately not coach-specific here: the Record flow's
+    // athlete/parent uploads to their own team must keep working exactly
+    // as before. A per-destination-type authority check (the
+    // Coach/Assistant-Coach-only bar for 'team_film') is real future work
+    // for Slice 3's client/route changes, not built here.
+    if (teamId && !(await canAccessTeam(req.user.id, teamId))) {
       return res.status(403).json({ error: "You do not have an active membership on that team" });
     }
+
+    // Personal Film upload authorization: no server-side capability check
+    // here yet. A prior Slice 1 draft added canUploadPersonalFilm() (a
+    // global users.role='coach'-or-live-coaching-membership check), but
+    // that account model is already superseded (capabilities should
+    // derive from live team membership/selected team context, not a
+    // permanent global role) and the helper was never enforced anywhere
+    // -- removed rather than shipped inert. The current production
+    // Record flow's "Skip for now" path still lets a Parent/Athlete land
+    // in Personal Film; the real capability rule is deferred to be
+    // redesigned alongside the unified-login/Team Highlights work.
+
+    // Team Highlights, Slice 1: durable idempotency-key claim, BEFORE any
+    // R2 call. idempotency_key is optional for backward compatibility —
+    // a legacy caller (today's uploadVideo()/capture.js, unmodified until
+    // Slice 3) gets a fresh server-generated key per request, which is
+    // exactly today's no-idempotency behavior, not a regression. See
+    // uploadAttempts.js's own header comment for the full state machine.
+    const idempotencyKey = req.body.idempotency_key || crypto.randomUUID();
+
+    const claim = await uploadAttempts.claimOrGetAttempt({
+      userId: req.user.id,
+      idempotencyKey,
+      teamId,
+      uploadDestination,
+    });
+
+    if (claim.alreadyCompleted) {
+      console.log(`[UPLOAD DIAGNOSTIC] idempotent replay: attempt ${claim.attempt.id} already completed`);
+      const existingVideo = await client.query("SELECT * FROM videos WHERE id = $1", [claim.attempt.video_id]);
+      return res.status(201).json(existingVideo.rows[0]);
+    }
+
+    // A replay of a key whose prior upload succeeded but whose resulting
+    // video was later physically purged (sourceRetention.js). Explicit,
+    // final answer -- never silently mints a new upload under this same
+    // key (see uploadAttempts.js's claimOrGetAttempt for why that would be
+    // surprising), and never touches R2/storage or creates any row.
+    if (claim.sourcePurged) {
+      return res.status(410).json({
+        error: "The video this upload previously produced was already removed and is no longer available.",
+      });
+    }
+
+    if (claim.inProgress) {
+      return res.status(409).json({ error: "An upload with this request is already in progress" });
+    }
+
+    attempt = claim.attempt;
+    leaseToken = attempt.lease_token;
 
     // TEMPORARY diagnostic (native-recording 500 investigation): only
     // req.file's own safe metadata fields — never file bytes, never
@@ -314,38 +357,96 @@ router.post("/api/upload-video", authenticate, uploadLimiter, uploadDiagnosticMu
     // migration of old rows, only where new ones land.
     //
     // Opaque key refinement: no original filename in the key — just an
-    // organizational prefix (team/year) and a random UUID. team_id is
-    // optional (the manual coach-upload path still doesn't collect one),
-    // hence "unassigned" as a stable fallback segment rather than
-    // conditionally omitting a path level.
+    // organizational prefix (team/year) and a random UUID.
     const extension = storage.extensionFor("video", req.file.mimetype);
     const year = new Date().getFullYear();
-    const teamSegment = team_id || "unassigned";
+    const teamSegment = teamId || "unassigned";
     const storageKey = `videos/${teamSegment}/${year}/${crypto.randomUUID()}${extension}`;
 
+    // Persisted BEFORE the R2 call — from this point on, every possible
+    // R2 object this attempt could produce has a durable, discoverable
+    // key even if the process crashes mid-upload.
+    attempt = await uploadAttempts.persistUploadingState(attempt.id, leaseToken, storageKey);
+
+    // Real progress-driven lease renewal, not just the fixed initial
+    // lease window — wired through storage.js's provider-neutral
+    // onProgress hook to r2Storage's actual httpUploadProgress event.
+    // Throttled (at most once per HEARTBEAT_MIN_INTERVAL_MS) since a
+    // large multipart transfer can emit many progress events per second.
+    // Fire-and-forget by necessity (the SDK's progress event is
+    // synchronous; renewLease() is a DB call) — correctness does NOT
+    // depend on this actually running or succeeding: persistUploadingState/
+    // markR2Uploaded/completeAttempt all independently re-check the lease
+    // token via their own WHERE clauses regardless, so a missed or failed
+    // heartbeat can only ever cause an earlier, correctly-fenced failure
+    // downstream, never a stale advancement. leaseFenced is set purely as
+    // a fast-fail signal to avoid finishing an upload already known to be
+    // reclaimed; actually aborting the in-flight R2 transfer on fence loss
+    // is not implemented in this slice (would need storage.upload() to
+    // expose a real abort handle, a further interface change) — flagged,
+    // not silently assumed solved.
+    const HEARTBEAT_MIN_INTERVAL_MS = 15 * 1000;
+    let lastHeartbeatAttemptAt = 0;
+    let leaseFenced = false;
+
     console.log("[UPLOAD DIAGNOSTIC] storage/R2 upload started");
-    await storage.upload(storageKey, req.file.path, req.file.mimetype, { category: "video" });
+    await storage.upload(storageKey, req.file.path, req.file.mimetype, {
+      category: "video",
+      onProgress: () => {
+        const now = Date.now();
+        if (now - lastHeartbeatAttemptAt < HEARTBEAT_MIN_INTERVAL_MS) return;
+        lastHeartbeatAttemptAt = now;
+
+        uploadAttempts
+          .renewLease(attempt.id, leaseToken)
+          .then((renewed) => {
+            if (!renewed) {
+              leaseFenced = true;
+              console.error(`[UPLOAD DIAGNOSTIC] lease renewal failed mid-upload for attempt ${attempt.id} — already reclaimed`);
+            }
+          })
+          .catch((error) => {
+            console.error(`[UPLOAD DIAGNOSTIC] lease renewal errored mid-upload for attempt ${attempt.id}:`, error.message);
+          });
+      },
+    });
     console.log("[UPLOAD DIAGNOSTIC] storage/R2 upload completed");
+
+    if (leaseFenced) {
+      const fencedError = new Error("Lost ownership of this upload attempt (lease expired or reclaimed)");
+      fencedError.code = "LEASE_LOST";
+      throw fencedError;
+    }
+
+    attempt = await uploadAttempts.markR2Uploaded(attempt.id, leaseToken);
 
     // Foundation Sprint Phase 1: team_id/film_type are now real columns —
     // capture.js sends them directly instead of Sprint 1's workaround of
     // folding them into the title string. Both stay optional since the
     // manual coach upload path still doesn't collect either.
-    // Startup conversion recovery needs a stranded video's original size
-    // without a network round-trip (see videoProcessing.js's
-    // recoverStrandedConversions()) — multer already has it on req.file,
-    // same as the deferred-cap decision just below, so it's stored for
-    // free here rather than recomputed later.
     console.log("[UPLOAD DIAGNOSTIC] DB insert started");
-    const inserted = await client.query(
-      `
-      INSERT INTO videos (title, storage_key, uploaded_by, processing_status, team_id, film_type, source_size_bytes)
-      VALUES ($1, $2, $3, 'uploading', $4, $5, $6)
-      RETURNING *
-      `,
-      [title, storageKey, req.user.id, team_id || null, film_type || null, req.file.size]
-    );
-    console.log(`[UPLOAD DIAGNOSTIC] DB insert completed: video id=${inserted.rows[0].id}`);
+    let video;
+    let teamHighlight;
+    try {
+      ({ video, teamHighlight } = await uploadAttempts.completeAttempt(attempt.id, leaseToken, {
+        title,
+        storageKey,
+        userId: req.user.id,
+        teamId,
+        uploadDestination,
+        filmType: film_type || null,
+        fileSize: req.file.size,
+      }));
+    } catch (completeError) {
+      if (completeError.code !== "LEASE_LOST") {
+        // The R2 object already exists at this point but nothing in the
+        // DB references it — immediate, best-effort cleanup attempt now,
+        // durable cleanup_pending record if that also fails.
+        await uploadAttempts.handleCompletionFailureCleanup(attempt.id, leaseToken, storageKey);
+      }
+      throw completeError;
+    }
+    console.log(`[UPLOAD DIAGNOSTIC] DB insert completed: video id=${video.id}`);
 
     // Foundation Sprint Phase 3: this route now only receives the upload —
     // it responds immediately instead of blocking on processing. The
@@ -358,22 +459,103 @@ router.post("/api/upload-video", authenticate, uploadLimiter, uploadDiagnosticMu
     // size plays no part in this decision. See classifyAndRoute() in
     // videoProcessing.js for the playable/remux/transcode_needed routing.
     console.log("[UPLOAD DIAGNOSTIC] processing/classification enqueue started");
-    classifyAndRouteAsync(inserted.rows[0]);
+    classifyAndRouteAsync(video);
 
     console.log("[UPLOAD DIAGNOSTIC] response 201 sent");
-    res.status(201).json(inserted.rows[0]);
+    res.status(201).json(video);
   } catch (err) {
+    if (err.code === "LEASE_LOST") {
+      // Ownership of this attempt was reclaimed (the sweeper decided it
+      // was abandoned) while this request was still working — never mark
+      // it failed ourselves, that would race whatever the reclaiming
+      // process is doing. Report a clear, retriable error instead.
+      console.error(`[UPLOAD DIAGNOSTIC] lease lost mid-upload for attempt ${attempt ? attempt.id : "?"}`);
+      return res.status(409).json({ error: "This upload took too long and was reclaimed — please retry" });
+    }
+
+    if (attempt && leaseToken) {
+      await uploadAttempts.markFailed(attempt.id, leaseToken, err.message).catch(() => {});
+    }
     console.error(
       `[UPLOAD DIAGNOSTIC] route handler caught: name=${err.name} code=${err.code || "(none)"} message=${err.message}`
     );
     console.error("POST /api/upload-video error:", err);
     res.status(500).json({ error: "Failed to upload video" });
+  } finally {
+    if (req.file && req.file.path) {
+      fs.unlink(req.file.path, (unlinkErr) => {
+        if (unlinkErr && unlinkErr.code !== "ENOENT") {
+          console.error("[UPLOAD DIAGNOSTIC] failed to clean up temp file:", req.file.path, unlinkErr);
+        }
+      });
+    }
   }
 });
 
-// Video-delete pass, hardened in Beta Readiness Sprint 2: identity now
-// comes from the verified JWT (req.user.id), not a client-supplied body
-// field. Authorization logic (uploader-or-coach) is unchanged.
+// Team Highlights, Slice 1: "Remove from Film" — logically hides a source
+// from the Film library without touching its row or R2 object. This is
+// the ONLY removal action the normal Film UI exposes; there is no
+// "Delete Permanently" control anywhere in the client for this feature.
+// Same authorization as physical deletion below (nothing is being
+// destroyed, so there's no reference-count guard to apply here) — marks
+// the source for purge reevaluation IN THE SAME TRANSACTION as the
+// removal itself, so the cleanup request can never be silently lost even
+// if a separate follow-up write would have failed. The sweeper (not this
+// request) decides later whether anything still depends on this source;
+// an active Film source that was never removed is never touched by that
+// process no matter how many or how few clips/highlights it has.
+router.patch("/api/videos/:id/film-removal", authenticate, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const videoResult = await client.query("SELECT * FROM videos WHERE id = $1", [id]);
+    const video = videoResult.rows[0];
+
+    if (!video) {
+      return res.status(404).json({ error: "Video not found" });
+    }
+
+    if (!(await canDeleteVideo(req.user.id, id))) {
+      return res.status(403).json({ error: "Not authorized to remove this video from Film" });
+    }
+
+    if (video.film_removed_at) {
+      return res.json(await withPlaybackStatus(video)); // idempotent no-op
+    }
+
+    const updated = await client.query(
+      `
+      UPDATE videos
+      SET film_removed_at = now(), film_removed_by = $1, purge_reevaluation_requested_at = now()
+      WHERE id = $2
+      RETURNING *
+      `,
+      [req.user.id, id]
+    );
+
+    await logSecurityEvent("video_film_removed", {
+      userId: req.user.id,
+      ip: req.ip,
+      metadata: { videoId: Number(id), uploadedBy: video.uploaded_by },
+    });
+
+    res.json(await withPlaybackStatus(updated.rows[0]));
+  } catch (err) {
+    console.error("PATCH /api/videos/:id/film-removal error:", err);
+    res.status(500).json({ error: "Failed to remove video from Film" });
+  }
+});
+
+// Physical deletion — genuine, permanent removal of the R2 object(s) and
+// the videos row. Kept deliberately meaning exactly that (not redefined
+// into a soft action) so a 409 here reads as the natural, expected "can't
+// delete, here's why" response rather than a silently changed contract.
+// No normal-user UI control in this feature calls this route at all —
+// real cleanup happens automatically via the reevaluation/sweeper path
+// (see sourceRetention.js), triggered by film-removal above or (Slice 2)
+// a Team Highlight post's removal. This route remains reachable directly
+// (uploader or Platform Admin, same authorization as before) for
+// administrative/scripted use, exercised by this slice's own tests.
 router.delete("/api/videos/:id", authenticate, async (req, res) => {
   try {
     const { id } = req.params;
@@ -391,44 +573,30 @@ router.delete("/api/videos/:id", authenticate, async (req, res) => {
       return res.status(403).json({ error: "Not authorized to delete this video" });
     }
 
-    const conn = await client.connect();
+    const result = await sourceRetention.attemptPurge(id, req.user.id);
 
-    try {
-      await conn.query("BEGIN");
-      await conn.query("DELETE FROM clips WHERE video_id = $1", [id]);
-      await conn.query("DELETE FROM videos WHERE id = $1", [id]);
-      await conn.query("COMMIT");
-    } catch (txError) {
-      await conn.query("ROLLBACK");
-      throw txError;
-    } finally {
-      conn.release();
+    if (result.outcome === "not_found") {
+      return res.status(404).json({ error: "Video not found" });
     }
 
-    // Best-effort — the file may already be missing (that's often exactly
-    // why this endpoint is being called), which isn't a deletion failure.
-    // storage_key rows go through the active storage provider; legacy
-    // rows (storage_key NULL) keep using the local-disk-only path.
-    if (video.storage_key) {
-      await storage.remove(video.storage_key);
-    } else {
-      deleteLocalFileIfPresent(video.file_url);
+    if (result.outcome === "already_pending") {
+      return res.status(409).json({ error: "This video is already being deleted" });
     }
 
-    // Beta Stabilization Sprint: a converted video also has a retained
-    // original (source_storage_key) — both objects belong to the same
-    // video and must go together, never left orphaned in R2.
-    if (video.source_storage_key && video.source_storage_key !== video.storage_key) {
-      await storage.remove(video.source_storage_key);
+    if (result.outcome === "blocked") {
+      return res.status(409).json({
+        error: `Cannot delete this video: ${result.activePosts} Team Highlight post(s) and ${result.unmaterializedClips} clip(s) still depend on it`,
+        activePosts: result.activePosts,
+        unmaterializedClips: result.unmaterializedClips,
+      });
     }
 
-    deleteLocalFileIfPresent(video.thumbnail_url);
-
-    await logSecurityEvent("video_deleted", {
-      userId: req.user.id,
-      ip: req.ip,
-      metadata: { videoId: Number(id), uploadedBy: video.uploaded_by },
-    });
+    if (result.outcome === "r2_delete_failed") {
+      // The video is durably marked purge_pending and will be retried by
+      // the sweeper — not a request failure from the caller's point of
+      // view, but not yet actually gone either.
+      return res.status(202).json({ success: true, id: Number(id), pending: true });
+    }
 
     res.json({ success: true, id: Number(id) });
   } catch (err) {

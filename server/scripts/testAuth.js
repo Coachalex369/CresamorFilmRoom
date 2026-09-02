@@ -42,6 +42,14 @@ async function req(path, { method = "GET", token, body, isForm } = {}) {
   const headers = {};
   if (token) headers.Authorization = `Bearer ${token}`;
   if (body && !isForm) headers["Content-Type"] = "application/json";
+  // Correction: lets the server (only when it's already running with
+  // ALLOW_PRODUCTION_TESTS=true, per testCorrelationMetadata()'s own
+  // server-side gate in auditLog.js) tag any resulting security_audit_log
+  // row's metadata with this run's own RUN_TAG, so cleanup can find and
+  // delete exactly the rows this run created -- never a watermark, time
+  // range, or event-type/IP pattern that a genuine concurrent anonymous
+  // event could also match.
+  headers["X-Test-Correlation-Id"] = RUN_TAG;
 
   const response = await fetch(`${BASE_URL}${path}`, {
     method,
@@ -219,6 +227,14 @@ async function main() {
     assert("uploader/coach can delete per policy", coachDelete.status === 200);
     if (coachDelete.status === 200) created.videoIds = created.videoIds.filter((id) => id !== teamVideo.rows[0].id);
 
+    // Team Highlights, Slice 1: DELETE /api/videos/:id now routes through
+    // sourceRetention.js's attemptPurge/finalizePurge, which briefly
+    // renamed this audit event to 'video_purged' during that rewrite --
+    // reverted to the established 'video_deleted' name (no proven
+    // production requirement for the rename; an internal terminology
+    // preference isn't reason enough to break an externally meaningful
+    // event-type contract). This assertion is unchanged from before Team
+    // Highlights.
     const auditedDelete = await client.query(
       "SELECT * FROM security_audit_log WHERE event_type = 'video_deleted' AND user_id = $1 ORDER BY id DESC LIMIT 1",
       [coach.user.id]
@@ -405,12 +421,43 @@ async function main() {
         await client.query("DELETE FROM clips WHERE user_id = $1", [id]);
         await client.query("DELETE FROM team_members WHERE user_id = $1", [id]);
         await client.query("DELETE FROM videos WHERE uploaded_by = $1", [id]);
+        // Team Highlights, Slice 1: upload_attempts.user_id has no ON
+        // DELETE behavior (deliberately durable/historical, unlike
+        // videos/clips/team_highlights' own FKs) -- a user who exercised
+        // the real upload route (this script's own bearer-auth upload
+        // test does) now always leaves one behind. Found by actually
+        // running this script locally: cleanup failed on
+        // upload_attempts_user_id_fkey the first time this ran after
+        // Team Highlights landed.
+        await client.query("DELETE FROM upload_attempts WHERE user_id = $1", [id]);
         await client.query("DELETE FROM users WHERE id = $1", [id]);
       }
       await client.query(
         "DELETE FROM security_audit_log WHERE metadata->>'email' LIKE $1",
         [`${RUN_TAG}%`]
       );
+      // Exact-ID cleanup for this run's own NULL-user_id audit rows
+      // (missing/invalid/expired/deleted-user token, rate limiting) --
+      // every request req() makes carries an X-Test-Correlation-Id header
+      // set to this run's RUN_TAG; authenticate.js/rateLimiters.js tag the
+      // resulting audit row's metadata with it (only when this server is
+      // already running with ALLOW_PRODUCTION_TESTS=true -- see
+      // testCorrelationMetadata() in auditLog.js). This looks those exact
+      // rows back up by that tag and deletes precisely those ids -- never
+      // a watermark, time range, or event-type/IP pattern that could also
+      // match a genuine concurrent anonymous event. Every user_id-having
+      // row this run created is already covered by the per-user loop
+      // above.
+      const correlatedAuditRows = await client.query(
+        "SELECT id FROM security_audit_log WHERE metadata->>'testCorrelationId' = $1",
+        [RUN_TAG]
+      );
+      if (correlatedAuditRows.rows.length > 0) {
+        await client.query(
+          "DELETE FROM security_audit_log WHERE id = ANY($1::int[])",
+          [correlatedAuditRows.rows.map((r) => r.id)]
+        );
+      }
       console.log("Cleanup complete.");
     } catch (cleanupError) {
       console.error("Cleanup encountered an error (may need manual follow-up):", cleanupError);

@@ -80,7 +80,17 @@ function isAllowed(category, contentType) {
   return Boolean(allowedTypesFor(category)[normalizeContentType(contentType)]);
 }
 
-async function upload(key, filePath, contentType, { category } = {}) {
+// Team Highlights, Slice 1: onProgress (optional) is a provider-neutral
+// hook, ({ loadedBytes, totalBytes }) => void, called as upload progress
+// is observed — currently only meaningfully invoked by r2Storage (its
+// underlying @aws-sdk/lib-storage Upload already emits real
+// httpUploadProgress events for a multipart transfer); localStorage's
+// single fs.rename() has no intermediate progress to report and simply
+// never calls it, which is a valid, harmless no-op for any caller.
+// Exists so a long-running upload's lease can be renewed on genuine
+// progress, not just relying on the upload-attempt's initial fixed
+// lease window to cover a legitimately large file end-to-end.
+async function upload(key, filePath, contentType, { category, onProgress } = {}) {
   const allowed = allowedTypesFor(category);
   const normalized = normalizeContentType(contentType);
 
@@ -92,7 +102,7 @@ async function upload(key, filePath, contentType, { category } = {}) {
     );
   }
 
-  return provider.upload(key, filePath, contentType);
+  return provider.upload(key, filePath, contentType, { onProgress });
 }
 
 module.exports = {
