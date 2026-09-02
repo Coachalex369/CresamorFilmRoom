@@ -65,6 +65,30 @@ async function registerUser(email, role) {
   return data;
 }
 
+// Production smoke test correction: earlier runs of this suite only ever
+// sent fake bytes (new Uint8Array(...)) through the upload route -- fine
+// for proving auth/validation, but the smoke-test spec explicitly calls
+// for "a very small valid MP4" through the real route. Same ffmpeg-based
+// generation testVideoClassification.js already uses locally; ffmpeg is
+// required on PATH for this specific check (Render has it preinstalled
+// per videoConversion.js's header, but this generation step itself runs
+// on whatever machine executes this script).
+async function generateTinyValidMp4() {
+  const path = require("path");
+  const os = require("os");
+  const { execFile } = require("child_process");
+  const { promisify } = require("util");
+  const execFileAsync = promisify(execFile);
+  const outPath = path.join(os.tmpdir(), `${RUN_TAG}-smoke-valid.mp4`);
+  await execFileAsync("ffmpeg", [
+    "-y", "-f", "lavfi", "-i", "testsrc=duration=1:size=320x240:rate=15",
+    "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+    "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+    outPath,
+  ]);
+  return outPath;
+}
+
 // Directly inserts a bare "source" row (no real R2 object) — sufficient
 // for every test that exercises permission/reference-counting/constraint
 // logic without needing an actual uploaded file. Tests that specifically
@@ -116,18 +140,50 @@ function checkRemoveFromFilmCopy() {
 async function main() {
   checkRemoveFromFilmCopy();
 
-  // anonymousPurgeVideoIds: exact-ID cleanup tracking for this suite's own
-  // NULL-user_id 'video_deleted' audit rows. These calls are direct JS
-  // function calls (sweepPurgeReevaluations, or finalizePurge called
-  // directly with no actingUserId), not HTTP requests -- there's no
-  // request to attach a test-correlation header to, unlike testAuth.js/
-  // testInvitations.js. finalizePurge() already puts the exact videoId in
-  // the audit row's own metadata, so pushing each purged video's id here,
-  // at the exact point its purge is confirmed, lets cleanup look those
-  // specific rows back up by metadata->>'videoId' and delete precisely
-  // those ids -- never a watermark/time range/pattern.
-  const created = { userIds: [], teamIds: [], videoIds: [], attemptIds: [], r2Keys: [], anonymousPurgeVideoIds: [] };
+  // allFixtureVideoIds: PERMANENT record of every video id this run ever
+  // creates, regardless of whether it's later purged and removed from
+  // created.videoIds (the "still needs a DELETE in cleanup" list).
+  //
+  // Correction: the prior approach (anonymousPurgeVideoIds) tried to
+  // remember, one at a time, which specific purge calls were "anonymous"
+  // (no actingUserId) and manually push just that video's id right after
+  // confirming it purged. That was fragile in a way a production run
+  // actually exposed: sweepPurgeReevaluations() is a BATCH operation --
+  // one call processes EVERY video currently eligible (purge_reevaluation_
+  // requested_at set, purge_status='active'), not just the one video the
+  // surrounding test code happens to be about at that moment. filmVideo
+  // (created and film-removed early, in the film-removal state-machine
+  // section, with zero clips/posts ever attached to it) was never
+  // expected to be physically purged by this script at all -- but by the
+  // time the FIRST sweepPurgeReevaluations() call runs (written to target
+  // reevalVideo, much later), filmVideo already has purge_reevaluation_
+  // requested_at set and zero references, so that same sweep call swept
+  // it up too. Its resulting 'video_deleted' audit row (NULL user_id,
+  // metadata.videoId = filmVideo.id) was never tracked anywhere, and
+  // leaked past cleanup in the first production run -- found, and fixed
+  // by exact-id deletion, in a follow-up review.
+  //
+  // The fix: stop trying to predict which specific call will purge which
+  // specific video. Track every video id this run EVER creates, and at
+  // cleanup time, correlate 'video_deleted' audit rows against that
+  // complete set (regardless of user_id -- a real-actingUserId purge's
+  // row is also already covered by the per-user cleanup loop, so matching
+  // both is redundant-but-harmless there and correct here), then delete
+  // by exact id. No batch operation can ever purge a video this run
+  // didn't itself create, so this is complete by construction, not by
+  // remembering to update a list every time a new purge path is added.
+  const created = { userIds: [], teamIds: [], videoIds: [], attemptIds: [], r2Keys: [], allFixtureVideoIds: [] };
   const server = app.listen(PORT);
+  let validMp4Path; // declared here, not inside try, so the finally block can always reach it
+
+  // Every video this run creates goes through this single function --
+  // used in place of "created.videoIds.push(id)" everywhere below, so
+  // allFixtureVideoIds can never drift out of sync with videoIds by a
+  // forgotten call site.
+  function trackVideo(id) {
+    created.videoIds.push(id);
+    created.allFixtureVideoIds.push(id);
+  }
 
   try {
     // coachNoTeam (a global-role-coach-with-zero-teams fixture) was
@@ -217,7 +273,7 @@ async function main() {
     // Film-removal (soft), transactional with reevaluation marking
     // ============================================================
     const filmVideo = await insertBareVideo({ uploadedBy: coachWithTeam.user.id });
-    created.videoIds.push(filmVideo.id);
+    trackVideo(filmVideo.id);
 
     const outsiderRemoveAttempt = await req(`/api/videos/${filmVideo.id}/film-removal`, { method: "PATCH", token: outsiderAthlete.token });
     assert("unrelated user cannot Remove from Film", outsiderRemoveAttempt.status === 403);
@@ -251,7 +307,7 @@ async function main() {
     // lookup against the Film list.
     // ============================================================
     const reelSourceVideo = await insertBareVideo({ uploadedBy: coachWithTeam.user.id });
-    created.videoIds.push(reelSourceVideo.id);
+    trackVideo(reelSourceVideo.id);
 
     const reelClipCreate = await req("/api/clips", {
       method: "POST",
@@ -313,7 +369,7 @@ async function main() {
     // Physical purge — direct, zero references
     // ============================================================
     const cleanVideo = await insertBareVideo({ uploadedBy: coachWithTeam.user.id });
-    created.videoIds.push(cleanVideo.id);
+    trackVideo(cleanVideo.id);
     const purgeCleanResult = await sourceRetention.attemptPurge(cleanVideo.id, coachWithTeam.user.id);
     assert("attemptPurge on a zero-reference video succeeds", purgeCleanResult.outcome === "purged");
     const cleanVideoGone = await client.query("SELECT id FROM videos WHERE id = $1", [cleanVideo.id]);
@@ -324,7 +380,7 @@ async function main() {
     // Physical purge — blocked by an active clip
     // ============================================================
     const clippedVideo = await insertBareVideo({ uploadedBy: coachWithTeam.user.id });
-    created.videoIds.push(clippedVideo.id);
+    trackVideo(clippedVideo.id);
     const clipResult = await req("/api/clips", {
       method: "POST",
       token: coachWithTeam.token,
@@ -355,7 +411,7 @@ async function main() {
     // and upload_attempts survives via ON DELETE SET NULL
     // ============================================================
     const highlightedVideo = await insertBareVideo({ uploadedBy: coachWithTeam.user.id, teamId: team.id, uploadDestination: "team_highlights" });
-    created.videoIds.push(highlightedVideo.id);
+    trackVideo(highlightedVideo.id);
     const highlightInsert = await client.query(
       "INSERT INTO team_highlights (video_id, team_id, created_by) VALUES ($1, $2, $3) RETURNING *",
       [highlightedVideo.id, team.id, coachWithTeam.user.id]
@@ -397,7 +453,7 @@ async function main() {
     // Race-safe locking: a concurrent clip-creation vs. purge attempt
     // ============================================================
     const raceVideo = await insertBareVideo({ uploadedBy: coachWithTeam.user.id });
-    created.videoIds.push(raceVideo.id);
+    trackVideo(raceVideo.id);
 
     const [raceClipResult, racePurgeResult] = await Promise.all([
       req("/api/clips", { method: "POST", token: coachWithTeam.token, body: { title: "race clip", start_time: 0, end_time: 1, video_id: raceVideo.id } }),
@@ -424,20 +480,22 @@ async function main() {
     // R2-already-absent finalization is idempotent
     // ============================================================
     const r2Video = await insertBareVideo({ uploadedBy: coachWithTeam.user.id });
-    created.videoIds.push(r2Video.id);
+    trackVideo(r2Video.id);
     // Manually flip to purge_pending (skipping the lock/count phase,
     // simulating "R2 already deleted, DB delete failed last time").
     await client.query("UPDATE videos SET purge_status = 'purge_pending' WHERE id = $1", [r2Video.id]);
     const finalizeOnAlreadyAbsent = await sourceRetention.finalizePurge(r2Video.id);
     assert("finalizePurge succeeds even when the R2 object never existed (idempotent-absent path)", finalizeOnAlreadyAbsent.outcome === "purged");
     created.videoIds = created.videoIds.filter((id) => id !== r2Video.id);
-    if (finalizeOnAlreadyAbsent.outcome === "purged") created.anonymousPurgeVideoIds.push(r2Video.id);
+    // No manual anonymousPurgeVideoIds tracking needed -- r2Video.id is
+    // already permanently recorded in allFixtureVideoIds via trackVideo()
+    // at creation, and cleanup correlates against that full set.
 
     // ============================================================
     // Async reevaluation: film-removal -> sweeper -> purge_pending
     // ============================================================
     const reevalVideo = await insertBareVideo({ uploadedBy: coachWithTeam.user.id });
-    created.videoIds.push(reevalVideo.id);
+    trackVideo(reevalVideo.id);
     await req(`/api/videos/${reevalVideo.id}/film-removal`, { method: "PATCH", token: coachWithTeam.token });
 
     const sweepResult1 = await sourceRetention.sweepPurgeReevaluations();
@@ -446,12 +504,20 @@ async function main() {
     const reevalVideoGone = await client.query("SELECT id FROM videos WHERE id = $1", [reevalVideo.id]);
     assert("a zero-reference film-removed video is fully purged by the sweeper", reevalVideoGone.rows.length === 0);
     created.videoIds = created.videoIds.filter((id) => id !== reevalVideo.id);
-    if (reevalVideoGone.rows.length === 0) created.anonymousPurgeVideoIds.push(reevalVideo.id);
+    // Root cause of the leaked audit row (production run, corrected here):
+    // this sweep call processes EVERY currently-eligible video, not just
+    // reevalVideo -- filmVideo (film-removed earlier, zero references,
+    // never expected to reach physical purge) was swept up by this exact
+    // call too, and its audit row went untracked under the old approach.
+    // No manual per-call tracking needed now -- every video this run
+    // creates, including filmVideo, is already in allFixtureVideoIds via
+    // trackVideo(), so cleanup below correlates against the complete set
+    // regardless of which call actually did the purging.
 
     // Negative case: an ACTIVE (never removed) video with zero clips/posts
     // must NEVER be touched, even after a sweep pass.
     const untouchedVideo = await insertBareVideo({ uploadedBy: coachWithTeam.user.id });
-    created.videoIds.push(untouchedVideo.id);
+    trackVideo(untouchedVideo.id);
     await sourceRetention.sweepPurgeReevaluations();
     const untouchedStillThere = await client.query("SELECT id, purge_status FROM videos WHERE id = $1", [untouchedVideo.id]);
     assert(
@@ -461,7 +527,7 @@ async function main() {
 
     // Reevaluation with a reference remaining -> flag cleared, video retained.
     const retainedVideo = await insertBareVideo({ uploadedBy: coachWithTeam.user.id });
-    created.videoIds.push(retainedVideo.id);
+    trackVideo(retainedVideo.id);
     await req("/api/clips", { method: "POST", token: coachWithTeam.token, body: { title: "keeps it alive", start_time: 0, end_time: 1, video_id: retainedVideo.id } });
     await req(`/api/videos/${retainedVideo.id}/film-removal`, { method: "PATCH", token: coachWithTeam.token });
     await sourceRetention.sweepPurgeReevaluations();
@@ -477,7 +543,7 @@ async function main() {
     // Duplicate active Team Highlight post prevention + republish
     // ============================================================
     const dupVideo = await insertBareVideo({ uploadedBy: coachWithTeam.user.id, teamId: team.id, uploadDestination: "team_highlights" });
-    created.videoIds.push(dupVideo.id);
+    trackVideo(dupVideo.id);
     await client.query("INSERT INTO team_highlights (video_id, team_id, created_by) VALUES ($1, $2, $3)", [dupVideo.id, team.id, coachWithTeam.user.id]);
 
     let rejectedDuplicateActive = false;
@@ -532,7 +598,7 @@ async function main() {
       filmType: null,
       fileSize: 100,
     });
-    created.videoIds.push(completedVideo.id);
+    trackVideo(completedVideo.id);
 
     const replayClaim = await uploadAttempts.claimOrGetAttempt({ userId: coachWithTeam.user.id, idempotencyKey: idemKey1, teamId: null, uploadDestination: "personal" });
     assert("idempotent replay of a COMPLETED attempt returns the existing result, not a fresh claim", replayClaim.alreadyCompleted === true && Number(replayClaim.attempt.video_id) === Number(completedVideo.id));
@@ -666,8 +732,255 @@ async function main() {
     assert("the sweeper deletes the real, abandoned R2 object", realObjectGoneAfterSweep === false);
     created.r2Keys = created.r2Keys.filter((k) => k !== realKey); // already cleaned by the sweeper
 
+    // ============================================================
+    // Production smoke test: a real, valid MP4 through the real legacy
+    // upload route (no upload_destination/idempotency_key sent -- the
+    // exact shape capture.js/recordingPipeline.js/app.js's uploadVideo()
+    // still send). Personal (no team_id) and team_film (team_id set).
+    // ============================================================
+    validMp4Path = await generateTinyValidMp4();
+
+    const personalForm = new FormData();
+    personalForm.append("video", new Blob([await require("fs").promises.readFile(validMp4Path)], { type: "video/mp4" }), "smoke-personal.mp4");
+    personalForm.append("title", `${RUN_TAG}_smoke_personal`);
+    const personalUploadRes = await req("/api/upload-video", { method: "POST", token: coachWithTeam.token, body: personalForm, isForm: true });
+    assert("real valid MP4, no team_id -> upload succeeds (201)", personalUploadRes.status === 201, `status=${personalUploadRes.status}`);
+    if (personalUploadRes.status === 201) trackVideo(personalUploadRes.data.id);
+    assert(
+      "personal upload: upload_destination is non-NULL and correct ('personal')",
+      personalUploadRes.data && personalUploadRes.data.upload_destination === "personal"
+    );
+    assert("personal upload: team_id is NULL", personalUploadRes.data && personalUploadRes.data.team_id === null);
+    const personalVideoRows = await client.query("SELECT id FROM videos WHERE title = $1", [`${RUN_TAG}_smoke_personal`]);
+    assert("personal upload: exactly one video row was created", personalVideoRows.rows.length === 1);
+
+    const teamFilmForm = new FormData();
+    teamFilmForm.append("video", new Blob([await require("fs").promises.readFile(validMp4Path)], { type: "video/mp4" }), "smoke-teamfilm.mp4");
+    teamFilmForm.append("title", `${RUN_TAG}_smoke_teamfilm`);
+    teamFilmForm.append("team_id", team.id);
+    const teamFilmUploadRes = await req("/api/upload-video", { method: "POST", token: coachWithTeam.token, body: teamFilmForm, isForm: true });
+    assert("real valid MP4, with team_id -> upload succeeds (201)", teamFilmUploadRes.status === 201, `status=${teamFilmUploadRes.status}`);
+    if (teamFilmUploadRes.status === 201) trackVideo(teamFilmUploadRes.data.id);
+    assert(
+      "team_film upload: upload_destination is non-NULL and correct ('team_film')",
+      teamFilmUploadRes.data && teamFilmUploadRes.data.upload_destination === "team_film"
+    );
+    assert(
+      "team_film upload: team_id matches the submitted team",
+      teamFilmUploadRes.data && Number(teamFilmUploadRes.data.team_id) === Number(team.id)
+    );
+    const teamFilmVideoRows = await client.query("SELECT id FROM videos WHERE title = $1", [`${RUN_TAG}_smoke_teamfilm`]);
+    assert("team_film upload: exactly one video row was created", teamFilmVideoRows.rows.length === 1);
+
+    // team_id relationship enforcement: personal explicitly WITH a
+    // team_id, and a non-personal destination with NO team_id, must both
+    // be rejected by the real route (not merely the DB constraint).
+    const badPersonalForm = new FormData();
+    badPersonalForm.append("video", new Blob([new Uint8Array(100)], { type: "video/mp4" }), "bad-personal.mp4");
+    badPersonalForm.append("title", `${RUN_TAG}_smoke_bad_personal`);
+    badPersonalForm.append("team_id", team.id);
+    badPersonalForm.append("upload_destination", "personal");
+    const badPersonalRes = await req("/api/upload-video", { method: "POST", token: coachWithTeam.token, body: badPersonalForm, isForm: true });
+    assert("route rejects upload_destination=personal WITH a team_id", badPersonalRes.status === 400, `status=${badPersonalRes.status}`);
+
+    const badTeamFilmForm = new FormData();
+    badTeamFilmForm.append("video", new Blob([new Uint8Array(100)], { type: "video/mp4" }), "bad-teamfilm.mp4");
+    badTeamFilmForm.append("title", `${RUN_TAG}_smoke_bad_teamfilm`);
+    badTeamFilmForm.append("upload_destination", "team_film");
+    const badTeamFilmRes = await req("/api/upload-video", { method: "POST", token: coachWithTeam.token, body: badTeamFilmForm, isForm: true });
+    assert("route rejects upload_destination=team_film WITHOUT a team_id", badTeamFilmRes.status === 400, `status=${badTeamFilmRes.status}`);
+
+    // ============================================================
+    // Real HTTP-level idempotent replay: the SAME idempotency_key sent
+    // twice through the real route must produce exactly one video, the
+    // second response returning the same result, not a duplicate.
+    // ============================================================
+    const smokeIdemKey = `${RUN_TAG}_smoke_idem`;
+    const idemForm1 = new FormData();
+    idemForm1.append("video", new Blob([await require("fs").promises.readFile(validMp4Path)], { type: "video/mp4" }), "smoke-idem.mp4");
+    idemForm1.append("title", `${RUN_TAG}_smoke_idem_video`);
+    idemForm1.append("idempotency_key", smokeIdemKey);
+    const idemUploadRes1 = await req("/api/upload-video", { method: "POST", token: coachWithTeam.token, body: idemForm1, isForm: true });
+    assert("idempotent upload #1 succeeds (201)", idemUploadRes1.status === 201, `status=${idemUploadRes1.status}`);
+    if (idemUploadRes1.status === 201) trackVideo(idemUploadRes1.data.id);
+
+    const idemForm2 = new FormData();
+    idemForm2.append("video", new Blob([await require("fs").promises.readFile(validMp4Path)], { type: "video/mp4" }), "smoke-idem-replay.mp4");
+    idemForm2.append("title", `${RUN_TAG}_smoke_idem_video`);
+    idemForm2.append("idempotency_key", smokeIdemKey);
+    const idemUploadRes2 = await req("/api/upload-video", { method: "POST", token: coachWithTeam.token, body: idemForm2, isForm: true });
+    assert("idempotent replay #2 also returns 201 (the existing result, not an error)", idemUploadRes2.status === 201, `status=${idemUploadRes2.status}`);
+    assert(
+      "idempotent replay #2 returns the SAME video id as #1",
+      idemUploadRes1.data && idemUploadRes2.data && idemUploadRes1.data.id === idemUploadRes2.data.id
+    );
+
+    const idemVideoRows = await client.query("SELECT id FROM videos WHERE title = $1", [`${RUN_TAG}_smoke_idem_video`]);
+    assert("duplicate submission created exactly one video, not two", idemVideoRows.rows.length === 1);
+    const idemAttemptRows = await client.query("SELECT id FROM upload_attempts WHERE idempotency_key = $1", [smokeIdemKey]);
+    assert("duplicate submission created exactly one upload_attempts row, not two", idemAttemptRows.rows.length === 1);
+
+    // ============================================================
+    // Combined clip + Team Highlight post isolation: removing one
+    // reference type must never affect the other, or the source, until
+    // BOTH are gone.
+    // ============================================================
+    const isolationVideo = await insertBareVideo({ uploadedBy: coachWithTeam.user.id, teamId: team.id, uploadDestination: "team_highlights" });
+    trackVideo(isolationVideo.id);
+
+    const isolationClipRes = await req("/api/clips", {
+      method: "POST",
+      token: coachWithTeam.token,
+      body: { title: "isolation clip", start_time: 0, end_time: 1, video_id: isolationVideo.id },
+    });
+    assert("isolation setup: clip created", isolationClipRes.status === 201);
+    const isolationClipId = isolationClipRes.data.id;
+
+    const isolationPostInsert = await client.query(
+      "INSERT INTO team_highlights (video_id, team_id, created_by) VALUES ($1, $2, $3) RETURNING id",
+      [isolationVideo.id, team.id, coachWithTeam.user.id]
+    );
+    const isolationPostId = isolationPostInsert.rows[0].id;
+
+    const isolationBlockedByBoth = await sourceRetention.attemptPurge(isolationVideo.id, coachWithTeam.user.id);
+    assert(
+      "isolation: purge blocked by BOTH the clip and the post",
+      isolationBlockedByBoth.outcome === "blocked" && isolationBlockedByBoth.activePosts === 1 && isolationBlockedByBoth.unmaterializedClips === 1
+    );
+
+    // Remove ONLY the post.
+    await client.query("UPDATE team_highlights SET removed_at = now(), removed_by = $1 WHERE id = $2", [coachWithTeam.user.id, isolationPostId]);
+    const clipUnaffectedByPostRemoval = await client.query("SELECT id, video_id, start_time, end_time FROM clips WHERE id = $1", [isolationClipId]);
+    assert(
+      "removing the post leaves the clip completely unaffected",
+      clipUnaffectedByPostRemoval.rows.length === 1 &&
+        Number(clipUnaffectedByPostRemoval.rows[0].video_id) === Number(isolationVideo.id) &&
+        Number(clipUnaffectedByPostRemoval.rows[0].start_time) === 0
+    );
+    const isolationBlockedByClipOnly = await sourceRetention.attemptPurge(isolationVideo.id, coachWithTeam.user.id);
+    assert(
+      "isolation: after removing ONLY the post, purge is still blocked -- by the clip alone",
+      isolationBlockedByClipOnly.outcome === "blocked" && isolationBlockedByClipOnly.activePosts === 0 && isolationBlockedByClipOnly.unmaterializedClips === 1
+    );
+
+    // Now remove ONLY the clip (no user-facing delete route exists yet in
+    // this slice; this is the test's own direct simulation of that
+    // reference going away).
+    await client.query("DELETE FROM clips WHERE id = $1", [isolationClipId]);
+    const postStillRemovedAfterClipDelete = await client.query("SELECT id, removed_at, video_id FROM team_highlights WHERE id = $1", [isolationPostId]);
+    assert(
+      "removing the clip leaves the already-removed post's own historical row untouched",
+      postStillRemovedAfterClipDelete.rows.length === 1 && postStillRemovedAfterClipDelete.rows[0].removed_at !== null
+    );
+    const isolationPurgeableAfterBothGone = await sourceRetention.attemptPurge(isolationVideo.id, coachWithTeam.user.id);
+    assert("isolation: once BOTH references are gone, purge succeeds", isolationPurgeableAfterBothGone.outcome === "purged");
+    created.videoIds = created.videoIds.filter((id) => id !== isolationVideo.id);
+    // This purge went through attemptPurge with a real actingUserId
+    // (coachWithTeam.user.id) -- already covered by the per-user cleanup
+    // loop's own security_audit_log deletion below. isolationVideo.id is
+    // also in allFixtureVideoIds regardless (from trackVideo() at
+    // creation), so the fixture-video-id correlation query would catch it
+    // too if it were ever NULL-user_id; no separate tracking needed.
+
+    // ============================================================
+    // Full real-R2 lifecycle: upload a real object -> Remove from Film
+    // -> sweep -> confirm BOTH the DB row and the real R2 object are
+    // gone, and nothing else was touched.
+    // ============================================================
+    const lifecycleForm = new FormData();
+    lifecycleForm.append("video", new Blob([await require("fs").promises.readFile(validMp4Path)], { type: "video/mp4" }), "smoke-lifecycle.mp4");
+    lifecycleForm.append("title", `${RUN_TAG}_smoke_lifecycle`);
+    const lifecycleUploadRes = await req("/api/upload-video", { method: "POST", token: coachWithTeam.token, body: lifecycleForm, isForm: true });
+    assert("lifecycle: real upload succeeds", lifecycleUploadRes.status === 201, `status=${lifecycleUploadRes.status}`);
+    const lifecycleVideoId = lifecycleUploadRes.data.id;
+    const lifecycleStorageKey = lifecycleUploadRes.data.storage_key;
+    trackVideo(lifecycleVideoId);
+    created.r2Keys.push(lifecycleStorageKey); // safety net; the sweep below is expected to remove it
+
+    const lifecycleObjectExistsBefore = await storage.exists(lifecycleStorageKey);
+    assert("lifecycle: the real R2 object exists right after upload", lifecycleObjectExistsBefore === true);
+
+    // Let classifyAndRouteAsync() settle before removing/purging this
+    // fixture -- this is a genuinely valid MP4, so real background
+    // classification is in flight. Purging while it's still running risks
+    // a benign but noisy "video not found" from the async completion
+    // handler racing the DELETE; waiting avoids manufacturing that log
+    // noise (the smoke test's own bar includes "no new unexpected
+    // errors"). Same settle pattern as testVideoClassification.js.
+    const settleDeadline = Date.now() + 15000;
+    while (Date.now() < settleDeadline) {
+      const statusCheck = await req(`/api/videos/${lifecycleVideoId}`, { token: coachWithTeam.token });
+      if (statusCheck.data && !["uploading", "classifying", "remuxing"].includes(statusCheck.data.processing_status)) break;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+
+    const lifecycleRemoveRes = await req(`/api/videos/${lifecycleVideoId}/film-removal`, { method: "PATCH", token: coachWithTeam.token });
+    assert("lifecycle: Remove from Film succeeds", lifecycleRemoveRes.status === 200);
+
+    await sourceRetention.sweepPurgeReevaluations();
+
+    const lifecycleVideoGone = await client.query("SELECT id FROM videos WHERE id = $1", [lifecycleVideoId]);
+    assert("lifecycle: the video's database row is gone after the sweep", lifecycleVideoGone.rows.length === 0);
+
+    // Correction: storage.exists() returns true when the object IS still
+    // present -- the old name ("lifecycleObjectGone") held that raw
+    // result, so "if (lifecycleObjectGone)" actually fired when the
+    // object STILL EXISTED (sweep failed to delete it), removing the
+    // safety net from created.r2Keys at exactly the moment it was most
+    // needed, and leaving it in place (redundant but harmless) on the
+    // success path instead. Renamed to say what the value actually means,
+    // and the condition inverted to match: the safety-net key is removed
+    // from the pending-cleanup list ONLY once absence is positively
+    // confirmed; if the object is still there for any reason, it stays in
+    // created.r2Keys so the finally block's safety cleanup still attempts
+    // removal.
+    const lifecycleObjectStillExists = await storage.exists(lifecycleStorageKey);
+    assert("lifecycle: the real R2 object is gone after the sweep", lifecycleObjectStillExists === false);
+    created.videoIds = created.videoIds.filter((id) => id !== lifecycleVideoId);
+    if (!lifecycleObjectStillExists) {
+      created.r2Keys = created.r2Keys.filter((k) => k !== lifecycleStorageKey); // confirmed gone, safety net no longer needed
+    }
+
+    // Confirm nothing ELSE was touched by this purge: the earlier
+    // team_film/personal/idempotent smoke-test videos must still exist,
+    // completely unaffected.
+    const otherSmokeVideosStillExist = await client.query(
+      "SELECT count(*)::int AS count FROM videos WHERE title = ANY($1::text[])",
+      [[`${RUN_TAG}_smoke_personal`, `${RUN_TAG}_smoke_teamfilm`, `${RUN_TAG}_smoke_idem_video`]]
+    );
+    assert("lifecycle purge did not touch any other fixture video", otherSmokeVideosStillExist.rows[0].count === 3);
+
+    // ============================================================
+    // Cross-feature smoke: Film listing, clip playback, Messages,
+    // Invitations, Schedule all still respond normally post-deploy.
+    // Every call uses this run's OWN throwaway team/users.
+    // ============================================================
+    const filmListingSmoke = await req("/api/videos", { token: coachWithTeam.token });
+    assert("cross-feature smoke: Film listing responds normally", filmListingSmoke.status === 200);
+
+    const clipPlaybackSmoke = await req(`/api/users/${coachWithTeam.user.id}/clips`, { token: coachWithTeam.token });
+    assert("cross-feature smoke: clip playback (owner clips endpoint) responds normally", clipPlaybackSmoke.status === 200);
+
+    const messagesSmoke = await req("/api/conversations", { token: coachWithTeam.token });
+    assert("cross-feature smoke: Messages (conversations) responds normally", messagesSmoke.status === 200, `status=${messagesSmoke.status}`);
+
+    const directMessagesSmoke = await req("/api/messages/eligible-recipients", { token: coachWithTeam.token });
+    assert("cross-feature smoke: Direct Messaging (eligible recipients) responds normally", directMessagesSmoke.status === 200, `status=${directMessagesSmoke.status}`);
+
+    const invitationsSmoke = await req(`/api/teams/${team.id}/invitations`, { token: coachWithTeam.token });
+    assert("cross-feature smoke: Invitations listing responds normally", invitationsSmoke.status === 200, `status=${invitationsSmoke.status}`);
+
+    const scheduleSmoke = await req(`/api/teams/${team.id}/events`, { token: coachWithTeam.token });
+    assert("cross-feature smoke: Schedule (team events) responds normally", scheduleSmoke.status === 200, `status=${scheduleSmoke.status}`);
+
+    const upcomingEventsSmoke = await req(`/api/users/${coachWithTeam.user.id}/upcoming-events`, { token: coachWithTeam.token });
+    assert("cross-feature smoke: Schedule (upcoming events) responds normally", upcomingEventsSmoke.status === 200, `status=${upcomingEventsSmoke.status}`);
+
     console.log("Cleanup starting...");
   } finally {
+    if (typeof validMp4Path === "string") {
+      await require("fs").promises.unlink(validMp4Path).catch(() => {});
+    }
     try {
       for (const key of created.r2Keys) {
         await storage.remove(key).catch(() => {});
@@ -713,22 +1026,29 @@ async function main() {
         await client.query("DELETE FROM users WHERE id = $1", [id]);
       }
 
-      // Exact-ID cleanup for this run's own NULL-user_id 'video_deleted'
-      // audit rows (sweeper-driven / no-actingUserId finalizePurge()
-      // calls) -- looked up by the exact videoId each one recorded in
-      // created.anonymousPurgeVideoIds, matched against the audit row's
-      // own metadata.videoId, then deleted by exact id. Never a
-      // watermark/time range/pattern that a genuine concurrent anonymous
-      // event could also match.
-      if (created.anonymousPurgeVideoIds.length > 0) {
+      // Exact-ID cleanup for this run's own 'video_deleted' audit rows,
+      // by COMPLETE fixture tracking rather than remembering individual
+      // purge calls. allFixtureVideoIds holds every video id this run
+      // ever created (via trackVideo(), regardless of whether it was
+      // later purged and dropped from created.videoIds) -- since no
+      // batch operation (sweepPurgeReevaluations() included) can ever
+      // purge a video this run didn't itself create, matching against
+      // that complete set is correct by construction, not by predicting
+      // which specific call will do the purging. Not restricted to
+      // user_id IS NULL: a real-actingUserId purge's row is already gone
+      // via the per-user loop above by the time this runs, so matching
+      // without that restriction is redundant-but-harmless there and
+      // correct for every NULL-user_id case. Deleted by exact id only --
+      // never a watermark, time range, user-id pattern, or broad
+      // event-type deletion.
+      if (created.allFixtureVideoIds.length > 0) {
         const correlatedAuditRows = await client.query(
           `
           SELECT id FROM security_audit_log
           WHERE event_type = 'video_deleted'
-            AND user_id IS NULL
             AND (metadata->>'videoId')::int = ANY($1::int[])
           `,
-          [created.anonymousPurgeVideoIds]
+          [created.allFixtureVideoIds]
         );
         if (correlatedAuditRows.rows.length > 0) {
           await client.query(
