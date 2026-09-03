@@ -2229,7 +2229,8 @@ body.app-active #reset-password-screen {
 #upload-destination-modal,
 #schedule-day-modal,
 #schedule-event-modal,
-#new-message-modal {
+#new-message-modal,
+#team-highlights-publish-modal {
   position: fixed;
   inset: 0;
   z-index: 100;
@@ -2247,7 +2248,8 @@ body.app-active #reset-password-screen {
 #upload-destination-modal.hidden,
 #schedule-day-modal.hidden,
 #schedule-event-modal.hidden,
-#new-message-modal.hidden {
+#new-message-modal.hidden,
+#team-highlights-publish-modal.hidden {
   display: none;
 }
 
@@ -2258,7 +2260,8 @@ body.app-active #reset-password-screen {
 #upload-destination-modal-inner,
 #schedule-day-modal-inner,
 #schedule-event-modal-inner,
-#new-message-modal-inner {
+#new-message-modal-inner,
+#team-highlights-publish-modal-inner {
   position: relative;
   width: 100%;
   max-width: 480px;
@@ -2277,7 +2280,8 @@ body.app-active #reset-password-screen {
 #upload-destination-close-btn,
 #schedule-day-close-btn,
 #schedule-event-close-btn,
-#new-message-close-btn {
+#new-message-close-btn,
+#team-highlights-publish-close-btn {
   position: absolute;
   top: 0.75rem;
   right: 0.75rem;
@@ -2564,6 +2568,100 @@ body.app-active #reset-password-screen {
   font-size: 0.72rem;
   padding: 0.5rem;
   white-space: pre-wrap;
+}
+
+/* ---------- Team Highlights: team context, feed, publish picker ---------- */
+
+#team-highlights-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+#team-highlights-team-context {
+  margin: 0.75rem 0 1rem;
+}
+
+#team-highlights-team-select {
+  width: 100%;
+  max-width: 320px;
+}
+
+#team-highlights-feed {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.team-highlight-card {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  border: 1px solid var(--gold-dim, rgba(212, 175, 55, 0.18));
+  border-radius: 14px;
+  padding: 0.75rem;
+  background: linear-gradient(180deg, var(--panel), var(--panel-2));
+}
+
+.team-highlight-thumb {
+  width: 84px;
+  height: 56px;
+  flex-shrink: 0;
+  border-radius: 8px;
+  background: var(--bg-2);
+  background-size: cover;
+  background-position: center;
+}
+
+.team-highlight-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.team-highlight-info p {
+  margin: 0.2rem 0 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.team-highlight-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  flex-shrink: 0;
+}
+
+#team-highlights-publish-picker-list {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 0.5rem;
+  max-height: 50vh;
+  overflow-y: auto;
+}
+
+#team-highlights-publish-picker-list li {
+  margin-bottom: 0.4rem;
+}
+
+#team-highlights-publish-picker-list button {
+  width: 100%;
+  text-align: left;
+}
+
+@media (max-width: 600px) {
+  .team-highlight-card {
+    flex-wrap: wrap;
+  }
+
+  .team-highlight-actions {
+    flex-direction: row;
+    width: 100%;
+  }
 }
 
 @media (max-width: 600px) {
