@@ -76,11 +76,26 @@ router.get("/api/teams/:teamId/highlights", authenticate, async (req, res) => {
       return res.status(403).json({ error: "You do not have an active membership on that team" });
     }
 
+    // team_highlights.id/team_id/created_at are explicitly aliased below
+    // because PUBLIC_VIDEO_COLUMNS also selects videos.id/team_id/
+    // created_at under those same bare names -- node-postgres returns one
+    // plain object keyed by column name, so an unaliased pair silently
+    // collapses to whichever column was listed last (videos.*, here),
+    // clobbering the highlight post's own id/team_id/created_at with the
+    // source video's. Bit this route once already (2026-09) -- caught by
+    // testTeamHighlightsRoutes.js's id-collision regression, not by the
+    // original test suite, which coincidentally never exposed it locally
+    // since both id sequences started at 1 in lockstep test data. video_id
+    // and created_by are left bare: videos has no same-named column, so
+    // there's nothing for them to collide with.
     const result = await client.query(
       `
       SELECT
-        team_highlights.id, team_highlights.team_id, team_highlights.video_id,
-        team_highlights.created_by, team_highlights.created_at,
+        team_highlights.id AS highlight_id,
+        team_highlights.team_id AS highlight_team_id,
+        team_highlights.video_id,
+        team_highlights.created_by,
+        team_highlights.created_at AS highlight_created_at,
         ${PUBLIC_VIDEO_COLUMNS}
       FROM team_highlights
       JOIN videos ON videos.id = team_highlights.video_id
@@ -94,13 +109,19 @@ router.get("/api/teams/:teamId/highlights", authenticate, async (req, res) => {
     // non-null by team_highlights_active_needs_source, so every row here
     // genuinely has a video to resolve -- no null-video branch needed,
     // unlike clips.js's future-materialized-clip case.
+    //
+    // row is passed to serializeHighlightVideo() as-is (not a cleaned
+    // copy): its bare id/team_id/created_at are unambiguously videos.*
+    // now that the highlight's own copies have distinct alias names above,
+    // which is exactly what withPlaybackStatus()/serializeHighlightVideo()
+    // need for the nested video object.
     const enriched = await Promise.all(
       result.rows.map(async (row) => ({
-        id: row.id,
-        team_id: row.team_id,
+        id: row.highlight_id,
+        team_id: row.highlight_team_id,
         video_id: row.video_id,
         created_by: row.created_by,
-        created_at: row.created_at,
+        created_at: row.highlight_created_at,
         video: await serializeHighlightVideo(row),
       }))
     );
