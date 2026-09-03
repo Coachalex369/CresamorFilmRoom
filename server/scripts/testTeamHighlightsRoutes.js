@@ -287,14 +287,37 @@ async function main() {
     // ============================================================
     // Processing-state behavior: publish is allowed regardless of
     // processing_status; the feed surfaces the real calculated state.
+    //
+    // Transient state (classifying): POST response only. NOT re-checked
+    // later -- production's real boot-time classify/remux recovery sweep
+    // (performClassifyRemuxRecovery in videoProcessing.js) scans EVERY
+    // row still in 'classifying'/'remuxing' globally, unscoped to this
+    // test, and will legitimately re-process (and can terminally fail)
+    // a fake/never-uploaded fixture left in this state. Asserting on it
+    // again after the POST would be asserting against a real production
+    // worker's timing, not this route's behavior -- this is what broke
+    // this exact test the first time it ran against production.
     // ============================================================
-    const processingSource = await insertVideo({ uploadedBy: coach.user.id, teamId: teamA.id, uploadDestination: "team_film", title: `${RUN_TAG}_processing` });
-    trackVideo(processingSource.id);
-    await client.query("UPDATE videos SET processing_status = 'classifying' WHERE id = $1", [processingSource.id]);
-    const processingPublish = await req(`/api/teams/${teamA.id}/highlights`, { method: "POST", token: coach.token, body: { video_id: processingSource.id } });
-    assert("POST: a still-processing source can be published", processingPublish.status === 201, `status=${processingPublish.status}`);
-    trackHighlight(processingPublish.data.id);
-    assert("POST: response reflects the real processing playback_state", processingPublish.data.video.playback_state === "preparing_playback");
+    const classifyingSource = await insertVideo({ uploadedBy: coach.user.id, teamId: teamA.id, uploadDestination: "team_film", title: `${RUN_TAG}_classifying` });
+    trackVideo(classifyingSource.id);
+    await client.query("UPDATE videos SET processing_status = 'classifying' WHERE id = $1", [classifyingSource.id]);
+    const classifyingPublish = await req(`/api/teams/${teamA.id}/highlights`, { method: "POST", token: coach.token, body: { video_id: classifyingSource.id } });
+    assert("POST: a still-classifying source can be published", classifyingPublish.status === 201, `status=${classifyingPublish.status}`);
+    trackHighlight(classifyingPublish.data.id);
+    assert("POST: response reflects the real classifying playback_state (immediate only)", classifyingPublish.data.video.playback_state === "preparing_playback");
+
+    // Stable state (transcode_paused): not scanned by any recovery sweep,
+    // so it's safe to re-check via GET below. Also the real Android/HEVC
+    // state Team Highlights needs to display as processing_paused, so
+    // it's a more representative fixture than an artificially-frozen
+    // transient one.
+    const pausedSource = await insertVideo({ uploadedBy: coach.user.id, teamId: teamA.id, uploadDestination: "team_film", title: `${RUN_TAG}_paused` });
+    trackVideo(pausedSource.id);
+    await client.query("UPDATE videos SET processing_status = 'transcode_paused' WHERE id = $1", [pausedSource.id]);
+    const pausedPublish = await req(`/api/teams/${teamA.id}/highlights`, { method: "POST", token: coach.token, body: { video_id: pausedSource.id } });
+    assert("POST: a paused (transcode_paused) source can be published", pausedPublish.status === 201, `status=${pausedPublish.status}`);
+    trackHighlight(pausedPublish.data.id);
+    assert("POST: response reflects the real processing_paused playback_state", pausedPublish.data.video.playback_state === "processing_paused");
 
     const failedSource = await insertVideo({ uploadedBy: coach.user.id, teamId: teamA.id, uploadDestination: "team_film", title: `${RUN_TAG}_failed` });
     trackVideo(failedSource.id);
@@ -305,8 +328,80 @@ async function main() {
     assert("POST: response reflects the real failed playback_state", failedPublish.data.video.playback_state === "failed");
 
     const feedWithProcessingState = await req(`/api/teams/${teamA.id}/highlights`, { token: coach.token });
-    const processingEntry = feedWithProcessingState.data.find((h) => h.id === processingPublish.data.id);
-    assert("GET: feed surfaces the processing source's real playback_state", processingEntry && processingEntry.video.playback_state === "preparing_playback");
+    const pausedEntry = feedWithProcessingState.data.find((h) => h.id === pausedPublish.data.id);
+    assert("GET: feed surfaces the paused source's real playback_state", pausedEntry && pausedEntry.video.playback_state === "processing_paused");
+
+    // GET must reflect the video's CURRENT authoritative DB state, not a
+    // value frozen at publish time. Mutate processing_status directly
+    // (independent of any recovery/classification path) and confirm the
+    // very next GET reflects the new value -- proof this is a live read,
+    // not something cached from the POST above.
+    await client.query("UPDATE videos SET processing_status = 'ready' WHERE id = $1", [pausedSource.id]);
+    const feedAfterStateChange = await req(`/api/teams/${teamA.id}/highlights`, { token: coach.token });
+    const pausedEntryAfterChange = feedAfterStateChange.data.find((h) => h.id === pausedPublish.data.id);
+    assert(
+      "GET: feed reflects a processing_status change made after publish (live read, not cached)",
+      pausedEntryAfterChange && pausedEntryAfterChange.video.playback_state === "playable"
+    );
+
+    // ============================================================
+    // GET route id-collision regression (production bug, found 2026-09-03):
+    // the GET route's SELECT joined team_highlights and videos without
+    // aliasing their same-named id/team_id/created_at columns, so
+    // node-postgres silently returned the video's values in place of the
+    // highlight post's own. Invisible on a fresh local DB where both id
+    // sequences start at 1 and stay coincidentally aligned in lockstep
+    // test data -- broke immediately in production once the sequences
+    // diverged. These assertions check EXACT values against independently
+    // known ids/timestamps, not mere inequality, so they can't be fooled
+    // by coincidental alignment in either direction. The three spacer
+    // videos below additionally widen the gap between videos_id_seq and
+    // team_highlights_id_seq on purpose, so this regression can never again
+    // hide behind sequence coincidence even if some future change weakens
+    // the value-based assertions.
+    // ============================================================
+    const idGapSpacerA = await insertVideo({ uploadedBy: coach.user.id, teamId: teamA.id, uploadDestination: "team_film", title: `${RUN_TAG}_idgap_a` });
+    trackVideo(idGapSpacerA.id);
+    const idGapSpacerB = await insertVideo({ uploadedBy: coach.user.id, teamId: teamA.id, uploadDestination: "team_film", title: `${RUN_TAG}_idgap_b` });
+    trackVideo(idGapSpacerB.id);
+    const idGapSpacerC = await insertVideo({ uploadedBy: coach.user.id, teamId: teamA.id, uploadDestination: "team_film", title: `${RUN_TAG}_idgap_c` });
+    trackVideo(idGapSpacerC.id);
+    // None of the three above are ever published -- they exist purely to
+    // advance videos_id_seq ahead of team_highlights_id_seq before the
+    // fixture below.
+
+    const idCheckSource = await insertVideo({ uploadedBy: coach.user.id, teamId: teamA.id, uploadDestination: "team_film", title: `${RUN_TAG}_idcheck` });
+    trackVideo(idCheckSource.id);
+    const idCheckPublish = await req(`/api/teams/${teamA.id}/highlights`, { method: "POST", token: coach.token, body: { video_id: idCheckSource.id } });
+    assert("POST: id-check source publishes -> 201", idCheckPublish.status === 201, `status=${idCheckPublish.status}`);
+    trackHighlight(idCheckPublish.data.id);
+
+    const idCheckFeed = await req(`/api/teams/${teamA.id}/highlights`, { token: coach.token });
+    const idCheckEntry = idCheckFeed.data.find((h) => h.video_id === idCheckSource.id);
+    assert("GET: the id-check entry is present (found by video_id, not by the field under test)", !!idCheckEntry);
+    assert("GET: top-level id is the REAL highlight post id returned by POST, not the video's id", !!idCheckEntry && idCheckEntry.id === idCheckPublish.data.id);
+    assert("GET: top-level id is NOT the source video's id", !!idCheckEntry && idCheckEntry.id !== idCheckSource.id);
+    assert("GET: nested video.id is the REAL source video id", !!idCheckEntry && idCheckEntry.video.id === idCheckSource.id);
+    assert(
+      // The most collision-proof check: the highlight's own created_at and
+      // the video's created_at are always genuinely different instants
+      // (separated by real processing time between insertVideo() and the
+      // publish call), unlike id, which can coincidentally align.
+      "GET: top-level created_at is the highlight's own created_at, not the video's",
+      !!idCheckEntry && idCheckEntry.created_at === idCheckPublish.data.created_at
+    );
+    assert("GET: top-level team_id is the highlight's own team_id", !!idCheckEntry && idCheckEntry.team_id === teamA.id);
+
+    // Prove the id GET actually returned is the real, usable highlight id
+    // -- not a value that happens to 404 harmlessly -- by deleting with it
+    // and confirming the correct post (and only that post) is removed
+    // while the source video itself is completely untouched.
+    const idCheckRemove = await req(`/api/teams/${teamA.id}/highlights/${idCheckEntry.id}`, { method: "DELETE", token: coach.token });
+    assert("DELETE: using the id GET returned removes the correct post -> 200", idCheckRemove.status === 200, `status=${idCheckRemove.status}`);
+    const idCheckRemoved = await client.query("SELECT removed_at FROM team_highlights WHERE id = $1", [idCheckPublish.data.id]);
+    assert("DELETE via GET's id: the correct team_highlights row was removed", idCheckRemoved.rows.length === 1 && idCheckRemoved.rows[0].removed_at !== null);
+    const idCheckVideoIntact = await client.query("SELECT id FROM videos WHERE id = $1", [idCheckSource.id]);
+    assert("DELETE via GET's id: the source video itself is untouched", idCheckVideoIntact.rows.length === 1);
 
     // ============================================================
     // DELETE authorization
