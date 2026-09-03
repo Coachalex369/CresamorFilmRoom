@@ -2099,6 +2099,22 @@ loginBtn.addEventListener("click", () => {
   handleLogin();
 });
 
+// Enter-to-submit: email-input/password-input are plain inputs, not
+// inside a <form> (no native submit behavior to hook), so this is a
+// direct keydown listener rather than a submit-event handler.
+// isComposing guards against an IME candidate-confirm Enter (e.g. typing
+// an email via a Japanese/Chinese input method) being misread as
+// "submit now" mid-composition.
+function handleLoginFieldKeydown(event) {
+  if (event.key === "Enter" && !event.isComposing) {
+    event.preventDefault();
+    handleLogin();
+  }
+}
+
+emailInput.addEventListener("keydown", handleLoginFieldKeydown);
+passwordInput.addEventListener("keydown", handleLoginFieldKeydown);
+
 logoutBtn.addEventListener("click", () => {
   logoutLocalState();
 });
