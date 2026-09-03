@@ -913,18 +913,6 @@ wireVideoLoadingOverlay(
   reelLoadingEta
 );
 
-/* ---------- PARENT ACCOUNT (Sprint 3) ---------- */
-/* New button in index.html; reuses the existing global handleAuth() from
-   app.js exactly like the Coach/Athlete buttons do — no app.js edit needed. */
-
-const loginParentBtn = document.querySelector("#login-parent-btn");
-
-if (loginParentBtn) {
-  loginParentBtn.addEventListener("click", () => {
-    handleAuth("parent");
-  });
-}
-
 /* ---------- hook into existing app.js lifecycle without editing it ---------- */
 
 const __originalActivateApp = window.activateApp;

@@ -109,6 +109,37 @@ body.app-active #login-screen {
   gap: 0.75rem;
 }
 
+#login-btn {
+  background: linear-gradient(180deg, var(--gold), #a9862a);
+  color: #1a1405;
+  font-weight: 700;
+  border: none;
+}
+
+#login-btn:hover {
+  background: linear-gradient(180deg, var(--gold-soft), var(--gold));
+}
+
+/* Session-expiration fix: non-blocking toast, replaces the old stacked
+   alert()s for a real 401 session expiration. Auto-dismissed by app.js;
+   fixed position so it never shifts layout underneath it. */
+#session-expired-toast {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1000;
+  background: linear-gradient(180deg, var(--panel), var(--panel-2));
+  border: 1px solid var(--gold);
+  color: var(--gold-soft);
+  padding: 0.75rem 1.25rem;
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  font-weight: 600;
+  max-width: 90vw;
+  text-align: center;
+}
+
 #app-shell {
   min-height: 100vh;
   padding: 1rem;

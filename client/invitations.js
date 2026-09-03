@@ -14,7 +14,7 @@
   query string from the visible URL immediately.
 
   Reuses app.js's existing globals directly (loginScreen, appShell,
-  authToken, currentUser, apiFetch, showMessage, handleAuth,
+  authToken, currentUser, apiFetch, showMessage, loginUser, registerUser,
   activateApp/logoutLocalState) — no redeclaration, per this project's
   shared-global-scope convention. Every new name here is prefixed
   (invitation*, forgotPassword*, resetPassword*) to avoid collisions.
