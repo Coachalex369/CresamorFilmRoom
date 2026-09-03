@@ -9,11 +9,36 @@
   exist by the time a caller's request finishes — but a logging failure
   must never fail the request it's describing. Errors are caught and
   console.error'd here, never rethrown.
+
+  Team Highlights, Slice 2: an optional `conn` (a checked-out pg client
+  already inside the caller's own transaction) changes that contract on
+  purpose, for exactly the callers that need it. Without conn, every
+  existing caller keeps today's behavior unchanged: runs on the module-
+  level pool, swallows any failure, never throws. WITH conn: the INSERT
+  runs on that same connection, so it commits or rolls back atomically
+  with whatever mutation the caller is doing -- and a failure is allowed
+  to propagate, specifically so the caller's transaction aborts instead of
+  silently committing a real state change with no audit trail behind it.
+  A route that wants this passes its own open conn; nothing changes for
+  any call site that doesn't.
 */
 
 const client = require("../db/client");
 
-async function logSecurityEvent(eventType, { userId = null, ip = null, metadata = {} } = {}) {
+async function logSecurityEvent(eventType, { userId = null, ip = null, metadata = {}, conn = null } = {}) {
+  if (conn) {
+    // Deliberately NOT wrapped in try/catch here -- see file header. The
+    // caller's own transaction is what should decide what happens next.
+    await conn.query(
+      `
+      INSERT INTO security_audit_log (event_type, user_id, ip_address, metadata)
+      VALUES ($1, $2, $3, $4)
+      `,
+      [eventType, userId, ip, JSON.stringify(metadata)]
+    );
+    return;
+  }
+
   try {
     await client.query(
       `

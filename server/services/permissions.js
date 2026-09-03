@@ -484,6 +484,32 @@ async function canViewTeamRoster(userId, teamId) {
   return canAccessTeam(userId, teamId);
 }
 
+// Team Highlights, Slice 2: publish/moderate authority for a team's
+// Highlights feed. Deliberately NOT canManageTeam (that's role_on_team =
+// 'coach' only) -- the approved model is Coach OR Assistant Coach, same
+// coaching-staff bar already established for reaching a team's whole
+// roster in canInitiateDirectMessage's own SQL. A separate function
+// rather than widening canManageTeam, since canManageTeam's existing
+// callers (team reassignment, invitation creation, membership
+// management) were deliberately scoped coach-only and changing that
+// would be a real, unrelated behavior change to already-shipped code.
+async function canManageTeamHighlights(userId, teamId) {
+  if (!userId || !teamId) return false;
+
+  const result = await client.query(
+    `
+    SELECT 1
+    FROM team_members
+    WHERE user_id = $1 AND team_id = $2
+      AND role_on_team IN ('coach', 'assistant_coach')
+      AND revoked_at IS NULL
+    `,
+    [userId, teamId]
+  );
+
+  return result.rows.length > 0;
+}
+
 // Production bug fix: the uploader must always be able to see their own
 // video, regardless of team_id — matching canDeleteVideo's existing
 // unconditional uploader check. This was previously only granted in the
@@ -598,6 +624,7 @@ module.exports = {
   canDeleteVideo,
   canAccessTeam,
   canManageTeam,
+  canManageTeamHighlights,
   canViewTeamRoster,
   canViewVideo,
   canViewVideosBatch,

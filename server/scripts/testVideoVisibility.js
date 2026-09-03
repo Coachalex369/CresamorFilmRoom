@@ -206,10 +206,14 @@ async function main() {
     // upload-time validation, which only gates NEW uploads. Constructed
     // directly since the API itself now correctly refuses to create this
     // shape (see above).
+    // Correction: upload_destination is NOT NULL as of migration 019 --
+    // found by actually running this script against a database with 019
+    // already applied for the first time. 'team_film' matches this row's
+    // team_id.
     const legacyInsert = await client.query(
       `
-      INSERT INTO videos (title, storage_key, uploaded_by, processing_status, team_id, source_size_bytes)
-      VALUES ($1, $2, $3, 'ready', $4, 5000)
+      INSERT INTO videos (title, storage_key, uploaded_by, processing_status, team_id, source_size_bytes, upload_destination)
+      VALUES ($1, $2, $3, 'ready', $4, 5000, 'team_film')
       RETURNING *
       `,
       [`${RUN_TAG}_legacy_mismatched`, `videos/${team.id}/${new Date().getFullYear()}/${RUN_TAG}-legacy.mp4`, uploader.user.id, team.id]

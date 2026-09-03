@@ -189,8 +189,13 @@ async function main() {
     assert("a role-granting team-membership change is audit-logged", roleGrantAudit.rows.length === 1);
 
     // ---- Video visibility + deletion ----
+    // Correction: upload_destination is NOT NULL as of migration 019 --
+    // found by actually running this script against a database with 019
+    // already applied for the first time (every prior run only had 018).
+    // 'team_film' is the correct classification here, matching what the
+    // real upload route derives for any team_id-bearing video.
     const teamVideo = await client.query(
-      `INSERT INTO videos (title, file_url, uploaded_by, team_id) VALUES ($1, $2, $3, $4) RETURNING *`,
+      `INSERT INTO videos (title, file_url, uploaded_by, team_id, upload_destination) VALUES ($1, $2, $3, $4, 'team_film') RETURNING *`,
       [`${RUN_TAG}_team_video`, "https://example.com/fake.mp4", coach.user.id, team.id]
     );
     created.videoIds.push(teamVideo.rows[0].id);
@@ -199,7 +204,7 @@ async function main() {
     // below as part of the delete-permission test) — used only as a valid
     // FK target for the forged-clip test further down.
     const clipTestVideo = await client.query(
-      `INSERT INTO videos (title, file_url, uploaded_by, team_id) VALUES ($1, $2, $3, $4) RETURNING *`,
+      `INSERT INTO videos (title, file_url, uploaded_by, team_id, upload_destination) VALUES ($1, $2, $3, $4, 'team_film') RETURNING *`,
       [`${RUN_TAG}_clip_test_video`, "https://example.com/fake2.mp4", coach.user.id, team.id]
     );
     created.videoIds.push(clipTestVideo.rows[0].id);
