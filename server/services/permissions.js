@@ -510,6 +510,38 @@ async function canManageTeamHighlights(userId, teamId) {
   return result.rows.length > 0;
 }
 
+// Parent/Athlete uploads: real server-side enforcement for Personal Film
+// (POST /api/upload-video), replacing a prior Slice 1 draft of this exact
+// helper that was built and then deliberately removed rather than shipped
+// unenforced -- see that route's own comment. Personal Film has no team
+// context to check role_on_team against, so this mirrors the client's
+// own refreshUploadSectionVisibility() rule instead: a global role='coach'
+// account (teamless-safe -- Personal Film has never required any team
+// relationship) OR an active coach/assistant_coach team_members row on
+// ANY team. Deliberately does NOT grant Parent/Athlete access in this
+// release, even though nothing here technically prevents adding it later
+// -- that is a real product decision, not an oversight.
+async function canUploadPersonalFilm(userId) {
+  if (!userId) return false;
+
+  const userResult = await client.query("SELECT role FROM users WHERE id = $1", [userId]);
+  if (userResult.rows[0]?.role === "coach") return true;
+
+  const result = await client.query(
+    `
+    SELECT 1
+    FROM team_members
+    WHERE user_id = $1
+      AND role_on_team IN ('coach', 'assistant_coach')
+      AND revoked_at IS NULL
+    LIMIT 1
+    `,
+    [userId]
+  );
+
+  return result.rows.length > 0;
+}
+
 // Production bug fix: the uploader must always be able to see their own
 // video, regardless of team_id — matching canDeleteVideo's existing
 // unconditional uploader check. This was previously only granted in the
@@ -625,6 +657,7 @@ module.exports = {
   canAccessTeam,
   canManageTeam,
   canManageTeamHighlights,
+  canUploadPersonalFilm,
   canViewTeamRoster,
   canViewVideo,
   canViewVideosBatch,

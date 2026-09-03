@@ -98,6 +98,15 @@ async function recordingPipelineUpload(recording) {
       formData.append("team_id", recording.teamId);
     }
 
+    // Parent/Athlete uploads: forces 'team_highlights' when set by
+    // capture.js's syncRecording() (see its own comment). Absent for
+    // Coach/Assistant Coach and for any recording queued before this
+    // field existed -- the server infers the destination from team_id
+    // presence either way, same as always.
+    if (recording.uploadDestination) {
+      formData.append("upload_destination", recording.uploadDestination);
+    }
+
     const xhr = new XMLHttpRequest();
     xhr.open("POST", `${API_URL}/api/upload-video`);
 

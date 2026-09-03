@@ -194,6 +194,7 @@ select {
 
 #coach-tools,
 #upload-section,
+#personal-upload-section,
 #notes-panel {
   margin-top: 1rem;
 }
@@ -345,8 +346,10 @@ li {
 
 #video-section:fullscreen #highlight-tools,
 #video-section:fullscreen #upload-section,
+#video-section:fullscreen #personal-upload-section,
 #video-section:-webkit-full-screen #highlight-tools,
-#video-section:-webkit-full-screen #upload-section {
+#video-section:-webkit-full-screen #upload-section,
+#video-section:-webkit-full-screen #personal-upload-section {
   display: none !important;
 }
 
@@ -1942,18 +1945,6 @@ li {
   border: none;
 }
 
-#capture-suggested-team {
-  margin-bottom: 0.75rem;
-}
-
-#capture-confirm-suggested-team-btn {
-  width: 100%;
-  background: linear-gradient(180deg, var(--gold), #a9862a);
-  color: #1a1405;
-  font-weight: 700;
-  border: none;
-}
-
 #capture-skip-team-btn {
   width: 100%;
   margin-top: 0.75rem;
@@ -2230,7 +2221,8 @@ body.app-active #reset-password-screen {
 #schedule-day-modal,
 #schedule-event-modal,
 #new-message-modal,
-#team-highlights-publish-modal {
+#team-highlights-publish-modal,
+#personal-upload-team-modal {
   position: fixed;
   inset: 0;
   z-index: 100;
@@ -2249,7 +2241,8 @@ body.app-active #reset-password-screen {
 #schedule-day-modal.hidden,
 #schedule-event-modal.hidden,
 #new-message-modal.hidden,
-#team-highlights-publish-modal.hidden {
+#team-highlights-publish-modal.hidden,
+#personal-upload-team-modal.hidden {
   display: none;
 }
 
@@ -2261,7 +2254,8 @@ body.app-active #reset-password-screen {
 #schedule-day-modal-inner,
 #schedule-event-modal-inner,
 #new-message-modal-inner,
-#team-highlights-publish-modal-inner {
+#team-highlights-publish-modal-inner,
+#personal-upload-team-modal-inner {
   position: relative;
   width: 100%;
   max-width: 480px;
@@ -2281,7 +2275,8 @@ body.app-active #reset-password-screen {
 #schedule-day-close-btn,
 #schedule-event-close-btn,
 #new-message-close-btn,
-#team-highlights-publish-close-btn {
+#team-highlights-publish-close-btn,
+#personal-upload-team-close-btn {
   position: absolute;
   top: 0.75rem;
   right: 0.75rem;
@@ -2636,7 +2631,8 @@ body.app-active #reset-password-screen {
   flex-shrink: 0;
 }
 
-#team-highlights-publish-picker-list {
+#team-highlights-publish-picker-list,
+#personal-upload-team-list {
   list-style: none;
   padding: 0;
   margin: 0 0 0.5rem;
@@ -2644,13 +2640,21 @@ body.app-active #reset-password-screen {
   overflow-y: auto;
 }
 
-#team-highlights-publish-picker-list li {
+#team-highlights-publish-picker-list li,
+#personal-upload-team-list li {
   margin-bottom: 0.4rem;
 }
 
-#team-highlights-publish-picker-list button {
+#team-highlights-publish-picker-list button,
+#personal-upload-team-list button {
   width: 100%;
   text-align: left;
+}
+
+.upload-hint {
+  color: var(--muted);
+  font-size: 0.8rem;
+  margin: 0.3rem 0 0;
 }
 
 @media (max-width: 600px) {

@@ -15,6 +15,8 @@ const {
   canViewVideo,
   canManageTeam,
   canAccessTeam,
+  canManageTeamHighlights,
+  canUploadPersonalFilm,
 } = require("../services/permissions");
 const storage = require("../services/storage/storage");
 const { authenticate } = require("../middleware/authenticate");
@@ -269,40 +271,40 @@ router.post("/api/upload-video", authenticate, uploadLimiter, uploadDiagnosticMu
       return res.status(400).json({ error: "team_id is required for this destination" });
     }
 
-    // Team Highlights, Slice 1: 'team_highlights' has no usable workflow
-    // yet — no feed, no publish route, and nothing yet creates the
-    // matching team_highlights post atomically with the video (that's
-    // Slice 2/3's job). Accepting this value now would silently create a
-    // video excluded from the Film list (upload_destination !=
-    // 'team_highlights' filter) with no corresponding post anywhere —
-    // effectively invisible, orphaned content. Rejected outright until
-    // the complete destination workflow ships.
-    if (uploadDestination === "team_highlights") {
-      return res.status(400).json({ error: "Team Highlights uploads are not available yet" });
+    // Parent/Athlete uploads: the real per-destination authorization
+    // matrix, enforced server-side regardless of what the client's UI
+    // offers (never trust the client's displayed controls -- a Parent
+    // could otherwise POST upload_destination='team_film' directly).
+    // role_on_team on the SPECIFIC selected team decides this, never
+    // users.role alone -- one account can hold different roles across
+    // different teams (see canManageTeamHighlights()/canAccessTeam()).
+    //   - 'team_film': Coach/Assistant Coach on that team only.
+    //   - 'team_highlights': any active member of that team, any role --
+    //     this is Coach/Assistant Coach's third destination choice AND
+    //     Parent/Athlete's only destination choice.
+    //   - 'personal': canUploadPersonalFilm() below -- global role='coach'
+    //     (teamless-safe) or an active coach/assistant_coach membership on
+    //     ANY team, matching exactly who the client's own Upload Film
+    //     (coach) section is shown to. Never Parent/Athlete in this
+    //     release -- see canUploadPersonalFilm()'s own comment.
+    // Every branch covers "unrelated or revoked member" the same way:
+    // the underlying team_members lookup requires revoked_at IS NULL and
+    // an actual matching row, so no row at all (unrelated) or a revoked
+    // one both simply fail the check -> 403.
+    if (uploadDestination === "personal") {
+      if (!(await canUploadPersonalFilm(req.user.id))) {
+        return res.status(403).json({ error: "Not authorized to upload Personal Film" });
+      }
+    } else if (uploadDestination === "team_film") {
+      if (!(await canManageTeamHighlights(req.user.id, teamId))) {
+        return res.status(403).json({ error: "Not authorized to upload Team Film for this team" });
+      }
+    } else {
+      // team_highlights
+      if (!(await canAccessTeam(req.user.id, teamId))) {
+        return res.status(403).json({ error: "You do not have an active membership on that team" });
+      }
     }
-
-    // Unassigned-video authorization fix (team_id validation), still the
-    // universal floor for any team-targeted upload — an active,
-    // non-revoked team_members row on that exact team, ANY role_on_team.
-    // Deliberately not coach-specific here: the Record flow's
-    // athlete/parent uploads to their own team must keep working exactly
-    // as before. A per-destination-type authority check (the
-    // Coach/Assistant-Coach-only bar for 'team_film') is real future work
-    // for Slice 3's client/route changes, not built here.
-    if (teamId && !(await canAccessTeam(req.user.id, teamId))) {
-      return res.status(403).json({ error: "You do not have an active membership on that team" });
-    }
-
-    // Personal Film upload authorization: no server-side capability check
-    // here yet. A prior Slice 1 draft added canUploadPersonalFilm() (a
-    // global users.role='coach'-or-live-coaching-membership check), but
-    // that account model is already superseded (capabilities should
-    // derive from live team membership/selected team context, not a
-    // permanent global role) and the helper was never enforced anywhere
-    // -- removed rather than shipped inert. The current production
-    // Record flow's "Skip for now" path still lets a Parent/Athlete land
-    // in Personal Film; the real capability rule is deferred to be
-    // redesigned alongside the unified-login/Team Highlights work.
 
     // Team Highlights, Slice 1: durable idempotency-key claim, BEFORE any
     // R2 call. idempotency_key is optional for backward compatibility —
@@ -436,6 +438,7 @@ router.post("/api/upload-video", authenticate, uploadLimiter, uploadDiagnosticMu
         uploadDestination,
         filmType: film_type || null,
         fileSize: req.file.size,
+        ip: req.ip,
       }));
     } catch (completeError) {
       if (completeError.code !== "LEASE_LOST") {

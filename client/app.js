@@ -561,13 +561,15 @@ async function loadManageableTeams() {
 // the server independently re-validates via canAccessTeam() regardless of
 // what this list offers, so this is a UX narrowing, not the enforcement.
 //
-// TRANSITIONAL: offers a single flat "team" destination, same as the
-// server-side check it feeds — Team Highlights vs. Team Film Breakdown as
-// distinct destinations is deliberately out of scope for this branch (see
-// POST /api/upload-video's own transitional note in videos.js). This
-// picker is reachable only by role='coach' (the pre-existing .coach-only
-// gate on #upload-section) — Parent/Athlete uploads never go through it
-// at all, only through the Record flow (capture.js).
+// Parent/Athlete uploads: openUploadDestinationModal() now offers each of
+// these teams as TWO destinations (Team Film / Team Highlights), not one
+// flat option -- see its own comment. This list itself is unchanged: who
+// can manage a team is the same question regardless of which of the two
+// destinations gets picked for it. #upload-section is reachable by any
+// active coach/assistant_coach team membership (never role==='coach'
+// alone, and not a .coach-only CSS gate — see refreshUploadSectionVisibility()
+// and #upload-section's own comment in index.html); Parent/Athlete uploads
+// go through the separate #personal-upload-section instead.
 async function loadUploadDestinationTeams() {
   try {
     const myTeams = await apiFetch(`/api/users/${currentUser.id}/teams`);
@@ -599,11 +601,24 @@ async function openUploadDestinationModal(file) {
   personalOption.textContent = "Personal Film — only you can view it";
   uploadDestinationSelect.appendChild(personalOption);
 
+  // Each team offers two destinations, not one: Team Film (existing
+  // behavior, joins the Film library for later review/publishing) and
+  // Team Highlights (new -- publishes straight to that team's Team
+  // Highlights feed, no separate publish step). Composite option value
+  // ("teamId:destination") since a plain <select> can only carry one
+  // string per option; parsed back apart in confirmUploadDestination().
   destinations.forEach((team) => {
-    const option = document.createElement("option");
-    option.value = team.id;
-    option.textContent = team.sport ? `${team.name} (${team.sport})` : team.name;
-    uploadDestinationSelect.appendChild(option);
+    const label = team.sport ? `${team.name} (${team.sport})` : team.name;
+
+    const filmOption = document.createElement("option");
+    filmOption.value = `${team.id}:team_film`;
+    filmOption.textContent = `${label} — Team Film`;
+    uploadDestinationSelect.appendChild(filmOption);
+
+    const highlightOption = document.createElement("option");
+    highlightOption.value = `${team.id}:team_highlights`;
+    highlightOption.textContent = `${label} — Team Highlights`;
+    uploadDestinationSelect.appendChild(highlightOption);
   });
 
   // No default/silent inference across multiple teams — Personal Film is
@@ -626,13 +641,20 @@ function confirmUploadDestination() {
   if (!pendingUploadFile) return;
 
   const selected = uploadDestinationSelect.value;
-  const teamId = selected === "" ? null : Number(selected);
   const file = pendingUploadFile;
+
+  let teamId = null;
+  let uploadDestination = null;
+  if (selected !== "") {
+    const [teamIdPart, destinationPart] = selected.split(":");
+    teamId = Number(teamIdPart);
+    uploadDestination = destinationPart;
+  }
 
   uploadDestinationModal.classList.add("hidden");
   pendingUploadFile = null;
 
-  uploadVideo(file, teamId);
+  uploadVideo(file, teamId, uploadDestination);
 }
 
 if (uploadDestinationCloseBtn) {
@@ -1232,6 +1254,7 @@ function activateApp(user) {
 
   setCoachVisibility(user.role);
   refreshUploadSectionVisibility();
+  refreshPersonalUploadSectionVisibility();
   loadVideos();
   loadMyClips();
   refreshVideoPollingState();
@@ -1260,6 +1283,8 @@ function logoutLocalState() {
 
   setCoachVisibility(null);
   if (uploadSection) uploadSection.classList.add("hidden");
+  const personalUploadSectionEl = document.querySelector("#personal-upload-section");
+  if (personalUploadSectionEl) personalUploadSectionEl.classList.add("hidden");
 
   emailInput.value = "";
   passwordInput.value = "";
@@ -1442,7 +1467,17 @@ function setManualUploadStatus(text) {
 // re-validates whatever team_id actually arrives (canAccessTeam(), see
 // POST /api/upload-video), so this is a UX convenience, not the real
 // authorization boundary.
-function uploadVideo(file, teamId) {
+// uploadDestination/fileInputEl: Parent/Athlete uploads, additive params
+// on the existing coach path -- both default to the exact prior
+// behavior (server infers destination from team_id presence; the
+// coach's own #video-upload input is what gets reset) when omitted, so
+// the existing coach call site below needs no change. Progress/status
+// elements are intentionally still the shared #manual-upload-* ones:
+// #upload-section (coach) and #personal-upload-section (Parent/Athlete)
+// are mutually exclusive per user (see refreshUploadSectionVisibility()/
+// refreshPersonalUploadSectionVisibility()), so there's never a moment
+// both could need to show progress at once.
+function uploadVideo(file, teamId, uploadDestination, fileInputEl) {
   debugLog(`uploadVideo() called, file=${file ? "present" : "MISSING"}`);
 
   // Unassigned-video authorization fix: this used to require
@@ -1485,6 +1520,7 @@ function uploadVideo(file, teamId) {
   formData.append("video", file);
   formData.append("title", file.name);
   if (teamId) formData.append("team_id", teamId);
+  if (uploadDestination) formData.append("upload_destination", uploadDestination);
 
   const startedAt = Date.now();
 
@@ -1560,8 +1596,9 @@ function uploadVideo(file, teamId) {
         selectVideo(freshlyUploaded);
       }
 
-      if (videoUploadInput) {
-        videoUploadInput.value = "";
+      const inputToReset = fileInputEl || videoUploadInput;
+      if (inputToReset) {
+        inputToReset.value = "";
       }
     } else if (xhr.status === 401) {
       console.error("Upload failed: session expired");
@@ -1958,6 +1995,136 @@ if (videoUploadInput) {
     // is unchanged below; only what calls it changed.
     openUploadDestinationModal(file);
   });
+}
+
+/* ---------- UPLOAD (Parent/Athlete) ---------- */
+
+const personalVideoUploadInput = document.querySelector("#personal-video-upload");
+const personalUploadNoTeam = document.querySelector("#personal-upload-no-team");
+const personalUploadTeamModal = document.querySelector("#personal-upload-team-modal");
+const personalUploadTeamCloseBtn = document.querySelector("#personal-upload-team-close-btn");
+const personalUploadTeamList = document.querySelector("#personal-upload-team-list");
+const personalUploadTeamEmpty = document.querySelector("#personal-upload-team-empty");
+
+let pendingPersonalUploadFile = null;
+
+// Approved product rule for this release: Parent/Athlete uploads always
+// require an active team and always publish straight to that team's Team
+// Highlights — there is no Personal Film fallback here (unlike the Coach/
+// Assistant Coach picker, which keeps all three destinations). The empty-
+// state branch below (zero teams) is a defensive fallback only — the
+// normal case never reaches it, since refreshPersonalUploadSectionVisibility()
+// already hides the file input itself in favor of #personal-upload-no-team
+// when this user has no team to publish to. No button here either way:
+// "do not upload" means exactly that, not a silent Personal Film landing.
+// The server independently re-validates via canAccessTeam() regardless of
+// what this list offers (never trust the client's displayed controls).
+async function openPersonalUploadTeamModal(file) {
+  pendingPersonalUploadFile = file;
+  personalUploadTeamEmpty.classList.add("hidden");
+  personalUploadTeamList.innerHTML = "<li>Loading…</li>";
+  personalUploadTeamModal.classList.remove("hidden");
+
+  let teams = [];
+  try {
+    teams = await apiFetch(`/api/users/${currentUser.id}/teams`);
+  } catch (error) {
+    console.error("Failed to load teams for personal upload:", error);
+    teams = [];
+  }
+
+  personalUploadTeamList.innerHTML = "";
+
+  if (!teams.length) {
+    personalUploadTeamEmpty.classList.remove("hidden");
+    pendingPersonalUploadFile = null;
+    if (personalVideoUploadInput) personalVideoUploadInput.value = "";
+    return;
+  }
+
+  teams.forEach((team) => {
+    const li = document.createElement("li");
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = team.sport ? `${team.name} (${team.sport})` : team.name;
+    btn.addEventListener("click", () => confirmPersonalUploadTeam(team.id));
+    li.appendChild(btn);
+    personalUploadTeamList.appendChild(li);
+  });
+}
+
+function closePersonalUploadTeamModal() {
+  personalUploadTeamModal.classList.add("hidden");
+  pendingPersonalUploadFile = null;
+  if (personalVideoUploadInput) personalVideoUploadInput.value = "";
+}
+
+function confirmPersonalUploadTeam(teamId) {
+  if (!pendingPersonalUploadFile) return;
+  const file = pendingPersonalUploadFile;
+  personalUploadTeamModal.classList.add("hidden");
+  pendingPersonalUploadFile = null;
+  uploadVideo(file, teamId, "team_highlights", personalVideoUploadInput);
+}
+
+if (personalUploadTeamCloseBtn) {
+  personalUploadTeamCloseBtn.addEventListener("click", closePersonalUploadTeamModal);
+}
+
+if (personalVideoUploadInput) {
+  personalVideoUploadInput.addEventListener("change", (event) => {
+    const file = event.target.files[0];
+
+    if (!file) {
+      uploadVideo(file, null, null, personalVideoUploadInput); // preserves uploadVideo()'s own "no file" messaging/logging
+      return;
+    }
+
+    openPersonalUploadTeamModal(file);
+  });
+}
+
+// Logical complement of refreshUploadSectionVisibility() -- shown exactly
+// when that one would be hidden, since the two sections are mutually
+// exclusive per user under today's single global-role account model.
+// Additionally gates the file input itself behind an active-team check:
+// this release has no Personal Film fallback for this section, so with
+// zero teams there is nowhere for an upload to go — #personal-upload-no-team
+// shows a clear message instead, matching "do not upload" rather than
+// silently landing in Personal Film.
+async function refreshPersonalUploadSectionVisibility() {
+  const section = document.querySelector("#personal-upload-section");
+  const personalUploadLabel = document.querySelector('label[for="personal-video-upload"]');
+  const personalUploadHint = section ? section.querySelector(".upload-hint") : null;
+  if (!section) return;
+
+  if (!currentUser || currentUser.role === "coach") {
+    section.classList.add("hidden");
+    if (personalUploadNoTeam) personalUploadNoTeam.classList.add("hidden");
+    return;
+  }
+
+  try {
+    const myTeams = await apiFetch(`/api/users/${currentUser.id}/teams`);
+    const hasActiveCoachingRole = myTeams.some(
+      (team) => team.role_on_team === "coach" || team.role_on_team === "assistant_coach"
+    );
+    section.classList.toggle("hidden", hasActiveCoachingRole);
+
+    if (hasActiveCoachingRole) {
+      if (personalUploadNoTeam) personalUploadNoTeam.classList.add("hidden");
+    } else {
+      const hasAnyTeam = myTeams.length > 0;
+      if (personalUploadNoTeam) personalUploadNoTeam.classList.toggle("hidden", hasAnyTeam);
+      if (personalUploadLabel) personalUploadLabel.classList.toggle("hidden", !hasAnyTeam);
+      if (personalVideoUploadInput) personalVideoUploadInput.classList.toggle("hidden", !hasAnyTeam);
+      if (personalUploadHint) personalUploadHint.classList.toggle("hidden", !hasAnyTeam);
+    }
+  } catch (error) {
+    console.error("Failed to determine personal-upload-section visibility:", error);
+    section.classList.add("hidden");
+    if (personalUploadNoTeam) personalUploadNoTeam.classList.add("hidden");
+  }
 }
 
 // Diagnostic-only (Photos Picker No Queue investigation): observe whether

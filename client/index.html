@@ -330,11 +330,11 @@
                 </div>
               </div>
 
-              <!-- UPLOAD. Deliberately NOT .coach-only (that class is
-                   driven by users.role, the global account type set once
-                   at registration/invitation time — see
-                   refreshUploadSectionVisibility() in app.js). A real
-                   Assistant Coach account registers with global
+              <!-- UPLOAD (Coach/Assistant Coach). Deliberately NOT
+                   .coach-only (that class is driven by users.role, the
+                   global account type set once at registration/invitation
+                   time — see refreshUploadSectionVisibility() in app.js).
+                   A real Assistant Coach account registers with global
                    role='assistant_coach', never 'coach' (see
                    handleInvitedAuth() in invitations.js), so a
                    role==='coach' gate would incorrectly hide this from
@@ -342,8 +342,12 @@
                    after a live GET /api/users/:id/teams check confirms an
                    active coach/assistant_coach team_members row on ANY
                    team — per-team membership, not the account label.
-                   Parent/Athlete uploads intentionally have no surface
-                   here at all (see Team Highlights, not yet built). -->
+                   Destination (Personal Film / Team Film / Team Highlights)
+                   is chosen in #upload-destination-modal after a file is
+                   picked. Parent/Athlete uploads use the separate
+                   #personal-upload-section below instead -- destination is
+                   forced (team picked -> Team Highlights, skipped ->
+                   Personal Film), never a 3-way choice for that role. -->
               <div id="upload-section" class="hidden">
                 <label for="video-upload">Upload Film:</label>
 
@@ -352,21 +356,82 @@
                   id="video-upload"
                   accept="video/*"
                 />
+              </div>
 
-                <!-- Non-blocking status for the moment right after the
-                     native file/Photos picker hands control back to the
-                     page — same reasoning as #capture-native-status: never
-                     rely on alert() for feedback in this exact window. -->
-                <p id="manual-upload-status" class="hidden"></p>
+              <!-- UPLOAD (Parent/Athlete). Mutually exclusive with
+                   #upload-section above -- see
+                   refreshPersonalUploadSectionVisibility() in app.js, the
+                   logical complement of refreshUploadSectionVisibility().
+                   Requires an active team and always forces
+                   upload_destination='team_highlights' (publishes straight
+                   to that team's feed, no Coach review step -- see
+                   server/services/uploadAttempts.js) -- no Personal Film
+                   fallback in this release; refreshPersonalUploadSectionVisibility()
+                   hides the file input itself (showing
+                   #personal-upload-no-team instead) when this user has no
+                   team. Known limitation, same as the existing manual
+                   picker: very large existing video files can be
+                   unreliable on iPhone (Track 1, CLAUDE.md) --
+                   prefer Record Film when in doubt. -->
+              <div id="personal-upload-section" class="hidden">
+                <label for="personal-video-upload">Upload Film:</label>
 
-                <div id="manual-upload-progress" class="hidden">
-                  <p>Uploading...</p>
-                  <div class="video-progress-track">
-                    <div id="manual-upload-progress-fill" class="video-progress-fill"></div>
-                  </div>
-                  <p id="manual-upload-percent" class="video-progress-percent">0%</p>
-                  <p id="manual-upload-size" class="video-progress-sub"></p>
-                  <p id="manual-upload-eta" class="video-progress-eta"></p>
+                <input
+                  type="file"
+                  id="personal-video-upload"
+                  accept="video/*"
+                />
+
+                <p class="upload-hint">Uploading an existing large video? Record Film is more reliable on iPhone.</p>
+              </div>
+
+              <!-- Shown instead of #personal-upload-section's file input
+                   when the user has no active team -- Parent/Athlete
+                   uploads always publish to a team's Team Highlights in
+                   this release (no Personal Film fallback), so there is
+                   nowhere for an upload to go without one. See
+                   refreshPersonalUploadSectionVisibility() in app.js. -->
+              <div id="personal-upload-no-team" class="hidden">
+                <p>You're not on a team yet — ask a coach to add you before uploading film.</p>
+              </div>
+
+              <!-- Shared progress/status for both upload sections above --
+                   they're mutually exclusive per user, so there's never a
+                   moment both would need to show progress at once (see
+                   uploadVideo() in app.js). -->
+              <!-- Non-blocking status for the moment right after the
+                   native file/Photos picker hands control back to the
+                   page — same reasoning as #capture-native-status: never
+                   rely on alert() for feedback in this exact window. -->
+              <p id="manual-upload-status" class="hidden"></p>
+
+              <div id="manual-upload-progress" class="hidden">
+                <p>Uploading...</p>
+                <div class="video-progress-track">
+                  <div id="manual-upload-progress-fill" class="video-progress-fill"></div>
+                </div>
+                <p id="manual-upload-percent" class="video-progress-percent">0%</p>
+                <p id="manual-upload-size" class="video-progress-sub"></p>
+                <p id="manual-upload-eta" class="video-progress-eta"></p>
+              </div>
+
+              <!-- Team picker for the Parent/Athlete upload path above --
+                   same skeleton as #video-team-modal/#upload-destination-modal.
+                   No Personal Film option: this release requires an active
+                   team for every Parent/Athlete upload (see
+                   #personal-upload-no-team above, which gates reaching this
+                   modal at all in the normal case). The empty-state message
+                   below is a defensive fallback only, for the race where
+                   membership is revoked between page load and file pick --
+                   it has no button, matching "do not upload" with no team. -->
+              <div id="personal-upload-team-modal" class="hidden">
+                <div id="personal-upload-team-modal-inner">
+                  <button id="personal-upload-team-close-btn" type="button" aria-label="Close">✕</button>
+                  <h3>Add to a team</h3>
+                  <p>Publishes straight to that team's Team Highlights.</p>
+
+                  <ul id="personal-upload-team-list"></ul>
+                  <p id="personal-upload-team-empty" class="hidden">You're not on a team yet — ask a coach to add you before uploading film.</p>
                 </div>
               </div>
 
@@ -967,18 +1032,29 @@
             </div>
 
             <!-- Assign Team (after preview, per the desired flow — not an
-                 upfront question). Suggests the last-used team as a smart
-                 default when one exists (from the old Wrestling/Football
-                 auto-assume logic, repurposed here rather than as a gate). -->
+                 upfront question). Same destination rules as manual Upload
+                 Film (see openUploadDestinationModal()/
+                 openPersonalUploadTeamModal() in app.js): a Coach/Assistant
+                 Coach team gets two buttons (Team Film / Team Highlights);
+                 every other role gets one (Team Highlights only, forced).
+                 The last-used team (if still active) sorts first as a
+                 smart default -- see showConfirmTeamStep() in capture.js --
+                 but is rendered the same way as any other team, so the
+                 destination choice is never implicit. "Skip for now"
+                 (Personal Film) only shows for a user with Personal Film
+                 authority somewhere (mirrors the server's
+                 canUploadPersonalFilm()) -- never Parent/Athlete in this
+                 release. #capture-no-team-message is the equivalent of
+                 manual upload's #personal-upload-no-team: shown instead of
+                 the team list for a Parent/Athlete with no active team,
+                 with no way to proceed -- "do not upload" applies here too. -->
             <div id="capture-step-confirm-team" class="capture-step hidden">
               <h3>Assign Team</h3>
-              <div id="capture-suggested-team" class="hidden">
-                <button id="capture-confirm-suggested-team-btn" type="button"></button>
-              </div>
               <p>Choose a team</p>
               <ul id="capture-confirm-team-list"></ul>
+              <p id="capture-no-team-message" class="hidden">You're not on a team yet — ask a coach to add you before uploading film.</p>
               <div class="capture-step-actions">
-                <button id="capture-skip-team-btn" type="button">Skip for now</button>
+                <button id="capture-skip-team-btn" type="button">Skip for now (Personal Film)</button>
               </div>
             </div>
 
