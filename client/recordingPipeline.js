@@ -209,8 +209,14 @@ async function recordingPipelineUpload(recording) {
       } else if (xhr.status === 401) {
         console.error("Upload failed: session expired");
 
-        if (typeof window.logoutLocalState === "function") {
-          window.logoutLocalState();
+        if (!sessionExpiredHandled) {
+          sessionExpiredHandled = true;
+
+          if (typeof window.logoutLocalState === "function") {
+            window.logoutLocalState();
+          }
+
+          showSessionExpiredMessage();
         }
 
         await recordingLibrary.markFailed(recording.recordingId, new Error("401 Session expired"));

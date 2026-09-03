@@ -7,8 +7,22 @@ const API_URL = "https://cresamorfilmroom-3.onrender.com";
 // sent back to the login screen. window.logoutLocalState (not a captured
 // reference) because home.js patches that function — the patched version
 // needs to run, not app.js's original.
+//
+// Unified Login follow-up (session-expiration fix): a 401 is only ever a
+// real session expiration when the request WAS carrying a token
+// (wasAuthenticated) -- captured before the fetch, since a failed
+// logoutLocalState()/guard reset can't retroactively change what this
+// particular request sent. /api/auth/login's own "wrong password" 401 is
+// sent with no token at all (the user isn't logged in yet), so it falls
+// through to an ordinary thrown error instead of the global handler --
+// callers like handleLogin()/handleInvitedAuth() already show their own
+// clear message for that. sessionExpiredHandled collapses every 401 from
+// this same expired/invalid session into a single logout + single
+// message, even when several requests (polling loops, a page's own
+// initial loads) are in flight at once and all come back 401 together.
 async function apiFetch(path, options = {}) {
   const headers = { ...(options.headers || {}) };
+  const wasAuthenticated = Boolean(authToken);
 
   if (authToken) {
     headers.Authorization = `Bearer ${authToken}`;
@@ -29,9 +43,14 @@ async function apiFetch(path, options = {}) {
   }
 
   if (!response.ok) {
-    if (response.status === 401 && typeof window.logoutLocalState === "function") {
-      window.logoutLocalState();
-      showMessage("Your session expired — please log in again.");
+    if (response.status === 401 && wasAuthenticated && !sessionExpiredHandled) {
+      sessionExpiredHandled = true;
+
+      if (typeof window.logoutLocalState === "function") {
+        window.logoutLocalState();
+      }
+
+      showSessionExpiredMessage();
     }
 
     const error = new Error(data?.error || "Request failed.");
@@ -45,8 +64,7 @@ async function apiFetch(path, options = {}) {
 const emailInput = document.querySelector("#email-input");
 const passwordInput = document.querySelector("#password-input");
 
-const loginCoachBtn = document.querySelector("#login-coach-btn");
-const loginAthleteBtn = document.querySelector("#login-athlete-btn");
+const loginBtn = document.querySelector("#login-btn");
 const logoutBtn = document.querySelector("#logout-btn");
 
 const loginScreen = document.querySelector("#login-screen");
@@ -169,6 +187,17 @@ const speedDisplay = document.querySelector("#speed-display");
 let currentUser = null;
 let authToken = localStorage.getItem("token") || null;
 
+// Session-expiration handling: guards apiFetch's centralized 401 handler
+// (below) against firing once per in-flight request. Several polling
+// loops (messages, direct messages, video status) can each have a
+// request in flight when a token actually expires -- without this guard
+// every one of them independently called logoutLocalState() and popped
+// its own "session expired" alert(), which is what made expiration feel
+// repetitive/broken rather than a single clean logout. Reset to false in
+// activateApp() (the one function both a fresh login and a restored
+// session funnel through), so the next real expiration gets handled again.
+let sessionExpiredHandled = false;
+
 let clipStartTime = null;
 let clipEndTime = null;
 let currentVideoId = null;
@@ -201,6 +230,29 @@ let savedCanvasImage = null;
 
 function showMessage(message) {
   alert(message);
+}
+
+// Unified Login follow-up (session-expiration fix): the one place in the
+// app that shows a message WITHOUT blocking alert(). A stack of
+// concurrent 401s used to each pop their own alert() -- blocking dialogs
+// that queue up and must be dismissed one at a time, which is what made
+// a single real expiration feel like the app repeatedly kicking the user
+// out. apiFetch's sessionExpiredHandled guard already ensures this is
+// only ever called once per expiration; this only has to render once,
+// not de-dupe itself. Auto-dismisses so nothing needs manual dismissal.
+function showSessionExpiredMessage() {
+  const existing = document.querySelector("#session-expired-toast");
+  if (existing) existing.remove();
+
+  const toast = document.createElement("div");
+  toast.id = "session-expired-toast";
+  toast.textContent = "Your session expired. Please log in again.";
+  toast.setAttribute("role", "status");
+  document.body.appendChild(toast);
+
+  setTimeout(() => {
+    toast.remove();
+  }, 6000);
 }
 
 function setCoachVisibility(role) {
@@ -1245,6 +1297,11 @@ async function loadMyClips() {
 function activateApp(user) {
   currentUser = user;
 
+  // Session-expiration fix: a fresh login or a restored session both mean
+  // whatever expiration the guard was tracking is over -- the next 401
+  // (if any) is a new event and deserves its own single message.
+  sessionExpiredHandled = false;
+
   loginScreen.classList.add("hidden");
   appShell.classList.remove("hidden");
   document.body.classList.add("app-active");
@@ -1331,7 +1388,20 @@ async function registerUser(email, password, role) {
   return data;
 }
 
-async function handleAuth(role) {
+// Unified Login: authenticates the account, never a chosen role. This
+// used to be handleAuth(role) -- one function shared by three "Login as
+// X" buttons that tried login first and silently fell back to
+// registerUser(email, password, role) on ANY login failure, including a
+// returning user who simply mistyped their password. That's exactly the
+// role-at-login conflation this release removes: a wrong password no
+// longer risks quietly creating a second account under whatever role
+// button happened to be clicked. Login-only now, with the server's own
+// generic "Invalid login" surfaced directly -- registerUser() itself is
+// unchanged and still used, but only by the invitation-accept flow's own
+// handleInvitedAuth() (see invitations.js), which already correctly
+// decides login-vs-register from the server's accountExists check
+// instead of guessing via try/catch.
+async function handleLogin() {
   const email = emailInput.value.trim();
   const password = passwordInput.value.trim();
 
@@ -1341,13 +1411,7 @@ async function handleAuth(role) {
   }
 
   try {
-    let data;
-
-    try {
-      data = await loginUser(email, password);
-    } catch (loginError) {
-      data = await registerUser(email, password, role);
-    }
+    const data = await loginUser(email, password);
 
     authToken = data.token;
     currentUser = data.user;
@@ -1358,7 +1422,7 @@ async function handleAuth(role) {
     activateApp(currentUser);
   } catch (error) {
     console.error(error);
-    showMessage(error.message || "Authentication failed.");
+    showMessage(error.message || "Login failed.");
   }
 }
 
@@ -1603,11 +1667,15 @@ function uploadVideo(file, teamId, uploadDestination, fileInputEl) {
     } else if (xhr.status === 401) {
       console.error("Upload failed: session expired");
 
-      if (typeof window.logoutLocalState === "function") {
-        window.logoutLocalState();
-      }
+      if (!sessionExpiredHandled) {
+        sessionExpiredHandled = true;
 
-      showMessage("Your session expired — please log in again.");
+        if (typeof window.logoutLocalState === "function") {
+          window.logoutLocalState();
+        }
+
+        showSessionExpiredMessage();
+      }
     } else {
       console.error("Upload failed:", xhr.status, xhr.responseText);
       showMessage("Could not upload video.");
@@ -1812,12 +1880,8 @@ function handlePointerUp(event) {
 
 /* ---------- AUTH BUTTONS ---------- */
 
-loginCoachBtn.addEventListener("click", () => {
-  handleAuth("coach");
-});
-
-loginAthleteBtn.addEventListener("click", () => {
-  handleAuth("athlete");
+loginBtn.addEventListener("click", () => {
+  handleLogin();
 });
 
 logoutBtn.addEventListener("click", () => {

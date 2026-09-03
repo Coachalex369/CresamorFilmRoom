@@ -48,10 +48,15 @@
             placeholder="Password"
           />
 
+          <!-- Unified Login: authenticates the account, not a chosen role.
+               Permissions come from live team memberships/role_on_team
+               after login, never from a role picked here -- see
+               handleLogin() in app.js. #login-buttons kept as the
+               container id (not renamed) since invitations.js already
+               hides/shows it by that id when a pending invitation
+               replaces this with its own single contextual button. -->
           <div id="login-buttons">
-            <button id="login-coach-btn">Login as Coach</button>
-            <button id="login-athlete-btn">Login as Athlete</button>
-            <button id="login-parent-btn">Login as Parent</button>
+            <button id="login-btn">Log In</button>
           </div>
 
           <!-- Teams MVP: replaces the 3-button role choice above when a
