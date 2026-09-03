@@ -90,7 +90,7 @@ function recordingLibrarySubscribe(callback) {
   return () => recordingLibraryEvents.removeEventListener("change", handler);
 }
 
-async function recordingLibraryCreate({ blob, title, teamId, uploadedBy, mimeType }) {
+async function recordingLibraryCreate({ blob, title, teamId, uploadedBy, mimeType, uploadDestination }) {
   if (!(blob instanceof Blob)) {
     throw new Error("recordingLibrary.create() requires a real Blob/File — got " + typeof blob);
   }
@@ -101,6 +101,11 @@ async function recordingLibraryCreate({ blob, title, teamId, uploadedBy, mimeTyp
     title,
     teamId: teamId || null,
     uploadedBy,
+    // Optional -- an older queued recording synced after this app version
+    // ships simply won't have it (undefined), which recordingPipeline.js
+    // treats identically to omitting it: the server infers the
+    // destination from team_id presence, exactly today's behavior.
+    uploadDestination: uploadDestination || null,
     mimeType: mimeType || (blob && blob.type) || null,
     createdAt: Date.now(),
     lifecycle: "local",

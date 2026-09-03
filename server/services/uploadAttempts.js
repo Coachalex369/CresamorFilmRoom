@@ -38,6 +38,7 @@
 
 const crypto = require("crypto");
 const client = require("../db/client");
+const auditLog = require("./auditLog");
 const storage = require("./storage/storage");
 
 const LEASE_MINUTES = Number(process.env.UPLOAD_ATTEMPT_LEASE_MINUTES) || 60;
@@ -188,7 +189,7 @@ async function markR2Uploaded(attemptId, leaseToken) {
 async function completeAttempt(
   attemptId,
   leaseToken,
-  { title, storageKey, userId, teamId, uploadDestination, filmType, fileSize }
+  { title, storageKey, userId, teamId, uploadDestination, filmType, fileSize, ip = null }
 ) {
   const conn = await client.connect();
   try {
@@ -211,6 +212,17 @@ async function completeAttempt(
     );
     const video = videoInsert.rows[0];
 
+    // Parent/Athlete uploads: 'team_highlights' publishes straight to the
+    // team feed, atomically with the video row -- no separate Coach
+    // review/publish step (that's the whole point of this destination;
+    // POST /api/teams/:teamId/highlights remains the explicit path for a
+    // Coach/Assistant Coach promoting existing Team Film). Audited the
+    // same way as that route's own publish action (same event type/
+    // metadata shape) so both paths that can create an active
+    // team_highlights row leave an equivalent trail -- this insert had no
+    // audit call at all before, an oversight from when this was built
+    // forward-compatible but unreachable (the route rejected this
+    // destination outright until now).
     let teamHighlight = null;
     if (uploadDestination === "team_highlights") {
       const highlightInsert = await conn.query(
@@ -218,6 +230,13 @@ async function completeAttempt(
         [video.id, teamId, userId]
       );
       teamHighlight = highlightInsert.rows[0];
+
+      await auditLog.logSecurityEvent("team_highlight_published", {
+        userId,
+        ip,
+        metadata: { teamHighlightId: teamHighlight.id, videoId: video.id, teamId: Number(teamId), viaUpload: true },
+        conn,
+      });
     }
 
     await conn.query(

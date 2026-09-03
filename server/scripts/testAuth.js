@@ -82,6 +82,7 @@ async function main() {
     userIds: [],
     teamIds: [],
     videoIds: [],
+    highlightIds: [],
     clipIds: [],
     messageIds: [],
   };
@@ -350,6 +351,184 @@ async function main() {
     });
     assert("upload without a token is rejected", uploadNoAuth.status === 401);
 
+    // ---- Parent/Athlete uploads: the per-destination authorization
+    // matrix, enforced server-side regardless of what any client's UI
+    // offers (never trust the client's displayed controls). role_on_team
+    // on the SPECIFIC selected team decides this, never req.user.role
+    // alone. athlete2's role_on_team on `team` is 'athlete' (self-joined
+    // above, never granted a coach role — unlike athlete1, which WAS
+    // granted 'coach' role_on_team on this same team earlier in this
+    // script, so athlete2 is the genuine non-staff fixture here).
+    //
+    // Revoked-member exclusion is intentionally NOT re-tested here as its
+    // own case: canManageTeamHighlights()/canAccessTeam() (the exact
+    // functions this route's authorization reuses) already have dedicated
+    // revoked-member coverage in testTeamHighlightsRoutes.js against this
+    // same shared code, so a third copy of that check would be redundant,
+    // not more targeted.
+    function newUploadForm(title) {
+      const form = new FormData();
+      form.append("video", new Blob([fakeVideoBytes], { type: "video/mp4" }), "test.mp4");
+      form.append("title", title);
+      return form;
+    }
+
+    const athleteForgeTeamFilm = await req("/api/upload-video", {
+      method: "POST",
+      token: athlete2.token,
+      isForm: true,
+      body: (() => {
+        const form = newUploadForm(`${RUN_TAG}_athlete_forge_team_film`);
+        form.append("team_id", team.id);
+        form.append("upload_destination", "team_film");
+        return form;
+      })(),
+    });
+    assert(
+      "Parent/Athlete forging upload_destination=team_film -> 403",
+      athleteForgeTeamFilm.status === 403,
+      `status=${athleteForgeTeamFilm.status}`
+    );
+
+    const athleteForgePersonal = await req("/api/upload-video", {
+      method: "POST",
+      token: athlete2.token,
+      isForm: true,
+      body: (() => {
+        const form = newUploadForm(`${RUN_TAG}_athlete_forge_personal`);
+        form.append("upload_destination", "personal");
+        return form;
+      })(),
+    });
+    assert(
+      "Parent/Athlete forging upload_destination=personal -> 403",
+      athleteForgePersonal.status === 403,
+      `status=${athleteForgePersonal.status}`
+    );
+
+    // Positive control: the matrix isn't over-restrictive -- an athlete's
+    // ONLY legitimate destination (team_highlights) still works, and
+    // publishes straight to that team's feed (no Coach review step).
+    const athleteTeamHighlights = await req("/api/upload-video", {
+      method: "POST",
+      token: athlete2.token,
+      isForm: true,
+      body: (() => {
+        const form = newUploadForm(`${RUN_TAG}_athlete_team_highlights`);
+        form.append("team_id", team.id);
+        form.append("upload_destination", "team_highlights");
+        return form;
+      })(),
+    });
+    assert(
+      "Parent/Athlete uploading upload_destination=team_highlights -> 201",
+      athleteTeamHighlights.status === 201,
+      `status=${athleteTeamHighlights.status}`
+    );
+    if (athleteTeamHighlights.status === 201) {
+      created.videoIds.push(athleteTeamHighlights.data.id);
+      const highlightRow = await client.query("SELECT id FROM team_highlights WHERE video_id = $1", [
+        athleteTeamHighlights.data.id,
+      ]);
+      if (highlightRow.rows[0]) created.highlightIds.push(highlightRow.rows[0].id);
+      assert(
+        "athlete's team_highlights upload atomically created the matching team_highlights row",
+        highlightRow.rows.length === 1
+      );
+    }
+
+    // Positive control: Coach/Assistant Coach keeps both of its
+    // destinations on a team it actually staffs.
+    const coachTeamFilm = await req("/api/upload-video", {
+      method: "POST",
+      token: coach.token,
+      isForm: true,
+      body: (() => {
+        const form = newUploadForm(`${RUN_TAG}_coach_team_film`);
+        form.append("team_id", team.id);
+        form.append("upload_destination", "team_film");
+        return form;
+      })(),
+    });
+    assert("Coach uploading upload_destination=team_film -> 201", coachTeamFilm.status === 201, `status=${coachTeamFilm.status}`);
+    if (coachTeamFilm.status === 201) created.videoIds.push(coachTeamFilm.data.id);
+
+    const coachTeamHighlights = await req("/api/upload-video", {
+      method: "POST",
+      token: coach.token,
+      isForm: true,
+      body: (() => {
+        const form = newUploadForm(`${RUN_TAG}_coach_team_highlights`);
+        form.append("team_id", team.id);
+        form.append("upload_destination", "team_highlights");
+        return form;
+      })(),
+    });
+    assert(
+      "Coach uploading upload_destination=team_highlights -> 201",
+      coachTeamHighlights.status === 201,
+      `status=${coachTeamHighlights.status}`
+    );
+    if (coachTeamHighlights.status === 201) {
+      created.videoIds.push(coachTeamHighlights.data.id);
+      const highlightRow = await client.query("SELECT id FROM team_highlights WHERE video_id = $1", [
+        coachTeamHighlights.data.id,
+      ]);
+      if (highlightRow.rows[0]) created.highlightIds.push(highlightRow.rows[0].id);
+    }
+
+    // Unrelated (never-a-member) user blocked from every team-targeted
+    // destination on this team, matching "unrelated ... member: 403".
+    const outsiderForgeTeamHighlights = await req("/api/upload-video", {
+      method: "POST",
+      token: outsider.token,
+      isForm: true,
+      body: (() => {
+        const form = newUploadForm(`${RUN_TAG}_outsider_forge_team_highlights`);
+        form.append("team_id", team.id);
+        form.append("upload_destination", "team_highlights");
+        return form;
+      })(),
+    });
+    assert(
+      "unrelated user forging upload_destination=team_highlights -> 403",
+      outsiderForgeTeamHighlights.status === 403,
+      `status=${outsiderForgeTeamHighlights.status}`
+    );
+
+    const outsiderForgeTeamFilm = await req("/api/upload-video", {
+      method: "POST",
+      token: outsider.token,
+      isForm: true,
+      body: (() => {
+        const form = newUploadForm(`${RUN_TAG}_outsider_forge_team_film`);
+        form.append("team_id", team.id);
+        form.append("upload_destination", "team_film");
+        return form;
+      })(),
+    });
+    assert(
+      "unrelated user forging upload_destination=team_film -> 403",
+      outsiderForgeTeamFilm.status === 403,
+      `status=${outsiderForgeTeamFilm.status}`
+    );
+
+    // Preserve the currently-authorized Coach/teamless-Coach behavior for
+    // Personal Film -- unaffected regression check, not a new case (the
+    // very first manual-upload test above already exercises this exact
+    // path with no explicit upload_destination at all).
+    const athleteOutsiderPersonalStillBlocked = await req("/api/upload-video", {
+      method: "POST",
+      token: outsider.token,
+      isForm: true,
+      body: newUploadForm(`${RUN_TAG}_outsider_forge_personal`),
+    });
+    assert(
+      "non-coach uploading with no explicit destination and no team_id (implicit personal) -> 403",
+      athleteOutsiderPersonalStillBlocked.status === 403,
+      `status=${athleteOutsiderPersonalStillBlocked.status}`
+    );
+
     console.log(
       "NOTE: signed R2 playback and the Recording Pipeline's own XHR flow are not exercised by this " +
         "script (no browser, and STORAGE_PROVIDER isn't 'r2' in this environment) — carried over as a " +
@@ -398,6 +577,15 @@ async function main() {
       for (const id of created.clipIds) {
         await client.query("DELETE FROM clips WHERE id = $1", [id]);
       }
+      for (const id of created.highlightIds) {
+        // upload_attempts_completed_highlights_needs_post forbids a
+        // completed team_highlights-destination attempt from ever having
+        // a null team_highlight_id -- team_highlights.video_id/this FK is
+        // ON DELETE SET NULL, which would otherwise violate that check
+        // constraint. Delete the referencing attempt row first.
+        await client.query("DELETE FROM upload_attempts WHERE team_highlight_id = $1", [id]);
+        await client.query("DELETE FROM team_highlights WHERE id = $1", [id]);
+      }
       for (const id of created.videoIds) {
         const videoRow = await client.query("SELECT storage_key FROM videos WHERE id = $1", [id]);
         const storageKey = videoRow.rows[0]?.storage_key;
@@ -417,6 +605,14 @@ async function main() {
         }
         await client.query("DELETE FROM conversations WHERE team_id = $1", [id]);
         await client.query("DELETE FROM team_members WHERE team_id = $1", [id]);
+        // Parent/Athlete uploads: upload_attempts_team_id_fkey has no
+        // cascade/set-null behavior (unlike its video_id/team_highlight_id
+        // FKs) -- found by actually running this script for the first time
+        // with a team-targeted (non-Personal-Film) upload_attempts row in
+        // play. The later per-userIds cleanup below also deletes by
+        // user_id, but runs AFTER this loop -- too late to unblock this
+        // team's own deletion.
+        await client.query("DELETE FROM upload_attempts WHERE team_id = $1", [id]);
         await client.query("DELETE FROM teams WHERE id = $1", [id]);
       }
       for (const id of created.userIds) {

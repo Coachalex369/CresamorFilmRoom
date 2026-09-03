@@ -63,14 +63,13 @@ let cachedTeams = null;
 // for their own team") — this only removes every OTHER team in the
 // system from ever being offered as an option.
 //
-// TRANSITIONAL: this recording destination is still a single, flat
-// "team_id" — recording for a team does not yet distinguish a durable
-// Team Highlights post from Team Film Breakdown (that split, and its own
-// post/source data model, is a separate future branch — see CLAUDE.md /
-// the Personal Film security fix's own scope notes). Every active member
-// of a team, regardless of role, may record for it here exactly as
-// before; this file does not need to change again when Team Highlights
-// ships unless the Record flow itself gains a destination choice.
+// Parent/Athlete uploads: the Record flow's destination choice
+// (showConfirmTeamStep()) reads role_on_team off each entry this returns,
+// so the list itself stays exactly this: every active team membership,
+// any role. Cached per session -- reset to null on login/logout below so
+// a user switch on a shared device (or a mid-session membership change)
+// can never show a stale team list, which would otherwise directly
+// undermine the no-active-team blocking message this cache now feeds.
 async function loadTeams() {
   if (cachedTeams) return cachedTeams;
 
@@ -126,15 +125,15 @@ const captureReviewStatus = document.querySelector("#capture-review-status");
 const captureReviewStatusText = document.querySelector("#capture-review-status-text");
 const captureReviewStatusFill = document.querySelector("#capture-review-status-fill");
 
-const captureSuggestedTeam = document.querySelector("#capture-suggested-team");
-const captureConfirmSuggestedTeamBtn = document.querySelector("#capture-confirm-suggested-team-btn");
 const captureConfirmTeamList = document.querySelector("#capture-confirm-team-list");
+const captureNoTeamMessage = document.querySelector("#capture-no-team-message");
 const captureSkipTeamBtn = document.querySelector("#capture-skip-team-btn");
 
 /* ---------- state ---------- */
 
 const capture = {
   team: null, // { id, name, sport } | null
+  uploadDestination: null, // 'team_film' | 'team_highlights' | 'personal' -- set directly by the clicked button in showConfirmTeamStep()/the Skip handler, never re-derived
   stream: null, // desktop MediaRecorder path only
   recorder: null,
   chunks: [],
@@ -197,6 +196,7 @@ function teardownCapture() {
   capture.chunks = [];
   capture.blob = null;
   capture.team = null;
+  capture.uploadDestination = null;
   capture.elapsedSeconds = 0;
   capture.recordingId = null;
   captureRecordTimer.textContent = "00:00";
@@ -217,7 +217,6 @@ function teardownCapture() {
 // button is what stops a second physical tap from even registering as a
 // second click, not just being ignored programmatically after the fact).
 function setTeamConfirmationControlsDisabled(disabled) {
-  if (captureConfirmSuggestedTeamBtn) captureConfirmSuggestedTeamBtn.disabled = disabled;
   if (captureSkipTeamBtn) captureSkipTeamBtn.disabled = disabled;
   captureConfirmTeamList
     .querySelectorAll(".capture-team-btn")
@@ -545,53 +544,102 @@ captureUseVideoBtn.addEventListener("click", () => {
 
 /* ---------- assign team (after preview, per the desired flow) ---------- */
 
+// Same destination rules as manual Upload Film: role_on_team of EACH team
+// decides its own button shape (never the account's global role, since one
+// account can hold different roles across different teams) --
+// Coach/Assistant Coach gets two explicit choices per team (Team Film /
+// Team Highlights); every other role gets one (Team Highlights, forced,
+// no Personal Film fallback in this release). capture.uploadDestination
+// is set directly by whichever button is clicked -- syncRecording() below
+// just passes it through, it never re-derives or infers it.
 async function showConfirmTeamStep() {
   showCaptureStep("confirmTeam");
 
   const teams = await loadTeams();
   const context = getLastRecordingContext();
-  const suggestedTeam = context ? teams.find((t) => t.id === context.teamId) : null;
+  const suggestedTeamId = context ? context.teamId : null;
 
-  if (suggestedTeam) {
-    captureSuggestedTeam.classList.remove("hidden");
-    captureConfirmSuggestedTeamBtn.textContent = `✓ Confirm: ${suggestedTeam.name}`;
+  // Smart default: the last-used team (if still active) sorts first, but
+  // is rendered through the exact same per-team logic as every other team
+  // below -- never a separate one-tap shortcut that could drift out of
+  // sync with the destination rules.
+  const sortedTeams = [...teams].sort((a, b) => {
+    if (a.id === suggestedTeamId) return -1;
+    if (b.id === suggestedTeamId) return 1;
+    return 0;
+  });
 
-    captureConfirmSuggestedTeamBtn.onclick = () => {
-      capture.team = suggestedTeam;
-      syncRecording();
-    };
-  } else {
-    captureSuggestedTeam.classList.add("hidden");
-  }
+  // Mirrors the server's canUploadPersonalFilm(): a global role='coach'
+  // account, or an active coach/assistant_coach membership on ANY team.
+  // Never Parent/Athlete in this release.
+  const canPersonal =
+    currentUser.role === "coach" ||
+    teams.some((t) => t.role_on_team === "coach" || t.role_on_team === "assistant_coach");
 
+  captureSkipTeamBtn.classList.toggle("hidden", !canPersonal);
   captureConfirmTeamList.innerHTML = "";
-
-  teams
-    .filter((t) => !suggestedTeam || t.id !== suggestedTeam.id)
-    .forEach((team) => {
-      const li = document.createElement("li");
-      const btn = document.createElement("button");
-
-      btn.type = "button";
-      btn.className = "capture-team-btn";
-      btn.textContent = team.sport ? `${team.name} (${team.sport})` : team.name;
-
-      btn.addEventListener("click", () => {
-        capture.team = team;
-        syncRecording();
-      });
-
-      li.appendChild(btn);
-      captureConfirmTeamList.appendChild(li);
-    });
+  captureNoTeamMessage.classList.add("hidden");
 
   if (!teams.length) {
-    captureConfirmTeamList.innerHTML = "<li>No teams yet — an admin needs to create one.</li>";
+    if (canPersonal) {
+      captureConfirmTeamList.innerHTML = "<li>No teams yet — an admin needs to create one.</li>";
+    } else {
+      // Parent/Athlete with no active team: no Personal Film fallback in
+      // this release, so there is nowhere for a recording to go. Clear
+      // message, no button, no way to proceed -- "do not upload" applies
+      // here exactly as it does for manual Upload Film.
+      captureNoTeamMessage.classList.remove("hidden");
+    }
+    return;
   }
+
+  sortedTeams.forEach((team) => {
+    const li = document.createElement("li");
+    const label = team.sport ? `${team.name} (${team.sport})` : team.name;
+    const isStaff = team.role_on_team === "coach" || team.role_on_team === "assistant_coach";
+
+    if (isStaff) {
+      const filmBtn = document.createElement("button");
+      filmBtn.type = "button";
+      filmBtn.className = "capture-team-btn";
+      filmBtn.textContent = `${label} — Team Film`;
+      filmBtn.addEventListener("click", () => {
+        capture.team = team;
+        capture.uploadDestination = "team_film";
+        syncRecording();
+      });
+      li.appendChild(filmBtn);
+
+      const highlightsBtn = document.createElement("button");
+      highlightsBtn.type = "button";
+      highlightsBtn.className = "capture-team-btn";
+      highlightsBtn.textContent = `${label} — Team Highlights`;
+      highlightsBtn.addEventListener("click", () => {
+        capture.team = team;
+        capture.uploadDestination = "team_highlights";
+        syncRecording();
+      });
+      li.appendChild(highlightsBtn);
+    } else {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "capture-team-btn";
+      btn.textContent = label;
+      btn.addEventListener("click", () => {
+        capture.team = team;
+        capture.uploadDestination = "team_highlights";
+        syncRecording();
+      });
+      li.appendChild(btn);
+    }
+
+    captureConfirmTeamList.appendChild(li);
+  });
 }
 
 captureSkipTeamBtn.addEventListener("click", () => {
   capture.team = null;
+  capture.uploadDestination = "personal";
   syncRecording();
 });
 
@@ -665,12 +713,18 @@ async function syncRecording() {
       `name=${capture.blob.name || "(none)"}`
     );
 
+    // capture.uploadDestination was set directly by whichever button in
+    // showConfirmTeamStep() was clicked (Team Film / Team Highlights /
+    // Skip -> Personal Film) -- never re-derived here, so there is exactly
+    // one place that decides it, matching manual Upload Film's
+    // confirmUploadDestination()/confirmPersonalUploadTeam().
     debugLog("syncRecording() calling recordingLibrary.create()");
     const record = await recordingLibrary.create({
       blob: capture.blob,
       title: buildRecordingTitle(),
       teamId: capture.team ? capture.team.id : null,
       uploadedBy: currentUser.id,
+      uploadDestination: capture.uploadDestination,
     });
 
     debugLog(`syncRecording() got recordingId=${record.recordingId}, lifecycle=${record.lifecycle}`);
@@ -710,3 +764,20 @@ if (recordFilmBtn) {
 }
 
 captureCloseBtn.addEventListener("click", closeCaptureModal);
+
+// Found during manual testing of the Parent/Athlete no-active-team
+// blocking message: cachedTeams was never reset anywhere, so switching
+// accounts on a shared device without a page reload could show a stale
+// team list (or a stale empty one) for the new user -- same class of gap
+// as teamHighlightsScreen.js's own activateApp fix.
+const __originalActivateAppForCapture = window.activateApp;
+window.activateApp = function (user) {
+  __originalActivateAppForCapture(user);
+  cachedTeams = null;
+};
+
+const __originalLogoutLocalStateForCapture = window.logoutLocalState;
+window.logoutLocalState = function () {
+  cachedTeams = null;
+  __originalLogoutLocalStateForCapture();
+};
