@@ -6,27 +6,38 @@
   classifyAndRoute() instead of the old needsFormatConversion()-only
   branch:
 
-    uploading -> classifying -> ready              (already browser-playable)
-    uploading -> classifying -> remuxing -> ready   (codecs fine, container isn't —
-                                                      cheap stream-copy, safe on the web dyno)
-    uploading -> classifying -> transcode_paused    (genuinely incompatible codecs —
-                                                      no worker yet this phase; original
-                                                      is preserved, never a dead end)
-    ... -> failed                                    (a genuine classify/remux error)
+    uploading -> classifying -> ready                          (already browser-playable)
+    uploading -> classifying -> remuxing -> ready               (codecs fine, container isn't —
+                                                                   cheap stream-copy, safe on the web dyno)
+    uploading -> classifying -> queued -> converting -> ready   (Android HEVC playback fix:
+                                                                   genuinely incompatible codecs,
+                                                                   real full transcode via the
+                                                                   legacy convertOne()/convertVideo()
+                                                                   below, size-capped exactly like
+                                                                   every other conversion entry point)
+    uploading -> classifying -> transcode_paused                (oversized-for-transcode, or size
+                                                                   unverifiable — honest, non-terminal;
+                                                                   Retry re-enters classification and
+                                                                   re-evaluates from scratch)
+    ... -> failed                                                (a genuine classify/remux/transcode error)
 
-  Size no longer participates in this routing decision at all — the old
-  MAX_AUTO_CONVERSION_SIZE_BYTES gate and 'deferred' terminal state are
-  gone from every path that runs on new uploads (see git history / the
-  Play-First Pipeline plan for the full rationale, and the ffprobe-verified
-  proof against the real 654MB video 274).
+  Size doesn't participate in the CLASSIFICATION decision (what codec/
+  container a file has is checked regardless of size) — but it still gates
+  whether an actual transcode is safe to launch on this instance, exactly
+  as it always has for the legacy path below; see MAX_AUTO_CONVERSION_SIZE_BYTES's
+  own comment for the real OOM incident that cap exists for.
 
-  The OLD full-transcode path (videoConversion.js's convertVideo(),
+  The full-transcode path (videoConversion.js's convertVideo(),
   conversionQueue/conversionBusy, convertOne(), retryConversion(),
-  repairVideo(), and the 'converting'/'queued'/'deferred' recovery
-  logic below) is deliberately left fully intact and untouched — it's
-  dormant (nothing in the new pipeline calls it), but it's exactly the
-  machinery a future full-transcode worker would reuse, and
-  testConversionRecovery.js still exercises it directly.
+  repairVideo(), and the 'converting'/'queued'/'deferred' recovery logic
+  below) was originally built for the legacy .mov-extension gate
+  (needsFormatConversion()) and left dormant for the new pipeline's
+  'transcode_needed' classification until this exact machinery was reused
+  to actually resolve it, rather than duplicated — convertOne()'s own gate
+  now accepts either trigger. testConversionRecovery.js still exercises
+  the decision logic directly, and performStrandedConversionRecovery()'s
+  restart-safety (recovers any 'converting' row unconditionally) applies
+  to both triggers identically, with no changes needed there.
 
   Classification/remux mechanics (ffprobe, ffmpeg stream-copy, temp file
   lifecycle) live in videoClassification.js/videoRemux.js — this file owns
@@ -97,8 +108,15 @@ async function convertOne(videoId) {
 
     // Defensive — shouldn't happen in normal operation (only
     // conversion-needing videos ever get queued), but a deleted-mid-queue
-    // or already-converted row must not crash the queue drain.
-    if (!video || !needsFormatConversion(video)) return;
+    // or already-converted row must not crash the queue drain. Two ways
+    // in now: the legacy .mov-extension gate, or a real codec
+    // classification of 'transcode_needed' (Android HEVC playback fix) --
+    // this is also what makes performStrandedConversionRecovery() correct
+    // for the new path with zero changes there: it recovers by
+    // processing_status = 'converting' alone, and a resumed HEVC row's
+    // classification column is already persisted from before the crash,
+    // so this check still recognizes it as legitimate work, not a no-op.
+    if (!video || !(needsFormatConversion(video) || video.classification === "transcode_needed")) return;
 
     await client.query("UPDATE videos SET processing_status = 'converting' WHERE id = $1", [videoId]);
 
@@ -186,14 +204,50 @@ async function classifyAndRouteOne(videoId) {
     }
 
     if (classification === "transcode_needed") {
-      // Honest, non-terminal — the non-negotiable rule this whole pipeline
-      // exists for: never claim a video is unplayable. Original is fully
-      // preserved; retryClassification() re-evaluates it later (e.g. once
-      // a future transcode worker exists).
+      // Real transcode worker (Android HEVC playback fix): enqueue into
+      // the SAME single-flight conversion queue/convertOne() the legacy
+      // .mov path already uses -- see videoConversion.js's convertVideo(),
+      // already production-hardened (thread-pinned after a real OOM
+      // incident, preflight resolution/fps bounds, timeout+SIGKILL,
+      // streams to/from disk, never buffers the whole file in memory).
+      // Same size cap as every other conversion entry point
+      // (retryConversion()/recoverRowBatch()) -- the Play-First pipeline's
+      // own "size plays no part in routing" only ever meant classification
+      // itself; actually launching FFmpeg is exactly the OOM risk that cap
+      // exists for, and skipping it here would silently reopen that
+      // incident for a large HEVC upload. An oversized or size-
+      // unverifiable video stays 'transcode_paused' -- honest, non-
+      // terminal, exactly the state a real Retry now meaningfully acts on
+      // (previously a no-op back to the same paused state, since nothing
+      // consumed this classification at all).
+      let sizeBytes;
+      try {
+        sizeBytes = await resolveSourceSizeBytes(video);
+      } catch (error) {
+        const message = `Could not verify file size before transcode (${String(error?.message || error).slice(0, 400)})`;
+        await client.query(
+          `UPDATE videos SET processing_status = 'transcode_paused', processing_error = $1 WHERE id = $2`,
+          [message, videoId]
+        );
+        return;
+      }
+
+      if (sizeBytes > MAX_AUTO_CONVERSION_SIZE_BYTES) {
+        await client.query(
+          `UPDATE videos SET processing_status = 'transcode_paused', processing_error = NULL WHERE id = $1`,
+          [videoId]
+        );
+        return;
+      }
+
+      // 'queued' first, not 'converting' directly -- matches every other
+      // enqueue-conversion call site; convertOne() itself transitions to
+      // 'converting' once actually picked up off the single-flight queue.
       await client.query(
-        `UPDATE videos SET processing_status = 'transcode_paused', processing_error = NULL WHERE id = $1`,
+        `UPDATE videos SET processing_status = 'queued', processing_error = NULL WHERE id = $1`,
         [videoId]
       );
+      enqueueConversion(videoId);
       return;
     }
 
@@ -673,9 +727,10 @@ module.exports = {
   // server/scripts/reclassifyDeferredVideos.js, which needs to await each
   // row's outcome synchronously to report results as it processes a batch.
   classifyAndRouteOne,
-  // Legacy full-transcode path — dormant (nothing in the new pipeline
-  // calls these), kept intact for testConversionRecovery.js and as the
-  // machinery a future transcode worker would reuse.
+  // Full-transcode path — now also the real worker behind Play-First's
+  // 'transcode_needed' classification (Android HEVC playback fix), not
+  // just the legacy .mov-extension gate. Still exercised directly by
+  // testConversionRecovery.js.
   needsFormatConversion,
   retryConversion,
   recoverStrandedConversions,
