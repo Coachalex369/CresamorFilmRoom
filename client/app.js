@@ -153,7 +153,6 @@ const highlightStartBtn = document.querySelector("#highlight-start-btn");
 const highlightEndBtn = document.querySelector("#highlight-end-btn");
 const saveHighlightBtn = document.querySelector("#save-highlight-btn");
 const highlightsList = document.querySelector("#highlights-list");
-const myHighlightsList = document.querySelector("#my-highlights-list");
 
 const playBtn = document.querySelector("#play-btn");
 const pauseBtn = document.querySelector("#pause-btn");
@@ -1214,11 +1213,9 @@ async function loadMyClips() {
     }
 
     myClips = clips;
-    renderClipList(myHighlightsList, myClips, true);
     renderCurrentVideoHighlights();
   } catch (error) {
     console.error("Failed to load clips:", error);
-    myHighlightsList.innerHTML = "<li>Could not load highlights.</li>";
     highlightsList.innerHTML = "<li>Could not load highlights.</li>";
   }
 }
@@ -1266,7 +1263,6 @@ function logoutLocalState() {
 
   emailInput.value = "";
   passwordInput.value = "";
-  myHighlightsList.innerHTML = "";
   highlightsList.innerHTML = "";
   videoList.innerHTML = "";
 

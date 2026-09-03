@@ -106,7 +106,7 @@
           </button>
 
           <button class="tab-btn" data-screen="highlights-screen">
-            Highlights
+            Team Highlights
           </button>
 
           <button class="tab-btn" data-screen="messages-screen">
@@ -230,6 +230,19 @@
 
                 <div id="reel-thumbnails"></div>
               </div>
+            </section>
+
+            <!-- MY SNAPSHOTS — relocated from the old Highlights tab
+                 (now Team Highlights, a team-scoped feed unrelated to
+                 personal media) when that screen was repurposed. Kept
+                 exactly as it was: no capture/populate wiring exists yet
+                 anywhere in this codebase (#snapshot-btn in the Film
+                 Room's Highlight Tools has never had a listener), so this
+                 is a faithful relocation of the same placeholder, not a
+                 new feature. -->
+            <section id="my-snapshots">
+              <h2>My Snapshots</h2>
+              <ul id="snapshots-list"></ul>
             </section>
 
             <!-- CONTINUE WATCHING -->
@@ -434,20 +447,50 @@
           </section>
         </section>
 
-        <!-- HIGHLIGHTS SCREEN -->
+        <!-- TEAM HIGHLIGHTS SCREEN (formerly "Highlights" -- that was
+             personal saved clips/snapshots, now relocated to Home; see
+             teamHighlightsScreen.js. This screen is exclusively the
+             team-scoped published-source feed from Team Highlights
+             Slice 2 (server/routes/teamHighlights.js). -->
         <section id="highlights-screen" class="app-screen">
-          <div id="highlights-page">
-            <section>
-              <h2>My Highlights</h2>
-              <ul id="my-highlights-list"></ul>
-            </section>
+          <div id="team-highlights-page">
+            <div id="team-highlights-header">
+              <h2>Team Highlights</h2>
 
-            <section>
-              <h2>My Snapshots</h2>
-              <ul id="snapshots-list"></ul>
-            </section>
+              <button id="team-highlights-publish-btn" type="button" class="hidden">+ Publish from Team Film</button>
+            </div>
+
+            <div id="team-highlights-team-context">
+              <span id="team-highlights-team-label" class="hidden"></span>
+
+              <label id="team-highlights-team-select-label" class="hidden" for="team-highlights-team-select">Team</label>
+              <select id="team-highlights-team-select" class="hidden"></select>
+
+              <p id="team-highlights-team-empty" class="hidden">You're not on a team yet.</p>
+            </div>
+
+            <ul id="team-highlights-feed"></ul>
+            <p id="team-highlights-feed-empty" class="hidden">No Team Highlights yet.</p>
+            <p id="team-highlights-feed-error" class="hidden">Could not load Team Highlights.</p>
           </div>
         </section>
+
+        <!-- Publish-from-Team-Film picker. Same skeleton as
+             #video-team-modal/#upload-destination-modal. Populated
+             client-side from GET /api/videos, narrowed to the selected
+             team's eligible Team Film -- POST /api/teams/:teamId/highlights
+             independently re-validates eligibility regardless of what
+             this list offers. -->
+        <div id="team-highlights-publish-modal" class="hidden">
+          <div id="team-highlights-publish-modal-inner">
+            <button id="team-highlights-publish-close-btn" type="button" aria-label="Close">✕</button>
+            <h3>Publish from Team Film</h3>
+
+            <ul id="team-highlights-publish-picker-list"></ul>
+            <p id="team-highlights-publish-picker-empty" class="hidden">No eligible Team Film to publish.</p>
+            <p id="team-highlights-publish-error" class="hidden"></p>
+          </div>
+        </div>
 
         <!-- MESSAGES SCREEN -->
         <!-- MESSAGES SCREEN — a real inbox (Direct Messaging Phase 2):
@@ -1002,6 +1045,7 @@
     <script src="./teams.js"></script>
     <script src="./invitations.js"></script>
     <script src="./schedule.js"></script>
+    <script src="./teamHighlightsScreen.js"></script>
     <script src="./directMessages.js"></script>
   </body>
 </html>
