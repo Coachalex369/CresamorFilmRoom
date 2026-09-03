@@ -4,8 +4,9 @@ const client = require("../db/client");
 const { authenticate } = require("../middleware/authenticate");
 const { requireOwner } = require("../middleware/authorize");
 const { canViewVideo, canViewVideosBatch } = require("../services/permissions");
-const { lockAndAssertNotPurgePending } = require("../services/sourceRetention");
+const { lockAndAssertNotPurgePending, markForPurgeReevaluationSql } = require("../services/sourceRetention");
 const { withPlaybackStatus } = require("../services/videoPlayback");
+const { logSecurityEvent } = require("../services/auditLog");
 
 const router = express.Router();
 
@@ -37,10 +38,22 @@ const router = express.Router();
 // and the purge decision mutually exclusive, enforced by Postgres itself
 // rather than application timing.
 router.post("/api/clips", authenticate, async (req, res) => {
-  const { title, start_time, end_time, video_id } = req.body;
+  const { title, start_time, end_time, video_id, client_request_id: clientRequestId } = req.body;
 
   if (!title || start_time === undefined || end_time === undefined || !video_id) {
     return res.status(400).json({ error: "Missing required clip fields" });
+  }
+
+  // Number.isFinite (not a bare <=) also rejects NaN/Infinity/non-numeric
+  // input, not just "end before start" -- a bare `<=` is always false for
+  // NaN, which would otherwise let a malformed direct API request (or a
+  // client bug, e.g. an unset video duration) through as if it were valid.
+  if (
+    !Number.isFinite(Number(start_time)) ||
+    !Number.isFinite(Number(end_time)) ||
+    Number(end_time) <= Number(start_time)
+  ) {
+    return res.status(400).json({ error: "Clip end time must be after start time" });
   }
 
   const conn = await client.connect();
@@ -66,23 +79,135 @@ router.post("/api/clips", authenticate, async (req, res) => {
       return res.status(403).json({ error: "Not authorized to create a clip from this video" });
     }
 
-    const result = await conn.query(
+    // One-Button Highlight release: an optional client_request_id makes
+    // this endpoint idempotent per user. ON CONFLICT DO NOTHING against
+    // the partial unique index (migration 020) means a retried/duplicated
+    // submission of the SAME attempt never inserts a second row; when
+    // that happens (0 rows back from the INSERT) the original row is
+    // fetched and returned instead, so the caller always gets back "the"
+    // clip for that attempt, not an error. A request with no
+    // client_request_id (older/other callers) always inserts, unchanged
+    // from prior behavior — the partial index only applies to non-null
+    // values.
+    const insertResult = await conn.query(
       `
-      INSERT INTO clips (title, start_time, end_time, video_id, user_id)
-      VALUES ($1, $2, $3, $4, $5)
+      INSERT INTO clips (title, start_time, end_time, video_id, user_id, client_request_id)
+      VALUES ($1, $2, $3, $4, $5, $6)
+      ON CONFLICT (user_id, client_request_id) WHERE client_request_id IS NOT NULL DO NOTHING
       RETURNING *
       `,
-      [title, start_time, end_time, video_id, req.user.id]
+      [title, start_time, end_time, video_id, req.user.id, clientRequestId || null]
     );
 
+    let clip = insertResult.rows[0];
+
+    if (!clip && clientRequestId) {
+      const existing = await conn.query(
+        "SELECT * FROM clips WHERE user_id = $1 AND client_request_id = $2",
+        [req.user.id, clientRequestId]
+      );
+      clip = existing.rows[0];
+    }
+
     await conn.query("COMMIT");
-    res.status(201).json(result.rows[0]);
+    res.status(201).json(clip);
   } catch (err) {
     await conn.query("ROLLBACK").catch(() => {});
     console.error("POST /api/clips error:", err);
     res.status(500).json({ error: "Failed to save clip" });
   } finally {
     conn.release();
+  }
+});
+
+// One-Button Highlight release: owner-only delete. A clip is the "live
+// reference" side of source retention (see sourceRetention.js) -- deleting
+// it can be the event that makes a video eligible for physical purge, but
+// ONLY if that video is already out of Film (film_removed_at set). Same
+// gate teamHighlights.js's DELETE route uses for the identical reason: an
+// active Film source must never become purge-eligible just because it
+// currently has no clips/posts referencing it. markForPurgeReevaluationSql
+// runs in the SAME transaction as the clip delete (cheap flag-set, no
+// lock, no R2 call) -- the actual eligibility decision happens later,
+// under its own proper lock, in the sweeper.
+router.delete("/api/clips/:id", authenticate, async (req, res) => {
+  const { id } = req.params;
+
+  const conn = await client.connect();
+  try {
+    await conn.query("BEGIN");
+
+    const result = await conn.query(
+      `
+      SELECT clips.id, clips.user_id, clips.video_id, videos.film_removed_at
+      FROM clips
+      LEFT JOIN videos ON videos.id = clips.video_id
+      WHERE clips.id = $1
+      FOR UPDATE OF clips
+      `,
+      [id]
+    );
+
+    const clip = result.rows[0];
+    if (!clip) {
+      await conn.query("ROLLBACK");
+      return res.status(404).json({ error: "Highlight not found" });
+    }
+
+    if (Number(clip.user_id) !== Number(req.user.id)) {
+      await conn.query("ROLLBACK");
+      return res.status(403).json({ error: "Not authorized to delete this highlight" });
+    }
+
+    await conn.query("DELETE FROM clips WHERE id = $1", [id]);
+
+    if (clip.video_id !== null && clip.film_removed_at !== null) {
+      await conn.query(markForPurgeReevaluationSql(), [clip.video_id]);
+    }
+
+    await logSecurityEvent("clip_deleted", {
+      userId: req.user.id,
+      ip: req.ip,
+      metadata: { clipId: Number(id), videoId: clip.video_id },
+      conn,
+    });
+
+    await conn.query("COMMIT");
+    res.json({ id: clip.id, deleted: true });
+  } catch (err) {
+    await conn.query("ROLLBACK").catch(() => {});
+    console.error("DELETE /api/clips/:id error:", err);
+    res.status(500).json({ error: "Failed to delete highlight" });
+  } finally {
+    conn.release();
+  }
+});
+
+// One-Button Highlight release: owner-only rename. Title only -- start/end
+// time and video_id are immutable once saved (renaming is the one
+// after-the-fact edit the approved workflow actually calls for).
+router.patch("/api/clips/:id", authenticate, async (req, res) => {
+  const { id } = req.params;
+  const { title } = req.body;
+
+  if (!title || !String(title).trim()) {
+    return res.status(400).json({ error: "Title is required" });
+  }
+
+  try {
+    const result = await client.query(
+      "UPDATE clips SET title = $1 WHERE id = $2 AND user_id = $3 RETURNING *",
+      [String(title).trim(), id, req.user.id]
+    );
+
+    if (!result.rows[0]) {
+      return res.status(404).json({ error: "Highlight not found" });
+    }
+
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error("PATCH /api/clips/:id error:", err);
+    res.status(500).json({ error: "Failed to rename highlight" });
   }
 });
 

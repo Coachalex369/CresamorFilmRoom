@@ -462,16 +462,16 @@
               </div>
 
               <!-- HIGHLIGHT TOOLS -->
+              <!-- One-Button Highlight: Start Clip/End Clip/Save Highlight/
+                   title input collapsed into a single toggle button. No
+                   title prompt -- a default title is generated client-side
+                   from the source video + timestamp (see
+                   buildDefaultHighlightTitle()/finishAndSaveHighlightClip()
+                   in app.js). Renaming/deleting a saved highlight
+                   afterward happens in the highlights list below
+                   (renderClipList()), not here. -->
               <div id="highlight-tools">
-                <input
-                  type="text"
-                  id="highlight-title-input"
-                  placeholder="Highlight title"
-                />
-
-                <button id="highlight-start-btn">Start Clip</button>
-                <button id="highlight-end-btn">End Clip</button>
-                <button id="save-highlight-btn">Save Highlight</button>
+                <button id="highlight-toggle-btn" type="button">Start Highlight</button>
                 <button id="snapshot-btn">📸 Snapshot</button>
               </div>
 
