@@ -89,8 +89,8 @@ async function main() {
     );
 
     const guardInsert = await client.query(
-      `INSERT INTO videos (title, storage_key, uploaded_by, processing_status, source_size_bytes)
-       VALUES ($1, $2, $3, 'converting', $4) RETURNING id`,
+      `INSERT INTO videos (title, storage_key, uploaded_by, processing_status, source_size_bytes, upload_destination)
+       VALUES ($1, $2, $3, 'converting', $4, 'personal') RETURNING id`,
       [`${RUN_TAG}-guard-check`, `convrecovery-test/${RUN_TAG}-guard-check.mov`, testUserId, 1024]
     );
     createdVideoIds.push(guardInsert.rows[0].id);
@@ -117,8 +117,8 @@ async function main() {
     const smallKey = `convrecovery-test/${RUN_TAG}-small.mov`;
     fs.writeFileSync(path.join(__dirname, "../../uploads", smallKey), Buffer.alloc(1024, 1));
     const smallInsert = await client.query(
-      `INSERT INTO videos (title, storage_key, uploaded_by, processing_status, source_size_bytes)
-       VALUES ($1, $2, $3, 'converting', $4) RETURNING id`,
+      `INSERT INTO videos (title, storage_key, uploaded_by, processing_status, source_size_bytes, upload_destination)
+       VALUES ($1, $2, $3, 'converting', $4, 'personal') RETURNING id`,
       [`${RUN_TAG}-small`, smallKey, testUserId, 1024]
     );
     createdVideoIds.push(smallInsert.rows[0].id);
@@ -128,8 +128,8 @@ async function main() {
     // repeating the original 502 incident (blindly resuming a large
     // file's conversion at boot).
     const bigInsert = await client.query(
-      `INSERT INTO videos (title, storage_key, uploaded_by, processing_status, source_size_bytes)
-       VALUES ($1, $2, $3, 'converting', $4) RETURNING id`,
+      `INSERT INTO videos (title, storage_key, uploaded_by, processing_status, source_size_bytes, upload_destination)
+       VALUES ($1, $2, $3, 'converting', $4, 'personal') RETURNING id`,
       [
         `${RUN_TAG}-big`,
         `convrecovery-test/${RUN_TAG}-big.mov`,
@@ -145,8 +145,8 @@ async function main() {
     const legacySmallKey = `convrecovery-test/${RUN_TAG}-legacy-small.mov`;
     fs.writeFileSync(path.join(__dirname, "../../uploads", legacySmallKey), Buffer.alloc(2048, 1));
     const legacySmallInsert = await client.query(
-      `INSERT INTO videos (title, storage_key, uploaded_by, processing_status, source_size_bytes)
-       VALUES ($1, $2, $3, 'converting', NULL) RETURNING id`,
+      `INSERT INTO videos (title, storage_key, uploaded_by, processing_status, source_size_bytes, upload_destination)
+       VALUES ($1, $2, $3, 'converting', NULL, 'personal') RETURNING id`,
       [`${RUN_TAG}-legacy-small`, legacySmallKey, testUserId]
     );
     createdVideoIds.push(legacySmallInsert.rows[0].id);
@@ -156,8 +156,8 @@ async function main() {
     // processing_error, never left stuck at 'converting' and never
     // blindly resumed without knowing its size.
     const legacyMissingInsert = await client.query(
-      `INSERT INTO videos (title, storage_key, uploaded_by, processing_status, source_size_bytes)
-       VALUES ($1, $2, $3, 'converting', NULL) RETURNING id`,
+      `INSERT INTO videos (title, storage_key, uploaded_by, processing_status, source_size_bytes, upload_destination)
+       VALUES ($1, $2, $3, 'converting', NULL, 'personal') RETURNING id`,
       [
         `${RUN_TAG}-legacy-missing`,
         `convrecovery-test/${RUN_TAG}-legacy-missing.mov`,
@@ -170,8 +170,8 @@ async function main() {
     // completely untouched — confirms the recovery query stays scoped to
     // 'converting' only, never broadened to 'deferred'.
     const deferredInsert = await client.query(
-      `INSERT INTO videos (title, storage_key, uploaded_by, processing_status, source_size_bytes)
-       VALUES ($1, $2, $3, 'deferred', $4) RETURNING id`,
+      `INSERT INTO videos (title, storage_key, uploaded_by, processing_status, source_size_bytes, upload_destination)
+       VALUES ($1, $2, $3, 'deferred', $4, 'personal') RETURNING id`,
       [
         `${RUN_TAG}-already-deferred`,
         `convrecovery-test/${RUN_TAG}-already-deferred.mov`,
@@ -186,8 +186,8 @@ async function main() {
     // production instance for real, which is the incident this fix is
     // for. Neither case should ever spawn FFmpeg.
     const retryBigInsert = await client.query(
-      `INSERT INTO videos (title, storage_key, uploaded_by, processing_status, source_size_bytes)
-       VALUES ($1, $2, $3, 'failed', $4) RETURNING id`,
+      `INSERT INTO videos (title, storage_key, uploaded_by, processing_status, source_size_bytes, upload_destination)
+       VALUES ($1, $2, $3, 'failed', $4, 'personal') RETURNING id`,
       [
         `${RUN_TAG}-retry-big`,
         `convrecovery-test/${RUN_TAG}-retry-big.mov`,
@@ -205,8 +205,8 @@ async function main() {
     );
 
     const retryMissingInsert = await client.query(
-      `INSERT INTO videos (title, storage_key, uploaded_by, processing_status, source_size_bytes)
-       VALUES ($1, $2, $3, 'failed', NULL) RETURNING id`,
+      `INSERT INTO videos (title, storage_key, uploaded_by, processing_status, source_size_bytes, upload_destination)
+       VALUES ($1, $2, $3, 'failed', NULL, 'personal') RETURNING id`,
       [`${RUN_TAG}-retry-missing`, `convrecovery-test/${RUN_TAG}-retry-missing.mov`, testUserId]
     );
     createdVideoIds.push(retryMissingInsert.rows[0].id);
@@ -226,8 +226,8 @@ async function main() {
     const oldQueuedSmallKey = `convrecovery-test/${RUN_TAG}-old-queued-small.mov`;
     fs.writeFileSync(path.join(__dirname, "../../uploads", oldQueuedSmallKey), Buffer.alloc(1024, 1));
     const oldQueuedSmallInsert = await client.query(
-      `INSERT INTO videos (title, storage_key, uploaded_by, processing_status, source_size_bytes, created_at)
-       VALUES ($1, $2, $3, 'queued', $4, NOW() - INTERVAL '10 minutes') RETURNING id`,
+      `INSERT INTO videos (title, storage_key, uploaded_by, processing_status, source_size_bytes, created_at, upload_destination)
+       VALUES ($1, $2, $3, 'queued', $4, NOW() - INTERVAL '10 minutes', 'personal') RETURNING id`,
       [`${RUN_TAG}-old-queued-small`, oldQueuedSmallKey, testUserId, 1024]
     );
     createdVideoIds.push(oldQueuedSmallInsert.rows[0].id);
@@ -235,8 +235,8 @@ async function main() {
     // Case 9: a 'queued' row that predates the grace period and is OVER
     // the cap — must be deferred, same as a stranded 'converting' row.
     const oldQueuedBigInsert = await client.query(
-      `INSERT INTO videos (title, storage_key, uploaded_by, processing_status, source_size_bytes, created_at)
-       VALUES ($1, $2, $3, 'queued', $4, NOW() - INTERVAL '10 minutes') RETURNING id`,
+      `INSERT INTO videos (title, storage_key, uploaded_by, processing_status, source_size_bytes, created_at, upload_destination)
+       VALUES ($1, $2, $3, 'queued', $4, NOW() - INTERVAL '10 minutes', 'personal') RETURNING id`,
       [
         `${RUN_TAG}-old-queued-big`,
         `convrecovery-test/${RUN_TAG}-old-queued-big.mov`,
@@ -251,8 +251,8 @@ async function main() {
     // legitimately be a fresh upload racing this exact startup pass, not
     // an orphan. This is the race the grace period exists to prevent.
     const freshQueuedInsert = await client.query(
-      `INSERT INTO videos (title, storage_key, uploaded_by, processing_status, source_size_bytes)
-       VALUES ($1, $2, $3, 'queued', $4) RETURNING id`,
+      `INSERT INTO videos (title, storage_key, uploaded_by, processing_status, source_size_bytes, upload_destination)
+       VALUES ($1, $2, $3, 'queued', $4, 'personal') RETURNING id`,
       [
         `${RUN_TAG}-fresh-queued`,
         `convrecovery-test/${RUN_TAG}-fresh-queued.mov`,
@@ -272,15 +272,15 @@ async function main() {
     // are enough to prove "no longer stuck," same spirit as the
     // no-real-ffmpeg-binary cases above.
     const stuckClassifyingInsert = await client.query(
-      `INSERT INTO videos (title, storage_key, uploaded_by, processing_status, source_size_bytes)
-       VALUES ($1, $2, $3, 'classifying', $4) RETURNING id`,
+      `INSERT INTO videos (title, storage_key, uploaded_by, processing_status, source_size_bytes, upload_destination)
+       VALUES ($1, $2, $3, 'classifying', $4, 'personal') RETURNING id`,
       [`${RUN_TAG}-stuck-classifying`, `convrecovery-test/${RUN_TAG}-stuck-classifying.mov`, testUserId, 1024]
     );
     createdVideoIds.push(stuckClassifyingInsert.rows[0].id);
 
     const stuckRemuxingInsert = await client.query(
-      `INSERT INTO videos (title, storage_key, uploaded_by, processing_status, source_size_bytes)
-       VALUES ($1, $2, $3, 'remuxing', $4) RETURNING id`,
+      `INSERT INTO videos (title, storage_key, uploaded_by, processing_status, source_size_bytes, upload_destination)
+       VALUES ($1, $2, $3, 'remuxing', $4, 'personal') RETURNING id`,
       [`${RUN_TAG}-stuck-remuxing`, `convrecovery-test/${RUN_TAG}-stuck-remuxing.mov`, testUserId, 1024]
     );
     createdVideoIds.push(stuckRemuxingInsert.rows[0].id);

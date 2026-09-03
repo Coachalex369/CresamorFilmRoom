@@ -80,6 +80,19 @@ async function countActiveReferences(conn, videoId) {
   };
 }
 
+// Team Highlights, Slice 2: the raw row-lock, extracted out of
+// lockAndAssertNotPurgePending below so a caller that needs to apply its
+// OWN error-shaping (e.g. POST /api/teams/:teamId/highlights, which must
+// never let a caller distinguish "doesn't exist" from "exists but
+// belongs to another team" from "exists but is mid-purge" -- see that
+// route's own comments) can still use the identical lock query, in the
+// identical order, rather than duplicating the SQL. Returns the row or
+// null; never throws on its own.
+async function lockVideoRow(conn, videoId) {
+  const result = await conn.query("SELECT * FROM videos WHERE id = $1 FOR UPDATE", [videoId]);
+  return result.rows[0] || null;
+}
+
 // The shared row-locking protocol every reference-creating route must use
 // BEFORE inserting a new clip or Team Highlight post, inside that same
 // route's own transaction. Locking the identical row this function's
@@ -88,10 +101,12 @@ async function countActiveReferences(conn, videoId) {
 // unlocked read of purge_status is not sufficient, since it could observe
 // 'active' an instant before a concurrent purge transaction flips it.
 // Throws if the video doesn't exist or is not eligible; callers should
-// catch and translate to their own 403/404/409 as appropriate.
+// catch and translate to their own 403/404/409 as appropriate. Still the
+// right choice for clips.js's POST /api/clips, where existence and
+// purge-pending ARE both safe to reveal distinctly to a caller who has
+// already separately proven view authorization on the video itself.
 async function lockAndAssertNotPurgePending(conn, videoId) {
-  const result = await conn.query("SELECT * FROM videos WHERE id = $1 FOR UPDATE", [videoId]);
-  const video = result.rows[0];
+  const video = await lockVideoRow(conn, videoId);
   if (!video) {
     const error = new Error("Video not found");
     error.code = "VIDEO_NOT_FOUND";
@@ -329,6 +344,7 @@ async function sweepStuckPurges({ limit = 50 } = {}) {
 
 module.exports = {
   countActiveReferences,
+  lockVideoRow,
   lockAndAssertNotPurgePending,
   lockCountAndMaybeFlipToPurgePending,
   finalizePurge,

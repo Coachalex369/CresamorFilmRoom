@@ -96,6 +96,7 @@ app.use(require("./routes/directMessages"));
 app.use(require("./routes/teams"));
 app.use(require("./routes/invitations"));
 app.use(require("./routes/schedule"));
+app.use(require("./routes/teamHighlights"));
 
 // Mobile Recording Upload sprint: real bug found via direct reproduction —
 // videos.js/profile.js's multer fileFilter rejects a bad MIME type via
