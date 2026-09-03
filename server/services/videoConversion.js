@@ -323,13 +323,29 @@ async function convertVideo(video) {
     const teamSegment = video.team_id || "unassigned";
     const year = new Date(video.created_at).getFullYear();
     const extension = storage.extensionFor("video", "video/mp4");
-    const newKey = `videos/${teamSegment}/${year}/${crypto.randomUUID()}${extension}`;
+    // Deterministic, not crypto.randomUUID() -- keyed on the SOURCE
+    // video's own id, stable across every retry of the same video. A
+    // retry (manual, or resumed after a crash by
+    // performStrandedConversionRecovery()) re-uploads to this exact same
+    // key, which R2/S3 PUT overwrites atomically -- never accumulates an
+    // orphaned derived object from an earlier attempt that encoded fine
+    // but crashed before the DB update committed.
+    const newKey = `videos/${teamSegment}/${year}/${video.id}-h264${extension}`;
 
     await storage.upload(newKey, outputPath, "video/mp4", { category: "video" });
 
     const verified = await storage.exists(newKey);
     if (!verified) {
       throw new Error("Converted object failed existence verification after upload");
+    }
+
+    // Nonzero-size check, not just presence -- a truncated or empty
+    // upload would otherwise pass the existence check above and get
+    // promoted to 'ready', leaving a real coach/parent looking at a
+    // black player with no error shown anywhere.
+    const uploadedSize = await storage.getObjectSize(newKey);
+    if (!uploadedSize) {
+      throw new Error(`Converted object exists but has size ${uploadedSize} — refusing to mark ready`);
     }
 
     logConversionAttempt("success");
