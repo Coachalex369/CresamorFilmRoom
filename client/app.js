@@ -1,4 +1,20 @@
-const API_URL = "https://cresamorfilmroom-3.onrender.com";
+// Custom-domain fix (app.cresamor.com): this used to be hardcoded to the
+// deployed Render origin ("https://cresamorfilmroom-3.onrender.com"),
+// which worked fine as long as the client was ONLY ever served from that
+// exact origin. Once a custom domain (app.cresamor.com) started serving
+// the SAME client bundle from a DIFFERENT origin, every apiFetch() call
+// became cross-origin -- and Helmet's CSP has no explicit connect-src
+// override (see server/app.js), so it inherits default-src 'self',
+// which silently blocks ANY cross-origin fetch before the request ever
+// reaches the network. Confirmed live: zero requests were ever issued to
+// the Render domain from app.cresamor.com (the CSP-block signature, not
+// a CORS rejection -- a CORS failure would still show a completed
+// request in the Network panel). Empty string -- not another hardcoded
+// hostname -- means every request resolves relative to whatever origin
+// actually served the page, which is correct for the Render domain, the
+// custom domain, and any future one, since this same Express service
+// serves both the static client and the API.
+const API_URL = "";
 
 // Beta Readiness Sprint 2: every request now carries the bearer token
 // automatically — no call site needs to remember to attach it. A 401
@@ -63,6 +79,7 @@ async function apiFetch(path, options = {}) {
 
 const emailInput = document.querySelector("#email-input");
 const passwordInput = document.querySelector("#password-input");
+const loginErrorEl = document.querySelector("#login-error");
 
 const loginBtn = document.querySelector("#login-btn");
 const logoutBtn = document.querySelector("#logout-btn");
@@ -1403,6 +1420,7 @@ function logoutLocalState() {
 
   emailInput.value = "";
   passwordInput.value = "";
+  hideLoginError();
   highlightsList.innerHTML = "";
   videoList.innerHTML = "";
 
@@ -1458,12 +1476,31 @@ async function registerUser(email, password, role) {
 // handleInvitedAuth() (see invitations.js), which already correctly
 // decides login-vs-register from the server's accountExists check
 // instead of guessing via try/catch.
+// Custom-domain fix follow-up: a real "Failed to fetch" alert() on
+// app.cresamor.com froze the entire page until dismissed -- confirmed
+// live, not theoretical (see the empty-string API_URL fix above for the
+// underlying cause). Invalid credentials hit the exact same alert(), so
+// both paths move to the inline #login-error banner instead. hideLoginError()
+// runs first so a second attempt doesn't leave a stale message showing
+// underneath a fresh one for a moment.
+function showLoginError(message) {
+  loginErrorEl.textContent = message;
+  loginErrorEl.classList.remove("hidden");
+}
+
+function hideLoginError() {
+  loginErrorEl.textContent = "";
+  loginErrorEl.classList.add("hidden");
+}
+
 async function handleLogin() {
   const email = emailInput.value.trim();
   const password = passwordInput.value.trim();
 
+  hideLoginError();
+
   if (!email || !password) {
-    showMessage("Please enter both email and password.");
+    showLoginError("Please enter both email and password.");
     return;
   }
 
@@ -1479,7 +1516,7 @@ async function handleLogin() {
     activateApp(currentUser);
   } catch (error) {
     console.error(error);
-    showMessage(error.message || "Login failed.");
+    showLoginError(error.message || "Login failed.");
   }
 }
 

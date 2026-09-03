@@ -69,12 +69,14 @@ Every foreign key column is indexed. Postgres doesn't do this automatically (onl
 
 **Other beta hardening shipped in this sprint**:
 - **Rate limiting** (`server/middleware/rateLimiters.js`, `express-rate-limit`, in-memory store — fine for a single Render instance): login (10/15min/IP), register (5/hour/IP), video/photo upload (30/hour/IP). Deliberately loose, beta-appropriate limits, not production-hardened ones.
-- **Helmet** (`app.use(helmet())` in `server/app.js`) — standard security headers, default CSP. Safe with no config exceptions: the client has no inline scripts/styles and no external CDN resources.
-- **CORS is environment-driven**, not hardcoded: `ALLOWED_ORIGIN` env var, defaulting to the deployed Render origin if unset.
+- **Helmet** (`app.use(helmet())` in `server/app.js`) — standard security headers. CSP directives were widened past Helmet's defaults as real gaps surfaced: `media-src` (blob: recordings, R2-hosted video), `img-src` (R2-hosted profile pictures), `connect-src` (custom-domain fix, app.cresamor.com — Helmet has no default for this directive, so it silently inherited `default-src 'self'`, which blocked every fetch()/XHR the instant the client was served from a second origin whose API_URL still pointed at the first). Each exception is scoped as narrowly as the actual resource requires, not widened to `https:` broadly.
+- **CORS is environment-driven**, not hardcoded, and (custom-domain fix) now a *list*, not a single value: `ALLOWED_ORIGIN` env var (comma-separated for multiple), defaulting to both known production origins (the Render domain and `https://app.cresamor.com`) if unset. The real fix for the browser client is same-origin requests (empty `API_URL`) — this list exists as a safety net for a stale cached bundle during a deploy transition, not as the primary mechanism.
 - **Upload size limits are environment-driven**: `MAX_VIDEO_UPLOAD_MB` (default 3072) and `MAX_PHOTO_UPLOAD_MB` (default 5), both wired into their routes' multer config. The video default was raised well past the historical 500MB figure — the temp-file-then-stream upload path never buffers a file in memory, so the real ceiling is disk space and abuse prevention, not RAM.
 - **`express.json({ limit: "100kb" })`** made explicit (was relying on Express's implicit default).
 
 **Env vars added this sprint** (Render dashboard in production, local `.env` for dev — same handling as `DATABASE_URL`/`JWT_SECRET`/the R2 vars): `ALLOWED_ORIGIN`, `MAX_VIDEO_UPLOAD_MB`, `MAX_PHOTO_UPLOAD_MB`. All three have safe in-code defaults, so leaving them unset in an existing environment changes nothing.
+
+**`APP_BASE_URL`** (custom-domain fix, app.cresamor.com): the canonical URL used to build invitation-accept and password-reset links (`server/routes/auth.js`, `server/services/invitations.js`). Previously these reused `ALLOWED_ORIGIN` — a real bug, once `ALLOWED_ORIGIN` became a list: a link needs exactly one canonical destination, not a CORS allowlist. Defaults to `https://app.cresamor.com`; safe to leave unset.
 
 **Testing**: `server/scripts/testAuth.js` — plain Node, no test-framework dependency, run by hand (`node server/scripts/testAuth.js`). Spins up the real app on a throwaway local port and drives it over real HTTP requests against whatever `DATABASE_URL` is configured, using clearly-namespaced test users/teams/videos that it deletes in a `finally` block regardless of pass/fail. Covers token rejection paths, the two fixed bugs, ownership/role/participant gates, forged-identity-field rejection, rate limiting, and audit-log writes. Does **not** cover signed R2 playback or a real browser exercising the Recording Pipeline's XHR flow — those need manual verification once R2 setup (see "Storage strategy") is complete.
 
@@ -135,6 +137,19 @@ Camera → Local Library (IndexedDB) → Recording Pipeline → Cloud → Team L
 3. Note the Cloudflare **Account ID** (dashboard sidebar, or the R2 overview page).
 4. Render → `CresamorFilmRoom-3` → Environment: set the 5 env vars above. Render redeploys automatically on save.
 5. For local testing against the real bucket: add the same 5 vars to the local `.env`; leave `STORAGE_PROVIDER` unset for everyday local dev (keeps using local disk), set it to `r2` only when deliberately testing against the bucket.
+6. **Bucket CORS** (custom-domain fix, app.cresamor.com — added, not yet confirmed applied): the browser draws playing video frames to a canvas for reel thumbnails (`home.js`'s `loadReelData`/thumbnail probe) — cross-origin without CORS taints the canvas and silently falls back to a placeholder image (already handled gracefully, but shouldn't be the normal case). Confirmed this session that the existing R2 API token (Object Read & Write only, step 2 above) cannot read or set bucket CORS itself (`GetBucketCorsCommand` → `AccessDenied`) — this genuinely requires the dashboard, not a token with broader scope minted for the app. In the Cloudflare dashboard: R2 → the bucket → Settings → CORS Policy → add:
+   ```json
+   [
+     {
+       "AllowedOrigins": ["https://app.cresamor.com", "https://cresamorfilmroom-3.onrender.com"],
+       "AllowedMethods": ["GET", "HEAD"],
+       "AllowedHeaders": ["Range", "Content-Type"],
+       "ExposeHeaders": ["Content-Range", "Content-Length", "Accept-Ranges"],
+       "MaxAgeSeconds": 3000
+     }
+   ]
+   ```
+   GET/HEAD only — the app doesn't do direct browser-to-R2 uploads yet (uploads still proxy through Express, see "Not yet built" below); add `PUT` here if that ever changes.
 
 **Backfill**: `server/scripts/backfillR2.js` — optional, manual, never auto-run (`node server/scripts/backfillR2.js`). Finds legacy rows whose local file is *still actually present* on disk right now and uploads it to R2, setting `storage_key`. Never deletes the local file or clears `file_url`. Anything already lost to a prior redeploy stays lost — this rescues what's still there today, it doesn't recover history.
 
@@ -143,7 +158,8 @@ Camera → Local Library (IndexedDB) → Recording Pipeline → Cloud → Team L
 ## Deployment reality
 
 - Render web service (`CresamorFilmRoom-3`) + Render Postgres (`cresamor_db`), both free tier.
-- **`client/app.js`'s `API_URL` is hardcoded to the deployed Render URL, including during local development.** Running `npm run dev` locally serves static files from `localhost:3000`, but every API call still goes to the real deployed backend and real live database — there is no local-only mode. To test new backend routes before deploying, temporarily point `API_URL` at `http://localhost:3000`, test, then revert before committing (every migration/route added this sprint was verified this way).
+- **`client/app.js`'s `API_URL` is an empty string (same-origin) as of the custom-domain fix (app.cresamor.com).** It used to be hardcoded to the deployed Render URL — which broke the moment a second origin (the custom domain) served the same client, since every request became cross-origin and Helmet's CSP silently blocked it (no explicit `connect-src`, inherited `default-src 'self'`). Same-origin resolution is correct for the Render domain, the custom domain, and local dev alike, since this one Express service always serves both the static client and the API together.
+  **Real consequence for local dev, worth knowing:** running `npm run dev` locally now means the client talks to *your local server's own API routes*, not the deployed Render backend directly (previously: local static files, but every API call still hit the real deployed code). `DATABASE_URL` still defaults to the real production database in `.env` regardless of this change — so a plain `npm run dev` now runs your uncommitted local code changes directly against production data, rather than the already-deployed, already-tested code that used to be in that path. The disposable-local-Postgres pattern this project already uses for testing (`DATABASE_URL` pointed at a local instance, `PORT` set locally, one Express process serving both client and API) is what actually isolates this — don't rely on the old "static files are local, API isn't" split to keep `npm run dev` safe against production anymore.
 - Free-tier Render Postgres databases expire after a fixed window and get deleted — this already happened once to this project (see git history around the Sprint 1 security-incident response). Nothing currently monitors for or alerts on this.
 - Render's free web service spins down on inactivity (cold start delay on the next request).
 

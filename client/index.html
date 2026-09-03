@@ -59,6 +59,15 @@
             <button id="login-btn">Log In</button>
           </div>
 
+          <!-- Custom-domain fix follow-up: replaces the blocking alert()
+               handleLogin() used to show for both invalid credentials and
+               network failures -- a dialog that froze the whole page
+               (confirmed live: a real "Failed to fetch" alert on
+               app.cresamor.com blocks all further interaction until
+               dismissed). Inline, non-blocking, same #reset-password-error
+               styling precedent. -->
+          <p id="login-error" class="hidden"></p>
+
           <!-- Teams MVP: replaces the 3-button role choice above when a
                pending invitation already specifies the role. Existing-user
                multi-team invitation correction: invitation-login-hint

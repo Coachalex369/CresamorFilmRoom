@@ -2212,12 +2212,14 @@ body.app-active #reset-password-screen {
 
 #forgot-password-confirmation,
 #reset-password-error,
-#invite-form-error {
+#invite-form-error,
+#login-error {
   margin-top: 0.75rem;
   color: var(--muted);
 }
 
-#reset-password-error {
+#reset-password-error,
+#login-error {
   color: #e88;
 }
 

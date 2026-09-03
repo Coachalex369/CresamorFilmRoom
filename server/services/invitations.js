@@ -14,8 +14,13 @@ const crypto = require("crypto");
 
 const client = require("../db/client");
 
-const DEFAULT_ALLOWED_ORIGIN = "https://cresamorfilmroom-3.onrender.com";
-const BASE_URL = process.env.ALLOWED_ORIGIN || DEFAULT_ALLOWED_ORIGIN;
+// Custom-domain fix: decoupled from ALLOWED_ORIGIN (CORS, now a list --
+// see server/app.js) -- a link needs one canonical URL, not a CORS
+// allowlist. Same APP_BASE_URL env var/default as auth.js's
+// password-reset link; kept as a second declaration rather than a new
+// shared module, matching this file's existing precedent of not sharing
+// state with routes/auth.js.
+const APP_BASE_URL = process.env.APP_BASE_URL || "https://app.cresamor.com";
 
 const INVITATION_EXPIRY_DAYS = Number(process.env.INVITATION_EXPIRY_DAYS) || 14;
 
@@ -44,7 +49,7 @@ function normalizeDestination(destinationType, destination) {
 }
 
 function inviteUrlFor(rawToken) {
-  return `${BASE_URL}/?invite=${rawToken}`;
+  return `${APP_BASE_URL}/?invite=${rawToken}`;
 }
 
 // Generates a fresh invitation and supersedes any prior PENDING
