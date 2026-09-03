@@ -10,8 +10,16 @@ const { loginLimiter, registerLimiter } = require("../middleware/rateLimiters");
 
 const router = express.Router();
 
-const DEFAULT_ALLOWED_ORIGIN = "https://cresamorfilmroom-3.onrender.com";
-const BASE_URL = process.env.ALLOWED_ORIGIN || DEFAULT_ALLOWED_ORIGIN;
+// Custom-domain fix: this used to reuse ALLOWED_ORIGIN (the CORS
+// config) as the link-building base URL -- two genuinely different
+// concerns that happened to share a value only because there was ever
+// just one origin. ALLOWED_ORIGIN is now a list (see server/app.js); a
+// public link needs exactly ONE canonical URL to send people to, so it
+// gets its own dedicated var instead. Defaults to the real custom domain
+// now that it's live, not the Render origin -- a password-reset email is
+// exactly the kind of link that should point users at the domain the
+// project actually wants them using going forward.
+const APP_BASE_URL = process.env.APP_BASE_URL || "https://app.cresamor.com";
 const RESET_TOKEN_EXPIRY_MS = 60 * 60 * 1000; // 1 hour — short, since unlike an
 // invitation this token grants direct account access once used.
 
@@ -175,7 +183,7 @@ router.post("/api/auth/forgot-password", loginLimiter, async (req, res) => {
         [user.id, tokenHash, expiresAt]
       );
 
-      const resetUrl = `${BASE_URL}/?reset=${rawToken}`;
+      const resetUrl = `${APP_BASE_URL}/?reset=${rawToken}`;
       await sendEmail({
         to: user.email,
         subject: "Reset your Cresamor password",

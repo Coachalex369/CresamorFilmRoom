@@ -24,8 +24,26 @@ if (!fs.existsSync(uploadsDir)) {
 // any future staging domain override this with a one-line env var
 // instead of a code change, while production stays safe with zero
 // required config (falls back to the deployed Render origin).
-const DEFAULT_ALLOWED_ORIGIN = "https://cresamorfilmroom-3.onrender.com";
-const allowedOrigin = process.env.ALLOWED_ORIGIN || DEFAULT_ALLOWED_ORIGIN;
+//
+// Custom-domain fix (app.cresamor.com): now a list, not a single value.
+// The real fix for the browser client is same-origin requests (empty
+// API_URL, see client/app.js) -- once that's live, a normal page load
+// from either origin never makes a cross-origin request at all, so CORS
+// isn't actually in that path. This stays a list for the genuine
+// remaining cross-origin case: a browser tab with a STALE cached app.js
+// from before this fix (hardcoded to the Render origin) loading from
+// app.cresamor.com would still issue a real cross-origin request during
+// the cache-transition window, and that must not hard-fail with a CORS
+// rejection while stale bundles are still circulating. ALLOWED_ORIGIN may
+// be a single origin or a comma-separated list; unset falls back to both
+// known production origins with zero required config, same as before.
+const DEFAULT_ALLOWED_ORIGINS = [
+  "https://cresamorfilmroom-3.onrender.com",
+  "https://app.cresamor.com",
+];
+const allowedOrigins = process.env.ALLOWED_ORIGIN
+  ? process.env.ALLOWED_ORIGIN.split(",").map((origin) => origin.trim()).filter(Boolean)
+  : DEFAULT_ALLOWED_ORIGINS;
 
 // Production bug fixes, both the same class of mistake: Helmet's default
 // CSP directives don't cover every resource type this app actually loads.
@@ -62,6 +80,23 @@ const allowedOrigin = process.env.ALLOWED_ORIGIN || DEFAULT_ALLOWED_ORIGIN;
 // Scoped to Cloudflare R2's endpoint domain (matches any account/bucket
 // under it) rather than widening to https: broadly like img-src — video is
 // higher-risk content to leave unscoped.
+// connect-src (custom-domain fix, app.cresamor.com): the same class of
+// bug as the media-src/img-src fixes above, this time for fetch()/XHR
+// instead of <video>/<img> -- Helmet's defaults don't set connect-src
+// explicitly, so it silently inherited default-src 'self'. That was
+// invisible as long as the client was only ever served from the one
+// origin its hardcoded API_URL pointed at (a same-origin request needs no
+// connect-src exception at all). It broke the instant a second origin
+// (a custom domain) started serving the same client while API_URL still
+// pointed at the first -- confirmed live via the browser's own Network
+// panel: zero requests were ever issued for a login attempt from
+// app.cresamor.com, the same "blocked before the network layer, not a
+// CORS rejection" signature the media-src bug above already established
+// for this exact CSP-defaults gap. The real fix is API_URL now resolving
+// same-origin (see client/app.js) -- 'self' here is what makes that
+// actually work, and is genuinely all a same-origin client needs; no
+// client code calls any other host directly (video playback is a
+// <video src>, covered by media-src, not fetch/XHR).
 app.use(
   helmet({
     contentSecurityPolicy: {
@@ -69,11 +104,12 @@ app.use(
         ...helmet.contentSecurityPolicy.getDefaultDirectives(),
         "media-src": ["'self'", "blob:", "https://*.r2.cloudflarestorage.com"],
         "img-src": ["'self'", "data:", "https:"],
+        "connect-src": ["'self'"],
       },
     },
   })
 );
-app.use(cors({ origin: allowedOrigin }));
+app.use(cors({ origin: allowedOrigins }));
 app.use(morgan("dev"));
 app.use(express.json({ limit: "100kb" }));
 app.use(express.static(path.join(__dirname, "../client")));
