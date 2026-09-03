@@ -166,10 +166,7 @@ window.addEventListener("unhandledrejection", (event) => {
   debugLog("unhandled promise rejection:", event.reason?.message || event.reason);
 });
 
-const highlightTitleInput = document.querySelector("#highlight-title-input");
-const highlightStartBtn = document.querySelector("#highlight-start-btn");
-const highlightEndBtn = document.querySelector("#highlight-end-btn");
-const saveHighlightBtn = document.querySelector("#save-highlight-btn");
+const highlightToggleBtn = document.querySelector("#highlight-toggle-btn");
 const highlightsList = document.querySelector("#highlights-list");
 
 const playBtn = document.querySelector("#play-btn");
@@ -198,8 +195,16 @@ let authToken = localStorage.getItem("token") || null;
 // session funnel through), so the next real expiration gets handled again.
 let sessionExpiredHandled = false;
 
-let clipStartTime = null;
-let clipEndTime = null;
+// One-Button Highlight: replaces the old separate clipStartTime/
+// clipEndTime pair (set by two independent buttons, saved by a third).
+// highlightClipActive is the single source of truth for "Start Highlight"
+// vs "End Highlight" button state; highlightClipRequestId is generated
+// once per Start tap and sent to POST /api/clips as client_request_id so
+// a duplicate submission (rapid double-tap, retry) can never create two
+// clips for the same attempt -- see clips.js.
+let highlightClipActive = false;
+let highlightClipStartTime = null;
+let highlightClipRequestId = null;
 let currentVideoId = null;
 let allVideos = [];
 let myClips = [];
@@ -237,22 +242,29 @@ function showMessage(message) {
 // concurrent 401s used to each pop their own alert() -- blocking dialogs
 // that queue up and must be dismissed one at a time, which is what made
 // a single real expiration feel like the app repeatedly kicking the user
-// out. apiFetch's sessionExpiredHandled guard already ensures this is
-// only ever called once per expiration; this only has to render once,
-// not de-dupe itself. Auto-dismisses so nothing needs manual dismissal.
-function showSessionExpiredMessage() {
-  const existing = document.querySelector("#session-expired-toast");
+// out. Generalized into showToast() (One-Button Highlight release) so
+// the same non-blocking mechanism covers any brief message that must
+// never block playback/interaction -- currently session expiration and a
+// failed highlight save. Only one toast is ever shown at a time (a new
+// call replaces whatever's currently showing) -- these are all
+// low-frequency, high-signal events, never a queue to work through.
+function showToast(message, durationMs = 6000) {
+  const existing = document.querySelector("#app-toast");
   if (existing) existing.remove();
 
   const toast = document.createElement("div");
-  toast.id = "session-expired-toast";
-  toast.textContent = "Your session expired. Please log in again.";
+  toast.id = "app-toast";
+  toast.textContent = message;
   toast.setAttribute("role", "status");
   document.body.appendChild(toast);
 
   setTimeout(() => {
     toast.remove();
-  }, 6000);
+  }, durationMs);
+}
+
+function showSessionExpiredMessage() {
+  showToast("Your session expired. Please log in again.");
 }
 
 function setCoachVisibility(role) {
@@ -396,6 +408,23 @@ function selectVideo(video) {
   // hide it regardless of whether this video turns out playable or not
   // (an unavailable video still gets its own status message, not this).
   videoEmptyState.classList.add("hidden");
+
+  // One-Button Highlight: switching to a genuinely different video while
+  // a highlight is active (Start tapped, End not yet tapped) cancels the
+  // unsaved start point rather than silently carrying it over to a clip
+  // from a different source. Compared BEFORE currentVideoId is
+  // reassigned below; a re-selection of the SAME video (e.g. a polling
+  // refresh) must not cancel an in-progress highlight. Never touches an
+  // in-flight SAVE (highlightToggleBtn.disabled) -- that request already
+  // captured its own video_id and completes independently.
+  if (
+    highlightClipActive &&
+    !highlightToggleBtn.disabled &&
+    currentVideoId !== null &&
+    Number(video.id) !== Number(currentVideoId)
+  ) {
+    resetHighlightClipState();
+  }
 
   currentVideoId = video.id;
   lastRenderedVideoSignature = videoSignature(video);
@@ -1138,8 +1167,9 @@ function renderClipList(targetList, clips, includeVideoTitle = false) {
 
   clips.forEach((clip) => {
     const li = document.createElement("li");
-    const button = document.createElement("button");
+    li.className = "highlight-item";
 
+    const button = document.createElement("button");
     button.className = "highlight-item-btn";
 
     button.innerHTML = `
@@ -1156,6 +1186,34 @@ function renderClipList(targetList, clips, includeVideoTitle = false) {
     });
 
     li.appendChild(button);
+
+    // Rename/delete: a saved personal highlight can always be managed
+    // afterward. myClips (this list's data source) is already scoped to
+    // the current user's own clips (GET /api/users/:id/clips), so every
+    // clip rendered here is one the caller owns -- no extra check needed
+    // client-side, and the server enforces ownership again regardless.
+    const renameBtn = document.createElement("button");
+    renameBtn.type = "button";
+    renameBtn.className = "highlight-item-action-btn";
+    renameBtn.textContent = "✎";
+    renameBtn.title = "Rename";
+    renameBtn.addEventListener("click", (event) => {
+      event.stopPropagation();
+      renamePersonalClip(clip);
+    });
+    li.appendChild(renameBtn);
+
+    const deleteBtn = document.createElement("button");
+    deleteBtn.type = "button";
+    deleteBtn.className = "highlight-item-action-btn highlight-delete-btn";
+    deleteBtn.textContent = "✕";
+    deleteBtn.title = "Delete";
+    deleteBtn.addEventListener("click", (event) => {
+      event.stopPropagation();
+      deletePersonalClip(clip);
+    });
+    li.appendChild(deleteBtn);
+
     targetList.appendChild(li);
   });
 }
@@ -1348,8 +1406,7 @@ function logoutLocalState() {
   highlightsList.innerHTML = "";
   videoList.innerHTML = "";
 
-  clipStartTime = null;
-  clipEndTime = null;
+  resetHighlightClipState();
   currentVideoId = null;
   allVideos = [];
   myClips = [];
@@ -1443,7 +1500,53 @@ function restoreSession() {
   }
 }
 
-async function saveHighlight() {
+// One-Button Highlight release: replaces Start Clip/End Clip/Save
+// Highlight/title-input with a single toggle. No title prompt (spec) --
+// a sensible default is generated from the source video's own title plus
+// a date/time stamp, same idea as a phone camera app's auto-named photo.
+function buildDefaultHighlightTitle(video) {
+  const sourceTitle = video?.title || "Highlight";
+  const stamp = new Date().toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+  return `${sourceTitle} — ${stamp}`;
+}
+
+function generateHighlightClientRequestId() {
+  const userPart = currentUser?.id ?? "anon";
+  const randomPart = Math.random().toString(36).slice(2);
+  return `${userPart}-${Date.now()}-${randomPart}`;
+}
+
+// The one place that returns the button to its resting state -- used by
+// every exit path (saved, failed, video changed, logout) so there is
+// exactly one definition of "idle" instead of each caller resetting a
+// slightly different subset of state/DOM.
+function resetHighlightClipState() {
+  highlightClipActive = false;
+  highlightClipStartTime = null;
+  highlightClipRequestId = null;
+
+  highlightToggleBtn.disabled = false;
+  highlightToggleBtn.textContent = "Start Highlight";
+  highlightToggleBtn.classList.remove("highlight-active", "highlight-saving");
+}
+
+// First tap (Start): records the current playback position and flips the
+// button to "End Highlight" -- no network call, nothing to save yet.
+// Second tap (End): hands off to finishAndSaveHighlightClip(). Playback
+// is deliberately never paused either time (spec) -- this only ever reads
+// filmPlayer.currentTime, never calls pause()/play().
+async function handleHighlightToggle() {
+  // Saving is the only phase that disables the button -- this guard is
+  // what actually prevents a rapid double-tap from firing two saves (the
+  // idempotent client_request_id, see clips.js, is the second, server-side
+  // layer of the same protection).
+  if (highlightToggleBtn.disabled) return;
+
   if (!currentUser) {
     showMessage("You must be logged in.");
     return;
@@ -1454,46 +1557,121 @@ async function saveHighlight() {
     return;
   }
 
-  const title = highlightTitleInput.value.trim();
+  if (!highlightClipActive) {
+    highlightClipActive = true;
+    highlightClipStartTime = filmPlayer.currentTime;
+    highlightClipRequestId = generateHighlightClientRequestId();
 
-  if (!title) {
-    showMessage("Please enter a highlight title.");
+    highlightToggleBtn.textContent = "End Highlight";
+    highlightToggleBtn.classList.add("highlight-active");
     return;
   }
 
-  if (clipStartTime === null || clipEndTime === null) {
-    showMessage("Please set both the start and end of the clip.");
+  await finishAndSaveHighlightClip(filmPlayer.currentTime);
+}
+
+// Shared by the End Highlight tap and the end-of-video auto-save path
+// (filmPlayer's "ended" listener, below) -- both just supply an end time
+// and let this decide whether it's a valid clip.
+async function finishAndSaveHighlightClip(endTime) {
+  const startTime = highlightClipStartTime;
+  const requestId = highlightClipRequestId;
+  const videoId = currentVideoId;
+
+  // Zero-length or reversed (e.g. the user tapped End before playback
+  // ever advanced, or scrubbed backward past the start point) -- no clip
+  // is worth saving here. Reset and say so without blocking.
+  // Number.isFinite (not a plain <=) deliberately catches NaN/Infinity
+  // too, not just "end before start" -- filmPlayer.duration can genuinely
+  // be NaN (metadata never loaded) or Infinity (some streaming formats)
+  // when the "ended" auto-save path calls this, and a bare `endTime <=
+  // startTime` comparison is always false for NaN, which would otherwise
+  // let an invalid endpoint slip through to the server instead of being
+  // caught here.
+  if (
+    startTime === null ||
+    !Number.isFinite(startTime) ||
+    !Number.isFinite(endTime) ||
+    Number(endTime) <= Number(startTime)
+  ) {
+    resetHighlightClipState();
+    showToast("Highlight was too short to save.");
     return;
   }
 
-  if (clipEndTime <= clipStartTime) {
-    showMessage("Clip end time must be after start time.");
-    return;
-  }
+  highlightToggleBtn.disabled = true;
+  highlightToggleBtn.textContent = "Saving…";
+  highlightToggleBtn.classList.remove("highlight-active");
+  highlightToggleBtn.classList.add("highlight-saving");
 
   try {
+    const video = getMergedVideoList().find((v) => Number(v.id) === Number(videoId));
+    const title = buildDefaultHighlightTitle(video);
+
     await apiFetch("/api/clips", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         title,
-        start_time: clipStartTime,
-        end_time: clipEndTime,
-        video_id: currentVideoId,
+        start_time: startTime,
+        end_time: endTime,
+        video_id: videoId,
+        client_request_id: requestId,
       }),
     });
 
-    highlightTitleInput.value = "";
-    clipStartTime = null;
-    clipEndTime = null;
+    highlightToggleBtn.textContent = "Saved ✓";
 
-    showMessage("Highlight saved.");
     loadMyClips();
+    // Home's Featured Reel/Hero Card read the same GET /api/users/:id/clips
+    // data -- re-render it now (if it's loaded at all) so a saved
+    // highlight shows up there without requiring a page reload, even when
+    // the user saved it from Film/Team Highlights rather than Home itself.
+    if (typeof renderHome === "function") {
+      renderHome();
+    }
+
+    setTimeout(resetHighlightClipState, 1200);
   } catch (error) {
     console.error(error);
-    showMessage(error.message || "Could not save highlight.");
+    resetHighlightClipState();
+    showToast(error.message || "Could not save highlight. Please try again.");
+  }
+}
+
+async function deletePersonalClip(clip) {
+  if (!confirm(`Delete "${clip.title}"?\n\nThis cannot be undone.`)) return;
+
+  try {
+    await apiFetch(`/api/clips/${clip.id}`, { method: "DELETE" });
+    loadMyClips();
+    if (typeof renderHome === "function") {
+      renderHome();
+    }
+  } catch (error) {
+    console.error(error);
+    showToast(error.message || "Could not delete highlight.");
+  }
+}
+
+async function renamePersonalClip(clip) {
+  const nextTitle = prompt("Rename highlight", clip.title);
+  if (nextTitle === null) return; // cancelled
+  if (!nextTitle.trim()) return;
+
+  try {
+    await apiFetch(`/api/clips/${clip.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: nextTitle.trim() }),
+    });
+    loadMyClips();
+    if (typeof renderHome === "function") {
+      renderHome();
+    }
+  } catch (error) {
+    console.error(error);
+    showToast(error.message || "Could not rename highlight.");
   }
 }
 
@@ -1888,20 +2066,23 @@ logoutBtn.addEventListener("click", () => {
   logoutLocalState();
 });
 
-/* ---------- HIGHLIGHT BUTTONS ---------- */
+/* ---------- HIGHLIGHT BUTTON (One-Button Highlight) ---------- */
 
-highlightStartBtn.addEventListener("click", () => {
-  clipStartTime = filmPlayer.currentTime;
-  showMessage(`Clip start set at ${clipStartTime.toFixed(1)}s`);
+highlightToggleBtn.addEventListener("click", () => {
+  handleHighlightToggle();
 });
 
-highlightEndBtn.addEventListener("click", () => {
-  clipEndTime = filmPlayer.currentTime;
-  showMessage(`Clip end set at ${clipEndTime.toFixed(1)}s`);
-});
-
-saveHighlightBtn.addEventListener("click", () => {
-  saveHighlight();
+// End-of-video auto-save: if playback reaches the end while a highlight
+// is active, the video's own end is used as the endpoint rather than
+// leaving the user stuck with an unsaved in-progress clip and no more
+// playback to tap "End Highlight" against. Goes through the exact same
+// finishAndSaveHighlightClip() validation/save path as a manual End tap
+// -- if filmPlayer.duration is somehow <= the start point (shouldn't
+// happen, defensive only), it's just treated as too-short and discarded,
+// same as any other invalid range.
+filmPlayer.addEventListener("ended", () => {
+  if (!highlightClipActive || highlightToggleBtn.disabled) return;
+  finishAndSaveHighlightClip(filmPlayer.duration);
 });
 
 /* ---------- PLAYBACK BUTTONS ---------- */
