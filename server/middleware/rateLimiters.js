@@ -44,4 +44,17 @@ const uploadLimiter = rateLimit({
   handler: loggedHandler("upload_rate_limited"),
 });
 
-module.exports = { loginLimiter, registerLimiter, uploadLimiter };
+// Landing page interest form: public, unauthenticated, cross-origin from
+// cresamor.com -- the obvious spam target on this app. Same loose,
+// beta-appropriate shape as the others (in-memory, fine for a single
+// instance), tuned for "a real person filling out a form a couple times
+// at most," not high-volume legitimate traffic.
+const interestFormLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  limit: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: loggedHandler("interest_form_rate_limited"),
+});
+
+module.exports = { loginLimiter, registerLimiter, uploadLimiter, interestFormLimiter };
