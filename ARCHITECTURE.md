@@ -155,6 +155,21 @@ Camera → Local Library (IndexedDB) → Recording Pipeline → Cloud → Team L
 
 **What's still local-disk-only**: nothing new — the `uploads/` directory itself still exists as the destination for the `local` provider and as where legacy files are read from. Thumbnail generation is still not implemented (unchanged); the storage abstraction is ready for it whenever it lands.
 
+## Transactional email
+
+`server/services/email.js`'s `sendEmail()` — used by password-reset (`routes/auth.js`) and invitations (`routes/invitations.js`) — is real, generic-SMTP code (`nodemailer`) that has existed since the Teams MVP sprint but was **never actually connected to a real provider**: `SMTP_HOST` was never set in local `.env` or (per the project owner) Render, so every send this project has ever attempted resolved `{ sent: false, reason: "not_configured" }` and only logged a warning. The raw invitation/reset link is always returned in the API response too (that's a deliberate, pre-existing design — "copy/share the link manually" always works regardless of email), so this was never a functional blocker, just an unconfigured integration.
+
+**Resend** (2026-09-04) is the first real provider. Uses Resend's own **SMTP relay**, not their REST API/SDK — this needed zero structural change to `email.js`, since it's already a generic SMTP client; Resend's relay is a documented, fully-supported drop-in for exactly this. Sending domain: `updates.cresamor.com` (verified in Resend, separate from the `cresamor.com` apex Google Workspace already uses for `alex@`/`support@`/`billing@`/`hello@` — keeping transactional volume off the domain real humans' mail reputation depends on).
+
+**Env vars** (Render dashboard only — never local `.env`, never pasted into chat, never committed): `SMTP_HOST=smtp.resend.com`, `SMTP_PORT=465`, `SMTP_SECURE=true`, `SMTP_USER=resend` (Resend's own documented literal SMTP username — not a real account), `SMTP_PASS=<the Resend production API key>`. In Render: `CresamorFilmRoom-3` → **Environment** tab → **Add Environment Variable** for each of the 5 above → Save (Render redeploys automatically). `EMAIL_FROM_ADDRESS`/`EMAIL_REPLY_TO` are optional overrides for the two constants below — safe to leave unset.
+
+**From/Reply-To are fixed in code**, not per-call-site: every transactional email sends as `Cresamor <notifications@updates.cresamor.com>` with `Reply-To: support@cresamor.com` (`DEFAULT_FROM_ADDRESS`/`DEFAULT_REPLY_TO` in `email.js`), env-overridable (`EMAIL_FROM_ADDRESS`/`EMAIL_REPLY_TO`) only so a future change doesn't need a code deploy.
+
+**Manual Resend dashboard setup** (one-time, done by the project owner — same "Claude Code sessions don't have dashboard access" boundary as Cloudflare R2 CORS): a sending-only API key can create sends but can't change domain/account-level settings.
+1. Confirm `updates.cresamor.com` shows fully verified (SPF/DKIM) in Resend's Domains list — already done per the project owner.
+2. Receiving: confirmed independently this session via DNS — no MX record exists for `updates.cresamor.com` (a plain DNS query returns the zone's SOA, not an MX record), consistent with receiving intentionally never having been enabled. Worth a quick glance at Resend's own domain settings to confirm the same, since DNS resolvers can cache.
+3. **Click/open tracking**: Resend's SMTP relay does not expose a per-message way to disable this — it's a domain or account-level dashboard setting. Confirm in Resend's dashboard (the domain's settings, or account-wide sending settings) that click and open tracking are both **off** for `updates.cresamor.com`. I could not verify this from here (not a code-reachable setting, same boundary as step 1/2) — please confirm this directly.
+
 ## Deployment reality
 
 - Render web service (`CresamorFilmRoom-3`) + Render Postgres (`cresamor_db`), both free tier.

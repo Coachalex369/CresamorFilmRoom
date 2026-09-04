@@ -12,9 +12,30 @@
 
   Never logs the full email body (it contains a live invitation/reset
   link, which is a bearer credential) — only the recipient and subject.
+
+  Resend integration: this project never actually had a real SMTP
+  provider configured before (SMTP_HOST was never set anywhere,
+  confirmed empty in both local .env and, per the project owner,
+  Render) — Resend is the first real send path. Uses Resend's own SMTP
+  relay (smtp.resend.com) rather than their REST API/SDK specifically
+  so this file needed zero structural change — same nodemailer
+  transport, same env-var-driven "safe when unconfigured" shape, just
+  pointed at a real provider. See ARCHITECTURE.md for the exact Render
+  env vars and the one-time Resend dashboard setup (domain
+  verification, receiving, click/open tracking — none of which are
+  reachable from a sending-only API key, same "dashboard-only lever"
+  situation as R2 bucket CORS).
 */
 
 const nodemailer = require("nodemailer");
+
+// Fixed sending identity for every transactional email this project
+// sends — not per-call-site configurable, since "reply goes to a real
+// human inbox, from address is the one verified domain" is a blanket
+// policy, not a per-message choice. Env-overridable only so a future
+// provider/address change doesn't require a code deploy.
+const DEFAULT_FROM_ADDRESS = "Cresamor <notifications@updates.cresamor.com>";
+const DEFAULT_REPLY_TO = "support@cresamor.com";
 
 let transporter = null;
 let attemptedInit = false;
@@ -51,7 +72,8 @@ async function sendEmail({ to, subject, html, text }) {
 
   try {
     await transport.sendMail({
-      from: process.env.SMTP_FROM || process.env.SMTP_USER,
+      from: process.env.EMAIL_FROM_ADDRESS || DEFAULT_FROM_ADDRESS,
+      replyTo: process.env.EMAIL_REPLY_TO || DEFAULT_REPLY_TO,
       to,
       subject,
       html,
