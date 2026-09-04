@@ -109,6 +109,42 @@ app.use(
     },
   })
 );
+// Landing page (cresamor.com) interest form: a narrow, hand-written CORS
+// carve-out scoped ONLY to this one path -- deliberately not a second
+// cors() middleware call layered on top of the global one below, since
+// this project's own CORS-fix history (see the connect-src/allowedOrigins
+// comments above) already established that stacking two origin-checking
+// layers on the same request risks one silently inheriting the other's
+// decision depending on header-overwrite order. A plain explicit check
+// has no such ambiguity: cresamor.com/www.cresamor.com are NOT in
+// allowedOrigins below, so the global cors() middleware never sets a
+// header for them at all -- this is the only thing that ever grants
+// them access, and it grants it for this one route alone.
+//
+// MUST be registered BEFORE the global cors() call below, not after --
+// found via direct local testing, not theory: the `cors` package
+// terminates an OPTIONS preflight itself by default (responds and never
+// calls next()), so any route-specific OPTIONS handling registered
+// AFTER the global cors() middleware never runs at all. A real browser's
+// preflight would have failed silently and the interest form would never
+// have worked from the actual landing page, despite the POST-response
+// headers themselves being correct in isolation.
+const LANDING_PAGE_ALLOWED_ORIGINS = ["https://cresamor.com", "https://www.cresamor.com"];
+
+app.use("/api/interest", (req, res, next) => {
+  const origin = req.headers.origin;
+  if (LANDING_PAGE_ALLOWED_ORIGINS.includes(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+    res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  }
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(204);
+  }
+  next();
+});
+
 app.use(cors({ origin: allowedOrigins }));
 app.use(morgan("dev"));
 app.use(express.json({ limit: "100kb" }));
@@ -133,6 +169,7 @@ app.use(require("./routes/teams"));
 app.use(require("./routes/invitations"));
 app.use(require("./routes/schedule"));
 app.use(require("./routes/teamHighlights"));
+app.use(require("./routes/landingInterest"));
 
 // Mobile Recording Upload sprint: real bug found via direct reproduction —
 // videos.js/profile.js's multer fileFilter rejects a bad MIME type via

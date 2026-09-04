@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Cresamor — Your Film. Your Team. Your Way.</title>
+    <meta
+      name="description"
+      content="Cresamor gives coaches the tools to capture, organize, study, and share the moments that move a team forward — with useful experiences for athletes and parents too."
+    />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+
+  <body>
+    <a class="skip-link" href="#main-content">Skip to main content</a>
+
+    <header class="site-header">
+      <div class="site-header-inner">
+        <span class="wordmark">CRESAMOR</span>
+        <a class="header-login-link" href="https://app.cresamor.com">Log In</a>
+      </div>
+    </header>
+
+    <main id="main-content">
+      <!-- HERO -->
+      <section class="hero" aria-labelledby="hero-heading">
+        <div class="hero-inner">
+          <h1 id="hero-heading">Your Film. Your Team. Your Way.</h1>
+          <p class="hero-subhead">
+            Cresamor gives coaches the tools to capture, organize, study, and share the moments that move a team
+            forward — with useful experiences for athletes and parents too.
+          </p>
+          <div class="hero-ctas">
+            <button type="button" class="btn btn-primary" data-scroll-to="interest-form">Become an Early User</button>
+            <a class="btn btn-secondary" href="https://app.cresamor.com">Log In</a>
+          </div>
+          <p class="hero-note">Works on your phone and your computer today.</p>
+        </div>
+      </section>
+
+      <!-- BUILT FOR COACHES -->
+      <section class="section" aria-labelledby="coaches-heading">
+        <div class="section-inner">
+          <h2 id="coaches-heading">Built for coaches</h2>
+          <div class="card-grid">
+            <div class="card">
+              <h3>Record or upload film</h3>
+              <p>Capture game and practice film right from your phone, or upload existing footage — no extra hardware required.</p>
+            </div>
+            <div class="card">
+              <h3>Organize team film</h3>
+              <p>Every film lives with the right team, so your roster always knows exactly where to look.</p>
+            </div>
+            <div class="card">
+              <h3>Review film and create highlights</h3>
+              <p>Watch, draw up plays, and clip the moments worth revisiting — in one continuous flow, no extra steps.</p>
+            </div>
+            <div class="card">
+              <h3>Keep communication and schedules connected</h3>
+              <p>Team messages, direct messages, and your schedule live alongside the film — everything in one place.</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- BENEFITS FOR PARENTS -->
+      <section class="section section-alt" aria-labelledby="parents-heading">
+        <div class="section-inner">
+          <h2 id="parents-heading">Benefits for parents</h2>
+          <ul class="benefit-list">
+            <li>Upload important moments straight from your phone.</li>
+            <li>Contribute video directly to your team's shared Team Highlights.</li>
+            <li>Follow the moments your team chooses to share.</li>
+            <li>Create your own personal highlights from the team content you're permitted to see.</li>
+          </ul>
+        </div>
+      </section>
+
+      <!-- BENEFITS FOR ATHLETES -->
+      <section class="section" aria-labelledby="athletes-heading">
+        <div class="section-inner">
+          <h2 id="athletes-heading">Benefits for athletes</h2>
+          <ul class="benefit-list">
+            <li>Study your film, on your own time.</li>
+            <li>Create personal highlight reels that are yours to keep.</li>
+            <li>Revisit the moments that matter, whenever you want.</li>
+            <li>Stay connected with team film, messages, and schedules — all in one app.</li>
+          </ul>
+        </div>
+      </section>
+
+      <!-- HOW IT WORKS -->
+      <section class="section section-alt" aria-labelledby="how-it-works-heading">
+        <div class="section-inner">
+          <h2 id="how-it-works-heading">How it works</h2>
+          <ol class="steps-list">
+            <li>
+              <span class="step-number" aria-hidden="true">1</span>
+              <div>
+                <h3>Create or join a team</h3>
+                <p>Set up your team in minutes, or accept an invitation to join one already using Cresamor.</p>
+              </div>
+            </li>
+            <li>
+              <span class="step-number" aria-hidden="true">2</span>
+              <div>
+                <h3>Record or upload film</h3>
+                <p>Capture new film right in the app, or bring in footage you already have.</p>
+              </div>
+            </li>
+            <li>
+              <span class="step-number" aria-hidden="true">3</span>
+              <div>
+                <h3>Review, clip, and share highlights</h3>
+                <p>Break down the film, save the highlights that matter, and share them with your team.</p>
+              </div>
+            </li>
+          </ol>
+        </div>
+      </section>
+
+      <!-- EARLY USER OFFER + INTEREST FORM -->
+      <section class="section early-user-section" id="interest-form" aria-labelledby="early-user-heading">
+        <div class="section-inner">
+          <h2 id="early-user-heading">Become an Early User</h2>
+          <p class="early-user-offer">Early Users receive their first 6 months free.</p>
+          <p class="early-user-detail">
+            Cresamor will offer a simple paid plan for teams in the future. We'll show you the full details clearly,
+            with plenty of notice, before anything is ever charged — and we won't ask for payment information today.
+          </p>
+
+          <form id="interest-form-el" class="interest-form" novalidate>
+            <div class="form-row">
+              <label for="field-name">Name</label>
+              <input type="text" id="field-name" name="name" autocomplete="name" required maxlength="200" />
+            </div>
+
+            <div class="form-row">
+              <label for="field-email">Email</label>
+              <input type="email" id="field-email" name="email" autocomplete="email" required maxlength="200" />
+            </div>
+
+            <div class="form-row">
+              <label for="field-role">I am a...</label>
+              <select id="field-role" name="roleOrInterest" required>
+                <option value="" disabled selected>Select one</option>
+                <option value="coach">Coach</option>
+                <option value="athlete">Athlete</option>
+                <option value="parent">Parent</option>
+                <option value="other">Other</option>
+              </select>
+            </div>
+
+            <div class="form-row">
+              <label for="field-sport">Sport <span class="optional-label">(optional)</span></label>
+              <input type="text" id="field-sport" name="sport" maxlength="200" />
+            </div>
+
+            <div class="form-row">
+              <label for="field-team">Team/program name <span class="optional-label">(optional)</span></label>
+              <input type="text" id="field-team" name="teamOrProgram" maxlength="200" />
+            </div>
+
+            <div class="form-row">
+              <label for="field-message">Message <span class="optional-label">(optional)</span></label>
+              <textarea id="field-message" name="message" rows="4" maxlength="2000"></textarea>
+            </div>
+
+            <!-- Honeypot: hidden from real visitors (off-screen, never
+                 focusable via tabindex="-1", never announced via
+                 aria-hidden). A filled-in value means a bot, not a
+                 person. -->
+            <div class="honeypot-field" aria-hidden="true">
+              <label for="field-website">Website</label>
+              <input type="text" id="field-website" name="website" tabindex="-1" autocomplete="off" />
+            </div>
+
+            <button type="submit" class="btn btn-primary interest-submit-btn">Become an Early User</button>
+
+            <p class="form-status" id="interest-form-status" role="status" aria-live="polite"></p>
+          </form>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="site-footer-inner">
+        <div class="footer-contact">
+          <a href="mailto:hello@cresamor.com">hello@cresamor.com</a>
+          <a href="mailto:support@cresamor.com">support@cresamor.com</a>
+        </div>
+        <div class="footer-social" id="footer-social"></div>
+        <p class="footer-copyright">© <span id="footer-year"></span> Cresamor. All rights reserved.</p>
+        <p class="footer-privacy">
+          We only use the information you submit above to respond to your interest in Cresamor and to share
+          relevant updates about early access. We do not sell your information.
+        </p>
+      </div>
+    </footer>
+
+    <script src="./config.js"></script>
+    <script src="./script.js"></script>
+  </body>
+</html>
